@@ -22,6 +22,8 @@ from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from auth_routes import auth_router, init_auth_db
+
 # Google GenAI SDK
 from google import genai
 from google.genai import types
@@ -88,167 +90,6 @@ def run_agent_call(fn):
 def _new_id(prefix="n") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
-
-# ---- auth helpers ----
-def init_db():
-    with db_lock:
-        cur = db_conn.cursor()
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                status TEXT DEFAULT 'active',
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                last_login_at TEXT
-            )
-            """
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS user_quota (
-                user_id INTEGER PRIMARY KEY,
-                credits_total INTEGER DEFAULT 1000,
-                credits_used INTEGER DEFAULT 0,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(user_id) REFERENCES users(id)
-            )
-            """
-        )
-        db_conn.commit()
-
-
-def _dict_row(row: Optional[sqlite3.Row]):
-    return dict(row) if row else None
-
-
-def hash_password(pwd: str) -> str:
-    salted = f"{pwd}:{JWT_SECRET}".encode("utf-8")
-    return hashlib.sha256(salted).hexdigest()
-
-
-def verify_password(plain: str, hashed: str) -> bool:
-    return hash_password(plain) == hashed
-
-
-def get_user_by_email(email: str):
-    with db_lock:
-        cur = db_conn.cursor()
-        cur.execute("SELECT * FROM users WHERE email = ?", (email.lower(),))
-        return _dict_row(cur.fetchone())
-
-
-def get_user_by_id(uid: int):
-    with db_lock:
-        cur = db_conn.cursor()
-        cur.execute("SELECT * FROM users WHERE id = ?", (uid,))
-        return _dict_row(cur.fetchone())
-
-
-def ensure_quota_record(user_id: int):
-    with db_lock:
-        cur = db_conn.cursor()
-        cur.execute("SELECT 1 FROM user_quota WHERE user_id = ?", (user_id,))
-        exists = cur.fetchone()
-        if not exists:
-            cur.execute(
-                "INSERT INTO user_quota (user_id, credits_total, credits_used, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
-                (user_id, 1000, 0),
-            )
-            db_conn.commit()
-
-
-def create_user(email: str, password: str):
-    with db_lock:
-        cur = db_conn.cursor()
-        cur.execute(
-            "INSERT INTO users (email, password_hash, status, created_at, last_login_at) VALUES (?, ?, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-            (email.lower(), hash_password(password)),
-        )
-        db_conn.commit()
-        user_id = cur.lastrowid
-    ensure_quota_record(user_id)
-    return get_user_by_id(user_id)
-
-
-def update_last_login(user_id: int):
-    with db_lock:
-        cur = db_conn.cursor()
-        cur.execute("UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?", (user_id,))
-        db_conn.commit()
-
-
-def get_quota(user_id: int):
-    with db_lock:
-        cur = db_conn.cursor()
-        cur.execute("SELECT credits_total, credits_used, updated_at FROM user_quota WHERE user_id = ?", (user_id,))
-        return _dict_row(cur.fetchone()) or {"credits_total": 0, "credits_used": 0, "updated_at": None}
-
-
-def serialize_user(u: Dict[str, Any]):
-    if not u:
-        return None
-    return {
-        "id": u["id"],
-        "email": u["email"],
-        "status": u.get("status"),
-        "created_at": u.get("created_at"),
-        "last_login_at": u.get("last_login_at"),
-    }
-
-
-def base64url_encode(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("utf-8")
-
-
-def base64url_decode(data: str) -> bytes:
-    padding = "=" * ((4 - len(data) % 4) % 4)
-    return base64.urlsafe_b64decode(data + padding)
-
-
-def create_access_token(sub: int, expires_delta: Optional[timedelta] = None) -> str:
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    payload = {"sub": sub, "exp": int(expire.timestamp())}
-    header = {"alg": JWT_ALG, "typ": "JWT"}
-    header_b64 = base64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
-    payload_b64 = base64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-    signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
-    signature = hmac.new(JWT_SECRET.encode("utf-8"), signing_input, hashlib.sha256).digest()
-    return f"{header_b64}.{payload_b64}.{base64url_encode(signature)}"
-
-
-def decode_access_token(token: str) -> Dict[str, Any]:
-    try:
-        parts = token.split(".")
-        if len(parts) != 3:
-            raise ValueError("Invalid token format")
-        header_b64, payload_b64, signature_b64 = parts
-        signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
-        expected_sig = hmac.new(JWT_SECRET.encode("utf-8"), signing_input, hashlib.sha256).digest()
-        if not hmac.compare_digest(expected_sig, base64url_decode(signature_b64)):
-            raise ValueError("Invalid signature")
-        payload = json.loads(base64url_decode(payload_b64))
-        if payload.get("exp") and int(payload["exp"]) < int(time.time()):
-            raise ValueError("Token expired")
-        return payload
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-
-def get_current_user(request: Request):
-    auth = request.headers.get("Authorization") or ""
-    if not auth.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing credentials")
-    token = auth.split(" ", 1)[1].strip()
-    payload = decode_access_token(token)
-    user = get_user_by_id(int(payload.get("sub")))
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-    if user.get("status") != "active":
-        raise HTTPException(status_code=403, detail="User is inactive")
-    ensure_quota_record(user["id"])
-    return user
 
 # ==========================================
 # Prompt Logger & Analyzer
@@ -387,7 +228,7 @@ except Exception as e:
 # ==========================================
 
 app = FastAPI(title="BananaFlow - 电商智能图像工作台", version="3.3")
-init_db()
+init_auth_db()
 
 app.add_middleware(
     CORSMiddleware,
@@ -396,6 +237,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(auth_router)
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):

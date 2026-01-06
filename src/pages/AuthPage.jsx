@@ -8,6 +8,26 @@ const gradientBg = "bg-[radial-gradient(circle_at_20%_20%,rgba(147,51,234,0.15),
 const inputStyle =
   "w-full bg-slate-900/60 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500 transition";
 
+const ENTERPRISE_DOMAIN = "dayukeji.com";
+const PUBLIC_EMAIL_DOMAINS = new Set([
+  "gmail.com",
+  "outlook.com",
+  "hotmail.com",
+  "live.com",
+  "yahoo.com",
+  "icloud.com",
+  "qq.com",
+  "163.com",
+  "126.com",
+  "proton.me",
+  "yeah.net",
+]);
+
+const getEmailDomain = (email) => {
+  if (!email || !email.includes("@")) return "";
+  return email.split("@").pop().toLowerCase();
+};
+
 export default function AuthPage({ mode = "login" }) {
   const navigate = useNavigate();
   const { login, register } = useAuth();
@@ -15,6 +35,11 @@ export default function AuthPage({ mode = "login" }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  const emailDomain = getEmailDomain(email);
+  const isPublicDomain = emailDomain && PUBLIC_EMAIL_DOMAINS.has(emailDomain);
+  const isEnterpriseDomain = emailDomain === ENTERPRISE_DOMAIN;
+  const isRegisterBlocked = !isEnterpriseDomain || isPublicDomain;
 
   const isLogin = mode === "login";
 
@@ -70,11 +95,11 @@ export default function AuthPage({ mode = "login" }) {
           </div>
         </div>
 
-        <div className="relative rounded-2xl border border-slate-800/70 bg-slate-900/60 backdrop-blur-lg p-8 shadow-2xl shadow-purple-900/40">
-          <div className="flex items-center justify-between mb-8">
-            <div>
-              <div className="text-2xl font-bold mb-1">{isLogin ? "欢迎回来" : "创建账户"}</div>
-              <div className="text-sm text-slate-400">{isLogin ? "登录后进入工作台" : "注册后自动登录"}</div>
+      <div className="relative rounded-2xl border border-slate-800/70 bg-slate-900/60 backdrop-blur-lg p-8 shadow-2xl shadow-purple-900/40">
+        <div className="flex items-center justify-between mb-8">
+          <div>
+            <div className="text-2xl font-bold mb-1">{isLogin ? "欢迎回来" : "创建账户"}</div>
+            <div className="text-sm text-slate-400">{isLogin ? "登录后进入工作台" : "注册后自动登录"}</div>
             </div>
             <div className="px-3 py-1 rounded-full bg-purple-600/20 text-purple-200 text-xs border border-purple-500/20">
               AUTH · SECURE
@@ -97,6 +122,17 @@ export default function AuthPage({ mode = "login" }) {
               </div>
             </label>
 
+            {!isLogin && (
+              <div className="text-xs">
+                <div className={`mt-1 ${isPublicDomain || (emailDomain && !isEnterpriseDomain) ? "text-amber-300" : "text-slate-500"}`}>
+                  仅支持使用公司邮箱（{ENTERPRISE_DOMAIN}）注册，公共邮箱将被拒绝。
+                </div>
+                {isPublicDomain && (
+                  <div className="text-red-300 mt-1">检测到公共邮箱域名，请改用企业邮箱。</div>
+                )}
+              </div>
+            )}
+
             <label className="space-y-2 block">
               <span className="text-xs text-slate-400">密码</span>
               <div className="relative">
@@ -117,7 +153,7 @@ export default function AuthPage({ mode = "login" }) {
 
             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || (!isLogin && isRegisterBlocked)}
               className="w-full py-2.5 rounded-lg bg-purple-600 hover:bg-purple-500 transition font-semibold text-sm flex items-center justify-center gap-2 shadow-lg shadow-purple-900/30 disabled:opacity-60"
             >
               {loading ? (
