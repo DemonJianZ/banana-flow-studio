@@ -4,16 +4,21 @@ import json
 import uuid
 from typing import Dict, Any, Optional, List
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response, Depends
 from pydantic import BaseModel, Field
 from google.genai import types
 
-from core.config import MODEL_GEMINI, MODEL_DOUBAO
+
+from core.config import MODEL_GEMINI, MODEL_DOUBAO, MODEL_AGENT, MODEL_COMFYUI_OVERLAYTEXT, MODEL_COMFYUI_RMBG
 from core.logging import sys_logger
+from auth_routes import get_current_user
+from storage.usage import record_usage
 
 from schemas.api import (
     Text2ImgRequest, Text2ImgResponse,
     MultiImageRequest, MultiImageResponse,
+    OverlayTextRequest, OverlayTextResponse,
+    RmbgRequest, RmbgResponse,
     EditRequest, EditResponse,
     Img2VideoRequest, Img2VideoResponse,
     AgentRequest,
@@ -23,6 +28,7 @@ from storage.prompt_log import PromptLogger, LogAnalyzer
 from services.genai_client import call_genai_retry
 from services.ark import call_doubao_image_gen
 from services.ark_video import generate_video_from_image, VideoGenError
+from services.comfyui import run_overlaytext_workflow, run_rmbg_workflow
 
 from utils.images import parse_data_url, bytes_to_data_url, get_image_from_response
 from prompts.business import build_business_prompt
@@ -42,7 +48,7 @@ analyzer = LogAnalyzer("logs/prompts.jsonl")
 # =========================================================
 
 @router.post("/api/text2img", response_model=Text2ImgResponse)
-def text_to_image(req: Text2ImgRequest, request: Request):
+def text_to_image(req: Text2ImgRequest, request: Request, current_user=Depends(get_current_user)):
     req_id = request.state.req_id
     selected_model = req.model or MODEL_GEMINI
     t0 = time.time()
@@ -86,6 +92,7 @@ def text_to_image(req: Text2ImgRequest, request: Request):
         if not img_bytes:
             raise RuntimeError("No image returned")
 
+        output_data_url = bytes_to_data_url(img_bytes)
         prompt_logger.log(
             req_id,
             "text2img",
@@ -94,17 +101,33 @@ def text_to_image(req: Text2ImgRequest, request: Request):
             {"model": selected_model, "temp": req.temperature, "size": req.size, "ar": req.aspect_ratio},
             {"file": "mem"},
             time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            output_full={"images": [output_data_url]},
         )
+        record_usage(current_user["id"], selected_model)
 
-        return Text2ImgResponse(images=[bytes_to_data_url(img_bytes)])
+        return Text2ImgResponse(images=[output_data_url])
 
     except Exception as e:
         sys_logger.error(f"[{req_id}] Text2Img Error: {e}")
+        prompt_logger.log(
+            req_id,
+            "text2img",
+            req.model_dump(),
+            req.prompt,
+            {"model": selected_model, "temp": req.temperature, "size": req.size, "ar": req.aspect_ratio},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            error=str(e),
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/api/multi_image_generate", response_model=MultiImageResponse)
-def multi_image_generate(req: MultiImageRequest, request: Request):
+def multi_image_generate(req: MultiImageRequest, request: Request, current_user=Depends(get_current_user)):
     req_id = request.state.req_id
     t0 = time.time()
 
@@ -135,6 +158,7 @@ def multi_image_generate(req: MultiImageRequest, request: Request):
         if not img_bytes:
             raise RuntimeError("No image returned")
 
+        output_data_url = bytes_to_data_url(img_bytes)
         prompt_logger.log(
             req_id,
             "multi_image_generate",
@@ -143,16 +167,164 @@ def multi_image_generate(req: MultiImageRequest, request: Request):
             {"temperature": req.temperature, "ar": req.aspect_ratio},
             {"file": "mem"},
             time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            output_full={"images": [output_data_url]},
         )
-        return MultiImageResponse(image=bytes_to_data_url(img_bytes))
+        record_usage(current_user["id"], MODEL_GEMINI)
+        return MultiImageResponse(image=output_data_url)
 
     except Exception as e:
         sys_logger.error(f"[{req_id}] MultiImage Error: {e}")
+        prompt_logger.log(
+            req_id,
+            "multi_image_generate",
+            req.model_dump(),
+            req.prompt,
+            {"temperature": req.temperature, "ar": req.aspect_ratio},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/overlaytext", response_model=OverlayTextResponse)
+def overlay_text(req: OverlayTextRequest, request: Request, current_user=Depends(get_current_user)):
+    req_id = request.state.req_id
+    t0 = time.time()
+
+    try:
+        img_bytes = run_overlaytext_workflow(
+            req_id=req_id,
+            image_data_url=req.image,
+            text=req.text,
+            text_color=req.text_color,
+            highlight_color=req.highlight_color,
+            highlight_colors=req.highlight_colors,
+            highlight_text=req.highlight_text,
+            highlight_texts=req.highlight_texts,
+            bold_text=req.bold_text,
+            bold_texts=req.bold_texts,
+            bold_color=req.bold_color,
+            bold_colors=req.bold_colors,
+            bold_size_delta=req.bold_size_delta,
+            bold_strength=req.bold_strength,
+            use_bg_color=bool(req.use_bg_color),
+            bg_color=req.bg_color,
+            size=req.size,
+            aspect_ratio=req.aspect_ratio,
+            font_name=req.font_name,
+            font_size=req.font_size,
+            highlight_opacity=req.highlight_opacity,
+            highlight_padding=req.highlight_padding,
+            line_spacing=req.line_spacing,
+            margins=req.margins,
+        )
+
+        if not img_bytes:
+            raise RuntimeError("No image returned")
+
+        output_data_url = bytes_to_data_url(img_bytes)
+        prompt_logger.log(
+            req_id,
+            "overlaytext",
+            req.model_dump(),
+            req.text,
+            {
+                "model": MODEL_COMFYUI_OVERLAYTEXT,
+                "text_color": req.text_color,
+                "highlight_color": req.highlight_color,
+                "highlight_text": req.highlight_text,
+                "bold_text": req.bold_text,
+                "bold_color": req.bold_color,
+                "bold_size_delta": req.bold_size_delta,
+                "bg_color": req.bg_color,
+                "use_bg_color": req.use_bg_color,
+                "size": req.size,
+                "aspect_ratio": req.aspect_ratio,
+                "font_name": req.font_name,
+                "font_size": req.font_size,
+            },
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            output_full={"images": [output_data_url]},
+        )
+        record_usage(current_user["id"], MODEL_COMFYUI_OVERLAYTEXT)
+        return OverlayTextResponse(image=output_data_url)
+
+    except Exception as e:
+        sys_logger.error(f"[{req_id}] OverlayText Error: {e}")
+        prompt_logger.log(
+            req_id,
+            "overlaytext",
+            req.model_dump(),
+            req.text,
+            {"model": MODEL_COMFYUI_OVERLAYTEXT},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/rmbg", response_model=RmbgResponse)
+def remove_background(req: RmbgRequest, request: Request, current_user=Depends(get_current_user)):
+    req_id = request.state.req_id
+    t0 = time.time()
+
+    try:
+        img_bytes = run_rmbg_workflow(
+            req_id=req_id,
+            image_data_url=req.image,
+            size=req.size,
+            aspect_ratio=req.aspect_ratio,
+        )
+
+        if not img_bytes:
+            raise RuntimeError("No image returned")
+
+        output_data_url = bytes_to_data_url(img_bytes)
+        prompt_logger.log(
+            req_id,
+            "rmbg",
+            req.model_dump(),
+            "",
+            {"model": MODEL_COMFYUI_RMBG, "size": req.size, "ar": req.aspect_ratio},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            output_full={"images": [output_data_url]},
+        )
+        record_usage(current_user["id"], MODEL_COMFYUI_RMBG)
+        return RmbgResponse(image=output_data_url)
+
+    except Exception as e:
+        sys_logger.error(f"[{req_id}] RMBG Error: {e}")
+        prompt_logger.log(
+            req_id,
+            "rmbg",
+            req.model_dump(),
+            "",
+            {"model": MODEL_COMFYUI_RMBG},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            error=str(e),
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/api/edit", response_model=EditResponse)
-def edit_image(req: EditRequest, request: Request):
+def edit_image(req: EditRequest, request: Request, current_user=Depends(get_current_user)):
     req_id = request.state.req_id
     t0 = time.time()
 
@@ -192,6 +364,7 @@ def edit_image(req: EditRequest, request: Request):
         if not img_bytes:
             raise RuntimeError("No image returned")
 
+        output_data_url = bytes_to_data_url(img_bytes)
         prompt_logger.log(
             req_id,
             req.mode,
@@ -200,18 +373,34 @@ def edit_image(req: EditRequest, request: Request):
             {"model": selected_model, "has_ref": has_ref},
             {"file": "mem"},
             time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            output_full={"images": [output_data_url]},
         )
-        return EditResponse(image=bytes_to_data_url(img_bytes))
+        record_usage(current_user["id"], selected_model)
+        return EditResponse(image=output_data_url)
 
     except Exception as e:
         sys_logger.error(f"[{req_id}] Edit Error ({req.mode}): {e}")
-        prompt_logger.log(req_id, req.mode, req.model_dump(), "ERROR", {}, {}, time.time() - t0, str(e))
+        prompt_logger.log(
+            req_id,
+            req.mode,
+            req.model_dump(),
+            "ERROR",
+            {"model": selected_model, "has_ref": has_ref},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            error=str(e),
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/api/img2video", response_model=Img2VideoResponse)
-def img_to_video(req: Img2VideoRequest, request: Request):
+def img_to_video(req: Img2VideoRequest, request: Request, current_user=Depends(get_current_user)):
     req_id = request.state.req_id
+    t0 = time.time()
     try:
         selected_model = req.model or "Doubao-Seedance-1.0-pro"
         print("--------选择的模型-------：", selected_model)
@@ -231,14 +420,63 @@ def img_to_video(req: Img2VideoRequest, request: Request):
             ratio=req.ratio,
             seed = req.seed,
         )
+        prompt_logger.log(
+            req_id,
+            "img2video",
+            req.model_dump(),
+            req.prompt or "",
+            {"model": selected_model, "duration": req.duration, "ratio": req.ratio},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            output_full={"videos": [result]},
+        )
+        record_usage(current_user["id"], selected_model)
         return Img2VideoResponse(image=result)
-
+    
     except TimeoutError as e:
+        prompt_logger.log(
+            req_id,
+            "img2video",
+            req.model_dump(),
+            req.prompt or "",
+            {"model": req.model, "duration": req.duration, "ratio": req.ratio},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            error=str(e),
+        )
         raise HTTPException(status_code=504, detail=str(e))
     except VideoGenError as e:
+        prompt_logger.log(
+            req_id,
+            "img2video",
+            req.model_dump(),
+            req.prompt or "",
+            {"model": req.model, "duration": req.duration, "ratio": req.ratio},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            error=str(e),
+        )
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         sys_logger.error(f"[{req_id}] VideoGen Error: {e}")
+        prompt_logger.log(
+            req_id,
+            "img2video",
+            req.model_dump(),
+            req.prompt or "",
+            {"model": req.model, "duration": req.duration, "ratio": req.ratio},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            error=str(e),
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -247,7 +485,7 @@ def img_to_video(req: Img2VideoRequest, request: Request):
 # =========================================================
 
 @router.post("/api/agent/plan", response_model=Dict[str, Any])
-def agent_plan(req: AgentRequest, request: Request, response: Response) -> Dict[str, Any]:
+def agent_plan(req: AgentRequest, request: Request, response: Response, current_user=Depends(get_current_user)) -> Dict[str, Any]:
     """
     返回结构必须是：
     {
@@ -257,6 +495,7 @@ def agent_plan(req: AgentRequest, request: Request, response: Response) -> Dict[
     }
     """
     req_id = getattr(request.state, "req_id", "noid")
+    t0 = time.time()
 
     # 多画布：优先 canvas_id，其次 thread_id，最后兜底
     canvas_id = (getattr(req, "canvas_id", None) or "").strip()
@@ -277,12 +516,36 @@ def agent_plan(req: AgentRequest, request: Request, response: Response) -> Dict[
         out = agent_plan_impl(req, request)
         if out is None:
             raise RuntimeError("agent_plan_impl returned None")
+        prompt_logger.log(
+            req_id,
+            "agent_plan",
+            req.model_dump(),
+            req.prompt or "",
+            {"model": MODEL_AGENT, "thread_id": thread_id},
+            {"patch_len": len(out.get("patch", [])) if isinstance(out, dict) else 0},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+        )
+        record_usage(current_user["id"], MODEL_AGENT)
         return out
 
     except HTTPException:
         raise
     except Exception as e:
         sys_logger.error(f"[{req_id}] /api/agent/plan error: {e}")
+        prompt_logger.log(
+            req_id,
+            "agent_plan",
+            req.model_dump(),
+            req.prompt or "",
+            {"model": MODEL_AGENT, "thread_id": thread_id},
+            {"patch_len": 0},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            error=str(e),
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -596,5 +859,5 @@ def get_stats():
 
 
 @router.get("/api/history")
-def get_history():
-    return analyzer.get_history()
+def get_history(current_user=Depends(get_current_user)):
+    return analyzer.get_history(user_id=current_user["id"], limit=20)

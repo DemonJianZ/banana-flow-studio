@@ -1,6 +1,6 @@
 import os, json, re, collections
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Optional
 from core.config import LOG_DIR
 from core.logging import sys_logger
 
@@ -11,12 +11,25 @@ class PromptLogger:
             with open(self.filepath, "w", encoding="utf-8") as f:
                 pass
 
-    def log(self, req_id: str, mode: str, inputs: Dict, final_prompt: str, config: Dict,
-            output_meta: Dict, latency: float, error: str = None):
+    def log(
+        self,
+        req_id: str,
+        mode: str,
+        inputs: Dict,
+        final_prompt: str,
+        config: Dict,
+        output_meta: Dict,
+        latency: float,
+        error: str = None,
+        user_id: Optional[int] = None,
+        inputs_full: Optional[Dict] = None,
+        output_full: Optional[Dict] = None,
+    ):
         entry = {
             "timestamp": datetime.now().isoformat(),
             "request_id": req_id,
             "mode": mode,
+            "user_id": user_id,
             "inputs": self._sanitize(inputs),
             "final_prompt": final_prompt,
             "config": config,
@@ -24,6 +37,10 @@ class PromptLogger:
             "latency_sec": round(latency, 3),
             "error": error,
         }
+        if inputs_full is not None:
+            entry["inputs_full"] = inputs_full
+        if output_full is not None:
+            entry["output_full"] = output_full
         try:
             with open(self.filepath, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -62,19 +79,50 @@ class LogAnalyzer:
             return []
         return lines[-limit:]
 
-    def get_history(self, limit=20):
-        logs = self._read_logs(300)
+    def get_history(self, limit=20, user_id: Optional[int] = None):
+        logs = self._read_logs(1000)
         history = []
         for entry in reversed(logs):
             if entry.get("error"):
                 continue
-            inputs = entry.get("inputs") or {}
+            if entry.get("mode") == "agent_plan":
+                continue
+            if user_id is not None and entry.get("user_id") != user_id:
+                continue
+            inputs = entry.get("inputs_full") or entry.get("inputs") or {}
+            outputs = entry.get("output_full") or entry.get("output") or {}
+            templates = {}
+            model = None
+            if isinstance(inputs, dict):
+                mode = entry.get("mode")
+                if mode in ["text2img", "multi_image_generate"]:
+                    if inputs.get("size"):
+                        templates["size"] = inputs.get("size")
+                    if inputs.get("aspect_ratio"):
+                        templates["aspect_ratio"] = inputs.get("aspect_ratio")
+                    model = inputs.get("model")
+                elif mode == "img2video":
+                    if inputs.get("duration") is not None:
+                        templates["duration"] = inputs.get("duration")
+                    if inputs.get("resolution"):
+                        templates["resolution"] = inputs.get("resolution")
+                    if inputs.get("ratio"):
+                        templates["ratio"] = inputs.get("ratio")
+                    model = inputs.get("model")
+            prompt_value = ""
+            if isinstance(inputs, dict):
+                prompt_value = inputs.get("prompt") or inputs.get("text") or ""
             history.append({
                 "id": entry.get("request_id"),
                 "time": entry.get("timestamp"),
                 "mode": entry.get("mode"),
-                "prompt": (inputs.get("prompt") if isinstance(inputs, dict) else "") or "",
+                "prompt": prompt_value or "",
                 "note": "",
+                "templates": templates,
+                "model": model,
+                "final_prompt": entry.get("final_prompt") or "",
+                "inputs": inputs if isinstance(inputs, dict) else {},
+                "outputs": outputs if isinstance(outputs, dict) else {},
             })
             if len(history) >= limit:
                 break

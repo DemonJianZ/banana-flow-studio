@@ -26,6 +26,7 @@ import {
   AlertCircle,
   ChevronRight,
   ChevronDown,
+  ChevronUp,
   Info,
   Settings2,
   History,
@@ -55,8 +56,11 @@ import {
   Layout,
   Send,
   Bot,
+  Scan,
+  Scissors,
 } from "lucide-react";
 import { useAuth } from "../auth/AuthProvider";
+import { useNavigate } from "../router";
 
 // ==========================================
 // Config & Constants
@@ -209,7 +213,7 @@ const PROMPT_TEMPLATES = {
   },
   img2video: {
     categories: [
-      { name: "画幅比例", key: "ratio", options: ["16:9", "9:16", "3:4", "adaptive"] },
+      { name: "画幅比例", key: "ratio", options: ["16:9", "9:16", "3:4", "21:9", "adaptive"] },
     ],
   },
 };
@@ -219,6 +223,7 @@ const ASPECT_RATIOS = [
   { label: "4:3", w: 32, h: 24 },
   { label: "3:4", w: 24, h: 32 },
   { label: "16:9", w: 40, h: 22 },
+  { label: "21:9", w: 44, h: 20 },
   { label: "9:16", w: 22, h: 40 },
 ];
 
@@ -966,7 +971,7 @@ const NodeComponent = ({
   let title = "Node";
   if (isInput) title = `输入 (${node.data.images?.length || 0})`;
   if (isOutput) title = `输出 (${node.data.images?.length || 0})`;
-  if (isProcessor) title = TOOL_CARDS[node.data.mode]?.name || "AI 处理器";
+  if (isProcessor) title = TOOL_CARDS[node.data.mode]?.name || "图片生成";
   if (isPostProcessor) title = TOOL_CARDS[node.data.mode]?.name || "后期增强";
   if (isVideoGen) title = "视频生成";
   if (node.type === NODE_TYPES.TEXT_INPUT) title = "Prompt";
@@ -1346,6 +1351,7 @@ const newCanvasId = () => "canvas_" + Math.random().toString(36).slice(2, 12);
 
 const Workbench = () => {
   const { user, logout, apiFetch } = useAuth();
+  const navigate = useNavigate();
   const [nodes, setNodes] = useState([]);
   const [connections, setConnections] = useState([]);
   const [history, setHistory] = useState([]);
@@ -1375,6 +1381,7 @@ const Workbench = () => {
   const [showHistoryPanel, setShowHistoryPanel] = useState(false);
   const [activeHistoryTab, setActiveHistoryTab] = useState("recent");
   const [apiHistory, setApiHistory] = useState([]);
+  const [expandedHistoryIds, setExpandedHistoryIds] = useState(new Set());
   const [apiStats, setApiStats] = useState(null);
   const [runToast, setRunToast] = useState(null);
 
@@ -1770,9 +1777,9 @@ const handleNodeMouseDown = (e, nid) => {
       [NODE_TYPES.INPUT]: { images: [] },
       [NODE_TYPES.TEXT_INPUT]: { text: "" },
       [NODE_TYPES.PROCESSOR]: {
-        mode: "bg_replace",
+        mode: "multi_image_generate",
         prompt: "",
-        templates: { style: "", vibe: "", note: "", size: "1024x1024", aspect_ratio: "1:1" },
+        templates: { size: "1024x1024", aspect_ratio: "1:1", note: "" },
         batchSize: 1,
         uploadedImages: [],
         status: "idle",
@@ -2087,6 +2094,46 @@ const createConnectedImg2ImgBranch = useCallback(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showHistoryPanel]);
 
+  const normalizeHistoryOutputs = (outputs) => {
+    if (!outputs) return [];
+    if (Array.isArray(outputs)) return outputs.map((url) => ({ label: "输出", url }));
+    const items = [];
+    if (Array.isArray(outputs.images)) outputs.images.forEach((url, i) => items.push({ label: `输出图${outputs.images.length > 1 ? ` #${i + 1}` : ""}`, url }));
+    if (Array.isArray(outputs.videos)) outputs.videos.forEach((url, i) => items.push({ label: `输出视频${outputs.videos.length > 1 ? ` #${i + 1}` : ""}`, url }));
+    if (typeof outputs.image === "string") items.push({ label: "输出图", url: outputs.image });
+    if (typeof outputs.video === "string") items.push({ label: "输出视频", url: outputs.video });
+    return items;
+  };
+
+  const normalizeHistoryInputs = (inputs) => {
+    if (!inputs || typeof inputs !== "object") return [];
+    const items = [];
+    const pushList = (label, list) => {
+      if (!Array.isArray(list)) return;
+      list.forEach((url, i) => {
+        if (url) items.push({ label: `${label}${list.length > 1 ? ` #${i + 1}` : ""}`, url });
+      });
+    };
+    const pushOne = (label, url) => {
+      if (url) items.push({ label, url });
+    };
+    pushList("输入图", inputs.images);
+    pushOne("输入图", inputs.image);
+    pushOne("参考图", inputs.ref_image);
+    pushOne("背景图", inputs.background_image);
+    pushOne("尾帧", inputs.last_frame_image);
+    pushOne("风格图", inputs.style_image);
+    return items;
+  };
+
+  const formatHistoryParams = (inputs) => {
+    if (!inputs || typeof inputs !== "object") return [];
+    const exclude = new Set(["image", "images", "ref_image", "background_image", "last_frame_image", "style_image", "prompt", "text"]);
+    return Object.entries(inputs)
+      .filter(([key, value]) => !exclude.has(key) && value !== undefined && value !== null && value !== "")
+      .map(([key, value]) => ({ key, value }));
+  };
+
   const applyHistoryConfig = (item) => {
     const targetCategory = TOOL_CARDS[item.mode]?.category;
     const targetType = targetCategory === "enhance" ? NODE_TYPES.POST_PROCESSOR : targetCategory === "video" ? NODE_TYPES.VIDEO_GEN : NODE_TYPES.PROCESSOR;
@@ -2095,9 +2142,53 @@ const createConnectedImg2ImgBranch = useCallback(
       alert(`请先在画布上选中一个匹配的节点，再点击复用。`);
       return;
     }
+    const targetNode = nodes.find((n) => n.id === targetNodeId);
+    const nextTemplates = {
+      ...(targetNode?.data?.templates || {}),
+      ...(item.templates || {}),
+      note: item.prompt || "",
+    };
     pushHistory();
-    updateNodeData(targetNodeId, { mode: item.mode, prompt: item.prompt, templates: { note: item.prompt } });
+    updateNodeData(targetNodeId, {
+      mode: item.mode,
+      prompt: item.prompt,
+      templates: nextTemplates,
+      model: item.model || targetNode?.data?.model,
+    });
     setShowHistoryPanel(false);
+  };
+
+  const renderHistoryMedia = (media, title) => {
+    if (!media || media.length === 0) {
+      return <div className="w-full h-28 rounded-lg border border-dashed border-slate-800 flex items-center justify-center text-[11px] text-slate-600">暂无{title}</div>;
+    }
+    return (
+      <div className="grid grid-cols-2 gap-2">
+        {media.map((item, idx) => {
+          const isVideo = isVideoContent(item.url);
+          return (
+            <button
+              key={`${title}-${idx}`}
+              type="button"
+              onClick={() => setPreviewImage(item.url)}
+              className="relative block w-full h-28 rounded-lg border border-slate-800 overflow-hidden bg-slate-950"
+              title="点击放大预览"
+            >
+              {isVideo ? (
+                <VideoPlayer src={item.url} className="w-full h-full object-cover" controls />
+              ) : (
+                <img src={item.url} alt={item.label || title} className="w-full h-full object-cover" />
+              )}
+              {item.label && (
+                <span className="absolute left-1 top-1 text-[10px] px-1.5 py-0.5 rounded bg-black/60 text-white">
+                  {item.label}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    );
   };
 
   const handleRunClick = () => {
@@ -2405,6 +2496,13 @@ const createConnectedImg2ImgBranch = useCallback(
           </div>
 
           <button
+            onClick={() => setShowHistoryPanel(true)}
+            className="flex items-center gap-1 px-2 py-1 rounded text-[10px] border transition-colors bg-slate-800 text-slate-300 border-transparent hover:border-slate-700 hover:text-white"
+          >
+            <History className="w-3 h-3" /> 历史记录
+          </button>
+
+          <button
             onClick={() => setIsDemoMode(!isDemoMode)}
             className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] border transition-colors ${isDemoMode ? "bg-blue-900/30 text-blue-300 border-blue-800" : "bg-slate-800 text-slate-500 border-transparent hover:border-slate-700"}`}
           >
@@ -2465,8 +2563,8 @@ const createConnectedImg2ImgBranch = useCallback(
         </div>
       )}
 
-      {/* Agent Input Bar */}
-      <AgentInputBar onSend={handleAgentCommand} isLoading={isAgentThinking} />
+      {/* Agent Input Bar (temporarily hidden) */}
+      {false && <AgentInputBar onSend={handleAgentCommand} isLoading={isAgentThinking} />}
 
       <div className="flex-1 flex relative">
         {/* Sidebar */}
@@ -2474,10 +2572,70 @@ const createConnectedImg2ImgBranch = useCallback(
           <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">工具箱</div>
           <SidebarBtn icon={MousePointer2} label="Prompt 输入" desc="纯文本提示词" onClick={() => addNode(NODE_TYPES.TEXT_INPUT)} color="text-yellow-400" bg="bg-yellow-500/10" />
           <SidebarBtn icon={Images} label="批量图片上传" desc="主商品图/素材" onClick={() => addNode(NODE_TYPES.INPUT)} color="text-blue-400" bg="bg-blue-500/10" />
-          <SidebarBtn icon={Wand2} label="AI 处理器" desc="背景/手势/生成" onClick={() => addNode(NODE_TYPES.PROCESSOR)} color="text-purple-400" bg="bg-purple-500/10" />
+          <SidebarBtn icon={Wand2} label="图片生成" desc="背景/手势/生成" onClick={() => addNode(NODE_TYPES.PROCESSOR)} color="text-purple-400" bg="bg-purple-500/10" />
           <SidebarBtn icon={Palette} label="后期增强" desc="光影精修/放大" onClick={() => addNode(NODE_TYPES.POST_PROCESSOR)} color="text-cyan-400" bg="bg-cyan-500/10" />
           <SidebarBtn icon={Film} label="视频生成" desc="图生视频/动效" onClick={() => addNode(NODE_TYPES.VIDEO_GEN)} color="text-rose-400" bg="bg-rose-500/10" />
           <SidebarBtn icon={Download} label="结果输出" desc="预览与下载" onClick={() => addNode(NODE_TYPES.OUTPUT)} color="text-green-400" bg="bg-green-500/10" />
+
+          <div className="mt-4 pt-3 border-t border-slate-800">
+            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">页面</div>
+            <SidebarBtn
+              icon={ImagePlus}
+              label="流水线换脸"
+              desc="批量替换主图人脸"
+              onClick={() => navigate("/app/face-swap")}
+              color="text-pink-400"
+              bg="bg-pink-500/10"
+            />
+            <SidebarBtn
+              icon={Layers}
+              label="批量换背景"
+              desc="批量替换主图背景"
+              onClick={() => navigate("/app/bg-swap")}
+              color="text-emerald-400"
+              bg="bg-emerald-500/10"
+            />
+            <SidebarBtn
+              icon={ShoppingBag}
+              label="批量换装"
+              desc="批量替换主图服装"
+              onClick={() => navigate("/app/outfit-swap")}
+              color="text-orange-400"
+              bg="bg-orange-500/10"
+            />
+            <SidebarBtn
+              icon={Clapperboard}
+              label="批量动图"
+              desc="单图生成短视频"
+              onClick={() => navigate("/app/batch-video")}
+              color="text-sky-400"
+              bg="bg-sky-500/10"
+            />
+            <SidebarBtn
+              icon={MessageSquare}
+              label="批量花字"
+              desc="批量添加花字文案"
+              onClick={() => navigate("/app/batch-wordart")}
+              color="text-fuchsia-400"
+              bg="bg-fuchsia-500/10"
+            />
+            <SidebarBtn
+              icon={Scan}
+              label="特征提取"
+              desc="面部/背景/服装首饰"
+              onClick={() => navigate("/app/feature-extract")}
+              color="text-lime-400"
+              bg="bg-lime-500/10"
+            />
+            <SidebarBtn
+              icon={Scissors}
+              label="背景移除"
+              desc="一键抠图去背景"
+              onClick={() => navigate("/app/rmbg")}
+              color="text-indigo-400"
+              bg="bg-indigo-500/10"
+            />
+          </div>
         </div>
 
         {/* Canvas */}
@@ -2626,20 +2784,82 @@ const createConnectedImg2ImgBranch = useCallback(
               {activeHistoryTab === "recent" ? (
                 <div className="space-y-3">
                   {apiHistory.length === 0 && <div className="text-center text-slate-500 py-8">暂无历史记录</div>}
-                  {apiHistory.map((item, i) => (
-                    <div key={i} className="bg-slate-900 border border-slate-800 rounded-lg p-3 hover:border-purple-500/50 transition-colors flex justify-between items-start group">
-                      <div className="flex-1 min-w-0 mr-4">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="text-xs font-bold text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded uppercase">{TOOL_CARDS[item.mode]?.short || item.mode}</span>
-                          <span className="text-[10px] text-slate-500">{new Date(item.time).toLocaleString()}</span>
+                  {apiHistory.map((item, i) => {
+                    const inputMedia = normalizeHistoryInputs(item.inputs);
+                    const outputMedia = normalizeHistoryOutputs(item.outputs);
+                    const paramRows = formatHistoryParams(item.inputs);
+                    const isExpanded = expandedHistoryIds.has(item.id || String(i));
+                    return (
+                      <div key={i} className="bg-slate-900 border border-slate-800 rounded-xl p-4 hover:border-purple-500/50 transition-colors space-y-3">
+                        <div className="flex items-center justify-between gap-4">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded uppercase">{TOOL_CARDS[item.mode]?.short || item.mode}</span>
+                            <span className="text-[10px] text-slate-500">{new Date(item.time).toLocaleString()}</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => {
+                                const key = item.id || String(i);
+                                setExpandedHistoryIds((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(key)) next.delete(key);
+                                  else next.add(key);
+                                  return next;
+                                });
+                              }}
+                              className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white px-3 py-1.5 rounded transition-colors flex items-center gap-1"
+                            >
+                              {isExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />} 详情
+                            </button>
+                            <button onClick={() => applyHistoryConfig(item)} className="text-xs bg-slate-800 hover:bg-purple-600 text-slate-300 hover:text-white px-3 py-1.5 rounded transition-colors flex items-center gap-1">
+                              <RefreshCw className="w-3 h-3" /> 复用
+                            </button>
+                          </div>
                         </div>
-                        <div className="text-xs text-slate-300 truncate font-mono">{item.prompt || "(无补充说明)"}</div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <div className="space-y-2">
+                            <div className="text-[11px] text-slate-500">输入内容</div>
+                            {renderHistoryMedia(inputMedia, "输入")}
+                            <div className="mt-2 text-[11px] text-slate-400 whitespace-pre-wrap break-words">
+                              <span className="text-slate-500">提示词：</span>
+                              {item.final_prompt || item.prompt || "(无)"}
+                            </div>
+                          </div>
+                          <div className="space-y-2">
+                            <div className="text-[11px] text-slate-500">输出结果</div>
+                            {renderHistoryMedia(outputMedia, "输出")}
+                          </div>
+                        </div>
+
+                        {isExpanded && (
+                          <div className="border-t border-slate-800 pt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div>
+                              <div className="text-[11px] text-slate-500 mb-2">输入参数</div>
+                              {paramRows.length === 0 ? (
+                                <div className="text-[11px] text-slate-600">无可显示参数</div>
+                              ) : (
+                                <div className="grid grid-cols-1 gap-1 text-[11px] text-slate-300">
+                                  {paramRows.map((row) => (
+                                    <div key={row.key} className="flex items-center justify-between gap-3 bg-slate-950/50 border border-slate-800 rounded px-2 py-1">
+                                      <span className="text-slate-500">{row.key}</span>
+                                      <span className="text-slate-200 break-all">{String(row.value)}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                            <div>
+                              <div className="text-[11px] text-slate-500 mb-2">输出信息</div>
+                              <div className="text-[11px] text-slate-300 bg-slate-950/50 border border-slate-800 rounded px-2 py-2">
+                                {outputMedia.length > 0 ? `输出数量：${outputMedia.length}` : "无输出"}
+                              </div>
+                            </div>
+                          </div>
+                        )}
                       </div>
-                      <button onClick={() => applyHistoryConfig(item)} className="text-xs bg-slate-800 hover:bg-purple-600 text-slate-300 hover:text-white px-3 py-1.5 rounded transition-colors flex items-center gap-1 opacity-0 group-hover:opacity-100">
-                        <RefreshCw className="w-3 h-3" /> 复用
-                      </button>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ) : (
                 <div className="space-y-6">

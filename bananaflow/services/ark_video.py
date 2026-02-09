@@ -134,7 +134,7 @@ def generate_video_from_image(
         ratio=ratio,
         last_frame_data_url=last_frame_data_url,
         model_id=endpoint_id,
-        seed=seed,
+        # seed=seed,
         # ✅ 只有 1.5 才传 generate_audio；1.0 就别带这个字段
         # generate_audio=(generate_audio if model == VIDEO_MODEL_1_5 else None),
     )

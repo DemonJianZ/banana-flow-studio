@@ -3,6 +3,13 @@ import { BrowserRouter, Navigate, Route, Routes } from "./router";
 import { AuthProvider, useAuth } from "./auth/AuthProvider";
 import Workbench from "./pages/Workbench";
 import AuthPage from "./pages/AuthPage";
+import PipelineFaceSwap from "./pages/PipelineFaceSwap";
+import PipelineBackgroundSwap from "./pages/PipelineBackgroundSwap";
+import PipelineOutfitSwap from "./pages/PipelineOutfitSwap";
+import PipelineBatchVideo from "./pages/PipelineBatchVideo";
+import PipelineFeatureExtract from "./pages/PipelineFeatureExtract";
+import PipelineBatchWordArt from "./pages/PipelineBatchWordArt";
+import PipelineRmbg from "./pages/PipelineRmbg";
 
 
 const LoadingScreen = () => (
@@ -40,6 +47,62 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <Workbench />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/app/face-swap"
+            element={
+              <ProtectedRoute>
+                <PipelineFaceSwap />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/app/bg-swap"
+            element={
+              <ProtectedRoute>
+                <PipelineBackgroundSwap />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/app/outfit-swap"
+            element={
+              <ProtectedRoute>
+                <PipelineOutfitSwap />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/app/batch-video"
+            element={
+              <ProtectedRoute>
+                <PipelineBatchVideo />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/app/feature-extract"
+            element={
+              <ProtectedRoute>
+                <PipelineFeatureExtract />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/app/rmbg"
+            element={
+              <ProtectedRoute>
+                <PipelineRmbg />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/app/batch-wordart"
+            element={
+              <ProtectedRoute>
+                <PipelineBatchWordArt />
               </ProtectedRoute>
             }
           />

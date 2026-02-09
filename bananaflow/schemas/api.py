@@ -36,6 +36,43 @@ class MultiImageRequest(BaseModel):
 class MultiImageResponse(BaseModel):
     image: str
 
+class OverlayTextRequest(BaseModel):
+    image: str
+    text: str
+    text_color: Optional[str] = None
+    highlight_color: Optional[str] = None
+    highlight_colors: Optional[List[str]] = None
+    highlight_text: Optional[str] = None
+    highlight_texts: Optional[List[str]] = None
+    bold_text: Optional[str] = None
+    bold_texts: Optional[List[str]] = None
+    bold_color: Optional[str] = None
+    bold_colors: Optional[List[str]] = None
+    bold_size_delta: Optional[int] = None
+    bold_strength: Optional[int] = None
+    bg_color: Optional[str] = None
+    use_bg_color: Optional[bool] = False
+    size: Optional[str] = None
+    aspect_ratio: Optional[str] = None
+    font_name: Optional[str] = None
+    font_size: Optional[int] = None
+    highlight_opacity: Optional[float] = None
+    highlight_padding: Optional[int] = None
+    line_spacing: Optional[int] = None
+    margins: Optional[int] = None
+    style_image: Optional[str] = None
+
+class OverlayTextResponse(BaseModel):
+    image: str
+
+class RmbgRequest(BaseModel):
+    image: str
+    size: Optional[str] = None
+    aspect_ratio: Optional[str] = None
+
+class RmbgResponse(BaseModel):
+    image: str
+
 # schemas/api.py
 class Img2VideoRequest(BaseModel):
     image: str

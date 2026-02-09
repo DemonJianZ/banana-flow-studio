@@ -1,0 +1,211 @@
+{
+  "3": {
+    "inputs": {
+      "image": "bg-swap-5uwsa7jcu-af966p05h.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "4": {
+    "inputs": {
+      "images": [
+        "16",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "预览图像"
+    }
+  },
+  "16": {
+    "inputs": {
+      "text": [
+        "36",
+        0
+      ],
+      "font_name": "DouyinSansBold.ttf",
+      "font_size": 50,
+      "font_color": "custom",
+      "highlight_color": "black",
+      "highlight_opacity": 1,
+      "highlight_padding": 2,
+      "align": "top",
+      "justify": "center",
+      "margins": 50,
+      "line_spacing": 0,
+      "position_x": [
+        "37",
+        0
+      ],
+      "position_y": [
+        "37",
+        1
+      ],
+      "rotation_angle": 0,
+      "rotation_options": "text center",
+      "font_color_hex": "#F54927",
+      "highlight_color_hex": "#F5E027",
+      "image": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "CR Overlay Text",
+    "_meta": {
+      "title": "🔤 CR Overlay Text"
+    }
+  },
+  "18": {
+    "inputs": {
+      "prompt": "product, cosmetics, box, bottle",
+      "output_mode": "Merged",
+      "confidence_threshold": 0.3,
+      "max_segments": 0,
+      "segment_pick": 0,
+      "mask_blur": 0,
+      "mask_offset": 0,
+      "device": "Auto",
+      "invert_output": false,
+      "unload_model": false,
+      "background": "Alpha",
+      "background_color": "#222222",
+      "image": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "SAM3Segment",
+    "_meta": {
+      "title": "SAM3 Segmentation (RMBG)"
+    }
+  },
+  "21": {
+    "inputs": {
+      "padding": 0,
+      "blur": 0,
+      "mask": [
+        "18",
+        1
+      ]
+    },
+    "class_type": "MaskBoundingBox+",
+    "_meta": {
+      "title": "🔧 Mask Bounding Box"
+    }
+  },
+  "22": {
+    "inputs": {
+      "images": [
+        "21",
+        1
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "预览图像"
+    }
+  },
+  "25": {
+    "inputs": {
+      "image": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "Get Image Size",
+    "_meta": {
+      "title": "Get Image Size"
+    }
+  },
+  "31": {
+    "inputs": {
+      "expression": "a*0.04",
+      "a": [
+        "25",
+        1
+      ]
+    },
+    "class_type": "MathExpression|pysssss",
+    "_meta": {
+      "title": "margin_y"
+    }
+  },
+  "33": {
+    "inputs": {
+      "expression": "a*0.06",
+      "a": [
+        "25",
+        0
+      ]
+    },
+    "class_type": "MathExpression|pysssss",
+    "_meta": {
+      "title": "左侧安全边界"
+    }
+  },
+  "35": {
+    "inputs": {
+      "expression": "a-b",
+      "a": [
+        "21",
+        3
+      ],
+      "b": [
+        "31",
+        0
+      ]
+    },
+    "class_type": "MathExpression|pysssss",
+    "_meta": {
+      "title": "主体上方的y"
+    }
+  },
+  "36": {
+    "inputs": {
+      "text": "YSL!!!\n你真的让我感觉陌生\n900多到手\n3个气垫3支口红\n错过真没有了"
+    },
+    "class_type": "CR Text",
+    "_meta": {
+      "title": "📝 CR Text (Auto Avoid)"
+    }
+  },
+  "37": {
+    "inputs": {
+      "text": [
+        "36",
+        0
+      ],
+      "font_name": "DouyinSansBold.ttf",
+      "font_size": 50,
+      "line_spacing": 0,
+      "highlight_padding": 2,
+      "edge_margin": [
+        "33",
+        0
+      ],
+      "avoid_margin": [
+        "31",
+        0
+      ],
+      "placement_mode": "auto (max area)",
+      "fallback": "top",
+      "tie_breaker": "top>bottom>right>left",
+      "mask_threshold": 0.1,
+      "image": [
+        "3",
+        0
+      ],
+      "mask": [
+        "18",
+        1
+      ]
+    },
+    "class_type": "CR Auto Text Avoid",
+    "_meta": {
+      "title": "🧭 CR Auto Text Avoid"
+    }
+  }
+}
