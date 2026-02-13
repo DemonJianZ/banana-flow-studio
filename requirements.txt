@@ -5,6 +5,3 @@ google-genai==1.55.0
 requests==2.32.4
 pillow==11.3.0
 python-dotenv==1.2.1
-langgraph==0.6.10
-langgraph-checkpoint==3.0.1
-langgraph-checkpoint-sqlite==3.0.1
