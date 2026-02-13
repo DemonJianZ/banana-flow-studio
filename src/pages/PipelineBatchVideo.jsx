@@ -799,6 +799,13 @@ const PipelineBatchVideo = () => {
                 </div>
                 <div className="flex items-center gap-2">
                   <button
+                    onClick={() => mainInputRef.current?.click()}
+                    className="text-xs px-3 py-1.5 rounded-md bg-slate-800 border border-slate-700 hover:border-purple-500 hover:text-white transition-colors"
+                  >
+                    <Upload className="w-3 h-3 inline-block mr-1" />
+                    添加图片
+                  </button>
+                  <button
                     onClick={clearMainImages}
                     disabled={mainImages.length === 0}
                     className={`text-xs px-3 py-1.5 rounded-md border transition-colors ${
@@ -890,6 +897,18 @@ const PipelineBatchVideo = () => {
                       </button>
                     ))}
                   </div>
+                  <button
+                    onClick={() => refInputRef.current?.click()}
+                    disabled={referenceMode !== "reference"}
+                    className={`text-xs px-3 py-1.5 rounded-md border transition-colors ${
+                      referenceMode === "reference"
+                        ? "bg-slate-800 border-slate-700 hover:border-purple-500 hover:text-white"
+                        : "bg-slate-900 border-slate-800 text-slate-600 cursor-not-allowed"
+                    }`}
+                  >
+                    <Upload className="w-3 h-3 inline-block mr-1" />
+                    添加参考图
+                  </button>
                   <button
                     onClick={clearRefImages}
                     disabled={refImages.length === 0}
@@ -1358,7 +1377,7 @@ const PipelineBatchVideo = () => {
                   ) : (
                     <Play className="w-3 h-3 inline-block mr-1" />
                   )}
-                  {selectedCount > 0 ? `转选中任务 (${selectedCount})` : "全部转动图"}
+                  {selectedCount > 0 ? `批量转动图 (${selectedCount})` : "批量转动图（全部）"}
                 </button>
                 <button
                   onClick={removeBatchResults}
