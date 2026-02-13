@@ -1,0 +1,75 @@
+{
+  "2": {
+    "inputs": {
+      "image": "0193537e6b08739f25dbd984234f479e92683afefd52d288d222554d5573a8d3.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "3": {
+    "inputs": {
+      "images": [
+        "6",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "预览图像"
+    }
+  },
+  "6": {
+    "inputs": {
+      "text": "YSL!!!\n你真的让我感觉陌生\n900多到手\n3个气垫3支口红\n错过真没有了",
+      "font_name": "DouyinSansBold.ttf",
+      "font_size": 50,
+      "bold_strength": 2,
+      "bold_text_1": "YSL!!!",
+      "bold_text_2": "你真的让我感觉陌生",
+      "bold_text_3": "",
+      "bold_text_4": "",
+      "bold_text_5": "",
+      "font_color": "red",
+      "text_bg_color": "green",
+      "text_bg_opacity": 1,
+      "text_bg_padding": 10,
+      "highlight_text_1": "YSL!!!",
+      "highlight_text_2": "",
+      "highlight_text_3": "",
+      "highlight_text_4": "",
+      "highlight_text_5": "",
+      "highlight_color_1": "blue",
+      "highlight_color_2": "custom",
+      "highlight_color_3": "custom",
+      "highlight_color_4": "custom",
+      "highlight_color_5": "custom",
+      "highlight_opacity": 1,
+      "highlight_padding": 1,
+      "align": "top",
+      "justify": "center",
+      "margins": 5,
+      "line_spacing": 10,
+      "position_x": 0,
+      "position_y": 0,
+      "rotation_angle": 0,
+      "rotation_options": "text center",
+      "font_color_hex": "#000000",
+      "text_bg_color_hex": "#000000",
+      "highlight_color_hex_1": "#FFFF00",
+      "highlight_color_hex_2": "#FFFF00",
+      "highlight_color_hex_3": "#FFFF00",
+      "highlight_color_hex_4": "#FFFF00",
+      "highlight_color_hex_5": "#FFFF00",
+      "image": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "CR Overlay Text",
+    "_meta": {
+      "title": "🔤 CR Overlay Text"
+    }
+  }
+}

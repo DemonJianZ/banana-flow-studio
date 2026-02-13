@@ -39,28 +39,45 @@ class MultiImageResponse(BaseModel):
 class OverlayTextRequest(BaseModel):
     image: str
     text: str
-    text_color: Optional[str] = None
-    highlight_color: Optional[str] = None
-    highlight_colors: Optional[List[str]] = None
-    highlight_text: Optional[str] = None
-    highlight_texts: Optional[List[str]] = None
-    bold_text: Optional[str] = None
-    bold_texts: Optional[List[str]] = None
-    bold_color: Optional[str] = None
-    bold_colors: Optional[List[str]] = None
-    bold_size_delta: Optional[int] = None
-    bold_strength: Optional[int] = None
-    bg_color: Optional[str] = None
-    use_bg_color: Optional[bool] = False
-    size: Optional[str] = None
-    aspect_ratio: Optional[str] = None
     font_name: Optional[str] = None
     font_size: Optional[int] = None
+    bold_strength: Optional[int] = None
+    bold_text_1: Optional[str] = None
+    bold_text_2: Optional[str] = None
+    bold_text_3: Optional[str] = None
+    bold_text_4: Optional[str] = None
+    bold_text_5: Optional[str] = None
+    font_color: Optional[str] = None
+    text_bg_color: Optional[str] = None
+    text_bg_opacity: Optional[float] = None
+    text_bg_padding: Optional[int] = None
+    highlight_text_1: Optional[str] = None
+    highlight_text_2: Optional[str] = None
+    highlight_text_3: Optional[str] = None
+    highlight_text_4: Optional[str] = None
+    highlight_text_5: Optional[str] = None
+    highlight_color_1: Optional[str] = None
+    highlight_color_2: Optional[str] = None
+    highlight_color_3: Optional[str] = None
+    highlight_color_4: Optional[str] = None
+    highlight_color_5: Optional[str] = None
     highlight_opacity: Optional[float] = None
     highlight_padding: Optional[int] = None
-    line_spacing: Optional[int] = None
+    align: Optional[str] = None
+    justify: Optional[str] = None
     margins: Optional[int] = None
-    style_image: Optional[str] = None
+    line_spacing: Optional[int] = None
+    position_x: Optional[float] = None
+    position_y: Optional[float] = None
+    rotation_angle: Optional[float] = None
+    rotation_options: Optional[str] = None
+    font_color_hex: Optional[str] = None
+    text_bg_color_hex: Optional[str] = None
+    highlight_color_hex_1: Optional[str] = None
+    highlight_color_hex_2: Optional[str] = None
+    highlight_color_hex_3: Optional[str] = None
+    highlight_color_hex_4: Optional[str] = None
+    highlight_color_hex_5: Optional[str] = None
 
 class OverlayTextResponse(BaseModel):
     image: str
@@ -72,6 +89,33 @@ class RmbgRequest(BaseModel):
 
 class RmbgResponse(BaseModel):
     image: str
+
+class MultiAngleShotsRequest(BaseModel):
+    image: str
+    config: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+class MultiAngleShotsResponse(BaseModel):
+    images: List[str]
+
+class VideoUpscaleRequest(BaseModel):
+    video: str
+    segment_seconds: Optional[int] = 3
+
+class VideoUpscaleResponse(BaseModel):
+    video: str
+
+class VideoUpscaleTaskStartResponse(BaseModel):
+    task_id: str
+    status: str
+
+class VideoUpscaleTaskStatusResponse(BaseModel):
+    task_id: str
+    status: str
+    completed_chunks: int = 0
+    total_chunks: int = 0
+    progress: float = 0.0
+    video: Optional[str] = None
+    error: Optional[str] = None
 
 # schemas/api.py
 class Img2VideoRequest(BaseModel):

@@ -157,6 +157,46 @@ const TOOL_CARDS = {
     category: "generate",
     refRequired: false,
   },
+  rmbg: {
+    id: "rmbg",
+    name: "背景移除 (RMBG)",
+    short: "背景移除",
+    icon: Scissors,
+    desc: "自动去除背景，输出透明图",
+    scenario: "电商抠图/素材准备",
+    category: "skill",
+    refRequired: false,
+  },
+  feature_extract: {
+    id: "feature_extract",
+    name: "特征提取 (Feature)",
+    short: "特征提取",
+    icon: Scan,
+    desc: "面部/背景/服装首饰特征提取",
+    scenario: "素材清理/特征强化",
+    category: "skill",
+    refRequired: false,
+  },
+  multi_angleshots: {
+    id: "multi_angleshots",
+    name: "多角度镜头",
+    short: "多角度",
+    icon: Clapperboard,
+    desc: "单图扩展 8 个镜头角度",
+    scenario: "电商展示/机位扩展",
+    category: "skill",
+    refRequired: false,
+  },
+  video_upscale: {
+    id: "video_upscale",
+    name: "超分辨率视频",
+    short: "视频超分",
+    icon: Sparkles,
+    desc: "视频清晰度增强（自动按 3 秒切片）",
+    scenario: "低清视频修复",
+    category: "skill",
+    refRequired: false,
+  },
   relight: {
     id: "relight",
     name: "智能打光 (Relight)",
@@ -189,6 +229,49 @@ const TOOL_CARDS = {
     category: "video",
     refRequired: false,
   },
+};
+
+const FEATURE_EXTRACT_PRESET_PROMPTS = {
+  face: "提取画面中的面部特征，保留五官与肤色细节，去除背景与多余元素，结果自然清晰。",
+  background: "提取画面中的纯背景，移除所有主体与物体，保持背景干净自然，避免残影。",
+  outfit: "提取画面中的服装与首饰，保留材质与纹理细节，弱化人物面部与背景，结果清晰自然。",
+};
+
+const MULTI_ANGLE_VARIANTS = [
+  { key: "close_up", label: "特写", prompt: "Turn the camera to a close-up.", seed: "304838848282290", filename_prefix: "ComfyUI-close_up" },
+  { key: "wide_shot", label: "广角", prompt: "Turn the camera to a wide-angle lens.", seed: "171478573572619", filename_prefix: "ComfyUI-wide_shot" },
+  { key: "45_right", label: "右 45°", prompt: "Rotate the camera 45 degrees to the right.", seed: "1085411248135824", filename_prefix: "ComfyUI-45_right" },
+  { key: "90_right", label: "右 90°", prompt: "Rotate the camera 90 degrees to the right.", seed: "1055668484280226", filename_prefix: "ComfyUI-90_right" },
+  { key: "aerial_view", label: "俯视", prompt: "Turn the camera to an aerial view.", seed: "1118480615401224", filename_prefix: "ComfyUI-aerial_view" },
+  { key: "low_angle", label: "低角度", prompt: "Turn the camera to a low-angle view.", seed: "490672281762243", filename_prefix: "ComfyUI-low_angle" },
+  { key: "45_left", label: "左 45°", prompt: "Rotate the camera 45 degrees to the left.", seed: "850991843243451", filename_prefix: "ComfyUI-45_left" },
+  { key: "90_left", label: "左 90°", prompt: "Rotate the camera 90 degrees to the left.", seed: "1039279712437261", filename_prefix: "ComfyUI-90_left" },
+];
+
+const getProcessorModeDefaults = (mode) => {
+  if (mode === "text2img") {
+    return { mode, prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1" } };
+  }
+  if (mode === "multi_image_generate") {
+    return { mode, prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1", note: "" } };
+  }
+  if (mode === "rmbg") {
+    return { mode, prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1" } };
+  }
+  if (mode === "feature_extract") {
+    return {
+      mode,
+      prompt: FEATURE_EXTRACT_PRESET_PROMPTS.face,
+      templates: { size: "1024x1024", aspect_ratio: "1:1", preset: "face" },
+    };
+  }
+  if (mode === "multi_angleshots") {
+    return { mode, prompt: "", templates: {} };
+  }
+  if (mode === "video_upscale") {
+    return { mode, prompt: "", templates: { segment_seconds: 3 } };
+  }
+  return { mode, prompt: "", templates: {} };
 };
 
 const PROMPT_TEMPLATES = {
@@ -406,11 +489,15 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
 
   const availableTools = Object.keys(TOOL_CARDS).filter((key) => {
     const tool = TOOL_CARDS[key];
-    if (isProcessor) return tool.category === "generate";
+    if (isProcessor) return tool.category === "generate" || tool.category === "skill";
     if (isPostProcessor) return tool.category === "enhance";
     if (isVideoGen) return tool.category === "video";
     return false;
   });
+
+  const promptModes = ["text2img", "multi_image_generate", "feature_extract"];
+  const isSkillProcessor = isProcessor && currentMode.category === "skill";
+  const isMultiAnglesSkill = node.data.mode === "multi_angleshots";
 
   const handleRefUpload = (e) => {
     const file = e.target.files?.[0];
@@ -468,57 +555,65 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
     <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4 custom-scrollbar">
       {/* 基础设置 */}
       <div className="space-y-3">
-        <div className="space-y-2">
-          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">模式选择</div>
+        {!isSkillProcessor && (
+          <div className="space-y-2">
+            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">模式选择</div>
 
-          <div className="grid grid-cols-2 gap-2">
-            {availableTools.map((key) => {
-              const tool = TOOL_CARDS[key];
-              const isActive = node.data.mode === key;
-              if (key === "text2img" || key === "multi_image_generate") return null;
-
-              return (
-                <button
-                  key={key}
-                  onClick={() => updateData(node.id, { mode: key, prompt: "", templates: {} })}
-                  className={`relative flex flex-col p-2 rounded-lg border text-left transition-all ${
-                    isActive
-                      ? `bg-opacity-10 ${theme.bg} ${theme.border} shadow-sm`
-                      : "bg-slate-950 border-slate-800 hover:border-slate-600"
-                  }`}
-                >
-                  <div className="flex items-center gap-2 mb-1">
-                    <tool.icon className={`w-4 h-4 ${isActive ? theme.text : "text-slate-500"}`} />
-                    <span className={`text-xs font-bold ${isActive ? theme.text : "text-slate-300"}`}>{tool.short}</span>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-
-          {isProcessor && (
-            <div className="flex gap-2 pt-1">
-              {["text2img", "multi_image_generate"].map((key) => {
+            <div className="grid grid-cols-2 gap-2">
+              {availableTools.map((key) => {
                 const tool = TOOL_CARDS[key];
                 const isActive = node.data.mode === key;
+                if (key === "text2img" || key === "multi_image_generate") return null;
+
                 return (
                   <button
                     key={key}
-                    onClick={() => updateData(node.id, { mode: key, prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1" } })}
-                    className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg border text-[10px] transition-colors ${
+                    onClick={() => {
+                      const next = getProcessorModeDefaults(key);
+                      updateData(node.id, { mode: next.mode, prompt: next.prompt, templates: next.templates });
+                    }}
+                    className={`relative flex flex-col p-2 rounded-lg border text-left transition-all ${
                       isActive
-                        ? "bg-purple-600/10 border-purple-500 text-purple-400"
-                        : "bg-slate-950 border-slate-800 text-slate-500 hover:border-slate-600"
+                        ? `bg-opacity-10 ${theme.bg} ${theme.border} shadow-sm`
+                        : "bg-slate-950 border-slate-800 hover:border-slate-600"
                     }`}
                   >
-                    <tool.icon className="w-3 h-3" />
-                    {tool.name}
+                    <div className="flex items-center gap-2 mb-1">
+                      <tool.icon className={`w-4 h-4 ${isActive ? theme.text : "text-slate-500"}`} />
+                      <span className={`text-xs font-bold ${isActive ? theme.text : "text-slate-300"}`}>{tool.short}</span>
+                    </div>
                   </button>
                 );
               })}
             </div>
-          )}
-        </div>
+
+            {isProcessor && (
+              <div className="flex gap-2 pt-1">
+                {["text2img", "multi_image_generate"].map((key) => {
+                  const tool = TOOL_CARDS[key];
+                  const isActive = node.data.mode === key;
+                  return (
+                    <button
+                      key={key}
+                      onClick={() => {
+                        const next = getProcessorModeDefaults(key);
+                        updateData(node.id, { mode: next.mode, prompt: next.prompt, templates: next.templates });
+                      }}
+                      className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg border text-[10px] transition-colors ${
+                        isActive
+                          ? "bg-purple-600/10 border-purple-500 text-purple-400"
+                          : "bg-slate-950 border-slate-800 text-slate-500 hover:border-slate-600"
+                      }`}
+                    >
+                      <tool.icon className="w-3 h-3" />
+                      {tool.name}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
 
 {isVideoGen && (
   <div className="space-y-1">
@@ -569,41 +664,50 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
 )}
         
 
-        {/* Prompt Note */}
-        <div className="space-y-1">
-          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
-            {node.data.mode === "multi_image_generate" || node.data.mode === "text2img" ? "提示词 (Prompt)" : "补充描述 / Note"}
+        {!isSkillProcessor && (
+          <div className="space-y-1">
+            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+              {promptModes.includes(node.data.mode) ? "提示词 (Prompt)" : "补充描述 / Note"}
+            </div>
+            <textarea
+              className={`w-full bg-slate-950 border rounded p-2 text-xs text-slate-200 outline-none resize-none transition-colors border-slate-800 focus:${theme.border}`}
+              rows={3}
+              placeholder={
+                node.data.mode === "relight"
+                  ? "例如: 增加暖色调氛围..."
+                  : node.data.mode === "rmbg"
+                  ? "背景移除无需提示词"
+                  : "输入额外指令..."
+              }
+              value={
+                promptModes.includes(node.data.mode)
+                  ? (node.data.prompt || "")
+                  : (node.data.templates?.note || node.data.prompt || "")
+              }
+              onChange={(e) => {
+                if (promptModes.includes(node.data.mode)) updateData(node.id, { prompt: e.target.value });
+                else updateTemplateData("note", e.target.value);
+              }}
+            />
           </div>
-          <textarea
-            className={`w-full bg-slate-950 border rounded p-2 text-xs text-slate-200 outline-none resize-none transition-colors border-slate-800 focus:${theme.border}`}
-            rows={3}
-            placeholder={node.data.mode === "relight" ? "例如: 增加暖色调氛围..." : "输入额外指令..."}
-            value={
-              node.data.mode === "multi_image_generate" || node.data.mode === "text2img"
-                ? (node.data.prompt || "")
-                : (node.data.templates?.note || node.data.prompt || "")
-            }
-            onChange={(e) => {
-              if (node.data.mode === "multi_image_generate" || node.data.mode === "text2img") updateData(node.id, { prompt: e.target.value });
-              else updateTemplateData("note", e.target.value);
-            }}
-          />
-        </div>
+        )}
       </div>
 
       {/* 高级设置 */}
-      <button
-        onClick={() => setShowAdvanced(!showAdvanced)}
-        className="flex items-center justify-between text-xs text-slate-400 bg-slate-800/50 p-2 rounded hover:bg-slate-800 mt-2"
-        type="button"
-      >
-        <span>高级设置 (模型/尺寸/风格)</span>
-        {showAdvanced ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-      </button>
+      {!isMultiAnglesSkill && (
+        <>
+          <button
+            onClick={() => setShowAdvanced(!showAdvanced)}
+            className="flex items-center justify-between text-xs text-slate-400 bg-slate-800/50 p-2 rounded hover:bg-slate-800 mt-2"
+            type="button"
+          >
+            <span>{isSkillProcessor ? "高级设置 (尺寸/比例/数量)" : "高级设置 (模型/尺寸/风格)"}</span>
+            {showAdvanced ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+          </button>
 
-      {showAdvanced && (
-        <div className="space-y-4 animate-in slide-in-from-top-2 duration-200">
-          {(isProcessor || isPostProcessor) && (
+          {showAdvanced && (
+            <div className="space-y-4 animate-in slide-in-from-top-2 duration-200">
+              {((isProcessor && !isSkillProcessor) || isPostProcessor) && (
             <div className="space-y-2">
               <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center justify-between">
                 <span className="flex items-center gap-1">
@@ -767,9 +871,33 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
   </div>
 )}
 
+          {isProcessor && node.data.mode === "video_upscale" && (
+            <div className="space-y-2">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">切片时长 (秒)</div>
+              <input
+                type="number"
+                min={1}
+                max={10}
+                step={1}
+                value={parseInt(String(node.data.templates?.segment_seconds ?? 3), 10)}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value, 10);
+                  const next = Math.min(10, Math.max(1, isNaN(v) ? 3 : v));
+                  updateData(node.id, { templates: { ...(node.data.templates || {}), segment_seconds: next } });
+                }}
+                className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-200 outline-none"
+              />
+              <div className="text-[10px] text-slate-500">上传到 ComfyUI 前会先按该时长切片，再逐片执行 `workflows/upscale.json`。</div>
+            </div>
+          )}
+
 
           {/* Size & Ratio */}
-          {isProcessor && (node.data.mode === "text2img" || node.data.mode === "multi_image_generate") && (
+          {isProcessor &&
+            (node.data.mode === "text2img" ||
+              node.data.mode === "multi_image_generate" ||
+              node.data.mode === "feature_extract" ||
+              node.data.mode === "rmbg") && (
             <>
               <div>
                 <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">尺寸 (Size)</div>
@@ -855,22 +983,26 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
           ))}
 
           {/* Batch Size */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">生成数量</span>
-              <span className={`text-xs font-mono ${theme.text}`}>{node.data.batchSize || 1} 次</span>
+              {node.data.mode !== "multi_angleshots" && (
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">生成数量</span>
+                    <span className={`text-xs font-mono ${theme.text}`}>{node.data.batchSize || 1} 次</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="1"
+                    max="4"
+                    step="1"
+                    value={node.data.batchSize || 1}
+                    onChange={(e) => updateData(node.id, { batchSize: parseInt(e.target.value) })}
+                    className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer"
+                  />
+                </div>
+              )}
             </div>
-            <input
-              type="range"
-              min="1"
-              max="4"
-              step="1"
-              value={node.data.batchSize || 1}
-              onChange={(e) => updateData(node.id, { batchSize: parseInt(e.target.value) })}
-              className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer"
-            />
-          </div>
-        </div>
+          )}
+        </>
       )}
     </div>
 
@@ -969,8 +1101,8 @@ const NodeComponent = ({
   else if (selected) statusColor = "border-white ring-2 ring-blue-500 ring-offset-2 ring-offset-slate-900";
 
   let title = "Node";
-  if (isInput) title = `输入 (${node.data.images?.length || 0})`;
-  if (isOutput) title = `输出 (${node.data.images?.length || 0})`;
+  if (isInput) title = `图片/视频上传 (${node.data.images?.length || 0})`;
+  if (isOutput) title = node.data.angleLabel ? `${node.data.angleLabel} 输出 (${node.data.images?.length || 0})` : `输出 (${node.data.images?.length || 0})`;
   if (isProcessor) title = TOOL_CARDS[node.data.mode]?.name || "图片生成";
   if (isPostProcessor) title = TOOL_CARDS[node.data.mode]?.name || "后期增强";
   if (isVideoGen) title = "视频生成";
@@ -1136,6 +1268,11 @@ const NodeComponent = ({
         {/* AI nodes */}
         {isAI && (
           <div className="space-y-2">
+            {isProcessor && node.data.mode === "video_upscale" && (
+              <div className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-300">
+                提醒：上传480P视频
+              </div>
+            )}
             {node.data.status === "loading" && (
               <div className="space-y-1">
                 <div className="flex justify-between text-[10px] text-slate-400">
@@ -1207,19 +1344,37 @@ const NodeComponent = ({
                   {node.data.images.map((img, i) => (
                     <div key={i} className="aspect-square relative group/img">
                       {/* ✅ 点图只预览；选中用按钮 */}
-                      <img
-                        src={img}
-                        className={`w-full h-full object-cover rounded cursor-pointer border ${
-                          activeArtifact?.url === img ? "border-yellow-400 ring-2 ring-yellow-400/40" : "border-transparent"
-                        }`}
-                        onMouseDown={(e) => e.stopPropagation()}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onPreview?.(img);
-                        }}
-                        title="点击预览"
-                        alt=""
-                      />
+                      {isVideoContent(img) ? (
+                        <video
+                          src={img}
+                          className={`w-full h-full object-cover rounded cursor-pointer border ${
+                            activeArtifact?.url === img ? "border-yellow-400 ring-2 ring-yellow-400/40" : "border-transparent"
+                          }`}
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onPreview?.(img);
+                          }}
+                          title="点击预览"
+                          muted
+                          loop
+                          playsInline
+                        />
+                      ) : (
+                        <img
+                          src={img}
+                          className={`w-full h-full object-cover rounded cursor-pointer border ${
+                            activeArtifact?.url === img ? "border-yellow-400 ring-2 ring-yellow-400/40" : "border-transparent"
+                          }`}
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onPreview?.(img);
+                          }}
+                          title="点击预览"
+                          alt=""
+                        />
+                      )}
 
                       <button
                         type="button"
@@ -1227,7 +1382,13 @@ const NodeComponent = ({
                         onMouseDown={(e) => e.stopPropagation()}
                         onClick={(e) => {
                           e.stopPropagation();
-                          onSelectArtifact?.({ url: img, kind: "image", fromNodeId: node.id, createdAt: Date.now(), meta: { mode: "input" } });
+                          onSelectArtifact?.({
+                            url: img,
+                            kind: isVideoContent(img) ? "video" : "image",
+                            fromNodeId: node.id,
+                            createdAt: Date.now(),
+                            meta: { mode: "input" },
+                          });
                         }}
                         title="选中为 Agent 上下文"
                       >
@@ -1251,14 +1412,14 @@ const NodeComponent = ({
 
                   <div className="aspect-square bg-slate-800 rounded flex items-center justify-center cursor-pointer hover:bg-slate-700 relative">
                     <Plus className="w-4 h-4 text-slate-400" />
-                    <input type="file" multiple accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={handleFileUpload} />
+                    <input type="file" multiple accept="image/*,video/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={handleFileUpload} />
                   </div>
                 </div>
               ) : (
                 <div className="h-full flex flex-col items-center justify-center text-slate-500 relative">
                   <Images className="w-6 h-6 mb-1 opacity-50" />
                   <span className="text-[10px]">点击上传</span>
-                  <input type="file" multiple accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={handleFileUpload} />
+                  <input type="file" multiple accept="image/*,video/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={handleFileUpload} />
                 </div>
               )}
             </div>
@@ -1764,7 +1925,8 @@ const handleNodeMouseDown = (e, nid) => {
 
   const getCursor = () => (interactionMode === "panning" || isSpacePressed ? "grab" : interactionMode === "dragging_node" ? "grabbing" : "default");
 
-  const addNode = (t) => {
+  const addNode = (t, modePreset = null) => {
+    if (t === NODE_TYPES.POST_PROCESSOR) return;
     pushHistory();
     const id = generateId();
 
@@ -1777,9 +1939,7 @@ const handleNodeMouseDown = (e, nid) => {
       [NODE_TYPES.INPUT]: { images: [] },
       [NODE_TYPES.TEXT_INPUT]: { text: "" },
       [NODE_TYPES.PROCESSOR]: {
-        mode: "multi_image_generate",
-        prompt: "",
-        templates: { size: "1024x1024", aspect_ratio: "1:1", note: "" },
+        ...getProcessorModeDefaults(modePreset || "multi_image_generate"),
         batchSize: 1,
         uploadedImages: [],
         status: "idle",
@@ -2236,6 +2396,86 @@ const createConnectedImg2ImgBranch = useCallback(
       setNodes((prev) => prev.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...patch } } : n)));
     };
 
+    const ensureMultiAnglesOutputNodes = (sourceNode, images) => {
+      const angleCount = MULTI_ANGLE_VARIANTS.length;
+      const groupedImages = Array.from({ length: angleCount }, () => []);
+      images.forEach((img, idx) => {
+        groupedImages[idx % angleCount].push(img);
+      });
+
+      const existingOutputs = Array.from(runtimeNodes.values()).filter(
+        (n) =>
+          n.type === NODE_TYPES.OUTPUT &&
+          n.data?.autoFrom === sourceNode.id &&
+          Number.isInteger(n.data?.angleIndex) &&
+          n.data.angleIndex >= 0 &&
+          n.data.angleIndex < angleCount
+      );
+      const existingByIndex = new Map(existingOutputs.map((n) => [n.data.angleIndex, n]));
+
+      const createdNodes = [];
+      const patches = new Map();
+      const requiredConnections = [];
+
+      for (let i = 0; i < angleCount; i++) {
+        const existing = existingByIndex.get(i);
+        const angleMeta = MULTI_ANGLE_VARIANTS[i];
+        const patch = {
+          images: groupedImages[i] || [],
+          autoFrom: sourceNode.id,
+          angleIndex: i,
+          angleKey: angleMeta?.key || `angle_${i + 1}`,
+          angleLabel: angleMeta?.label || `角度 ${i + 1}`,
+        };
+
+        if (existing) {
+          existing.data = { ...existing.data, ...patch };
+          runtimeNodes.set(existing.id, existing);
+          patches.set(existing.id, patch);
+          requiredConnections.push({ from: sourceNode.id, to: existing.id });
+          continue;
+        }
+
+        const col = i % 2;
+        const row = Math.floor(i / 2);
+        const newNodeId = generateId();
+        const newNode = {
+          id: newNodeId,
+          type: NODE_TYPES.OUTPUT,
+          x: sourceNode.x + 360 + col * 320,
+          y: sourceNode.y - 120 + row * 190,
+          data: patch,
+        };
+        runtimeNodes.set(newNodeId, clone(newNode));
+        createdNodes.push(newNode);
+        patches.set(newNodeId, patch);
+        requiredConnections.push({ from: sourceNode.id, to: newNodeId });
+      }
+
+      if (createdNodes.length > 0 || patches.size > 0) {
+        setNodes((prev) => {
+          const next = prev.map((n) => {
+            const patch = patches.get(n.id);
+            if (!patch) return n;
+            return { ...n, data: { ...n.data, ...patch } };
+          });
+          return createdNodes.length > 0 ? [...next, ...createdNodes] : next;
+        });
+      }
+
+      if (requiredConnections.length > 0) {
+        setConnections((prev) => {
+          const next = [...prev];
+          requiredConnections.forEach((conn) => {
+            if (!next.some((c) => c.from === conn.from && c.to === conn.to)) {
+              next.push({ id: generateId(), from: conn.from, to: conn.to });
+            }
+          });
+          return next;
+        });
+      }
+    };
+
     const targetIds = Array.from(specificNodesSet);
     const targetNodes = targetIds.map((id) => runtimeNodes.get(id)).filter(Boolean);
     if (targetNodes.length === 0) return;
@@ -2383,6 +2623,95 @@ const createConnectedImg2ImgBranch = useCallback(
                 const data = await resp.json();
                 if (!resp.ok) throw new Error(extractApiError(data));
                 resultUrl = data.image;
+              } else if (procNode.data.mode === "rmbg") {
+                const resp = await apiFetch(`/api/rmbg`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    image: inputImages[i],
+                    size: procNode.data.templates?.size || "1024x1024",
+                    aspect_ratio: procNode.data.templates?.aspect_ratio || "1:1",
+                  }),
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(extractApiError(data));
+                resultUrl = data.image || data.images?.[0];
+              } else if (procNode.data.mode === "feature_extract") {
+                const resp = await apiFetch(`/api/multi_image_generate`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    prompt: sourceText || procNode.data.prompt || FEATURE_EXTRACT_PRESET_PROMPTS.face,
+                    images: [inputImages[i]],
+                    temperature: 0.7,
+                    size: procNode.data.templates?.size || "1024x1024",
+                    aspect_ratio: procNode.data.templates?.aspect_ratio || "1:1",
+                  }),
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(extractApiError(data));
+                resultUrl = data.image || data.images?.[0];
+              } else if (procNode.data.mode === "video_upscale") {
+                const videoInput = inputImages[i];
+                if (!isVideoContent(videoInput)) {
+                  throw new Error("超分辨率视频技能仅支持视频输入");
+                }
+                const startResp = await apiFetch(`/api/video_upscale/start`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    video: videoInput,
+                    segment_seconds: parseInt(String(procNode.data.templates?.segment_seconds ?? 3), 10) || 3,
+                  }),
+                });
+                const startData = await startResp.json();
+                if (!startResp.ok) throw new Error(extractApiError(startData));
+                const taskId = startData.task_id;
+                if (!taskId) throw new Error("视频超分任务创建失败");
+
+                let guard = 0;
+                while (true) {
+                  await new Promise((r) => setTimeout(r, 1200));
+                  const statusResp = await apiFetch(`/api/video_upscale/status/${taskId}`);
+                  const statusData = await statusResp.json();
+                  if (!statusResp.ok) throw new Error(extractApiError(statusData));
+
+                  const totalChunks = Math.max(0, parseInt(String(statusData.total_chunks || 0), 10) || 0);
+                  const completedChunks = Math.max(0, parseInt(String(statusData.completed_chunks || 0), 10) || 0);
+                  if (totalChunks > 0) {
+                    applyNodeUpdate(procNode.id, {
+                      total: totalChunks,
+                      progress: Math.min(totalChunks, completedChunks),
+                    });
+                  }
+
+                  if (statusData.status === "success") {
+                    resultUrl = statusData.video;
+                    break;
+                  }
+                  if (statusData.status === "error") {
+                    throw new Error(statusData.error || "视频超分失败");
+                  }
+
+                  guard += 1;
+                  if (guard > 1800) {
+                    throw new Error("视频超分任务轮询超时");
+                  }
+                }
+              } else if (procNode.data.mode === "multi_angleshots") {
+                const resp = await apiFetch(`/api/multi_angleshots`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    image: inputImages[i],
+                  }),
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(extractApiError(data));
+                const eightResults = Array.isArray(data.images) ? data.images : [];
+                if (eightResults.length === 0) throw new Error("多角度镜头未返回结果");
+                outputImages.push(...eightResults.filter(Boolean));
+                resultUrl = null;
               } else {
                 const payload = {
                   image: inputImages[i],
@@ -2414,7 +2743,9 @@ const createConnectedImg2ImgBranch = useCallback(
 
         if (outputImages.length > 0) {
           applyNodeUpdate(procNode.id, { status: "success", images: outputImages });
-          if (targetOutput && targetOutput.type === NODE_TYPES.OUTPUT) {
+          if (procNode.data.mode === "multi_angleshots") {
+            ensureMultiAnglesOutputNodes(procNode, outputImages);
+          } else if (targetOutput && targetOutput.type === NODE_TYPES.OUTPUT) {
             const prevOut = targetOutput.data.images || [];
             applyNodeUpdate(targetOutput.id, { images: [...prevOut, ...outputImages] });
           }
@@ -2569,39 +2900,58 @@ const createConnectedImg2ImgBranch = useCallback(
       <div className="flex-1 flex relative">
         {/* Sidebar */}
         <div className="w-64 bg-slate-900 border-r border-slate-800 p-3 z-40 flex flex-col gap-2 shadow-xl select-none shrink-0">
-          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">工具箱</div>
+          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">节点</div>
           <SidebarBtn icon={MousePointer2} label="Prompt 输入" desc="纯文本提示词" onClick={() => addNode(NODE_TYPES.TEXT_INPUT)} color="text-yellow-400" bg="bg-yellow-500/10" />
-          <SidebarBtn icon={Images} label="批量图片上传" desc="主商品图/素材" onClick={() => addNode(NODE_TYPES.INPUT)} color="text-blue-400" bg="bg-blue-500/10" />
+          <SidebarBtn icon={Images} label="图片/视频上传" desc="主商品图/素材" onClick={() => addNode(NODE_TYPES.INPUT)} color="text-blue-400" bg="bg-blue-500/10" />
           <SidebarBtn icon={Wand2} label="图片生成" desc="背景/手势/生成" onClick={() => addNode(NODE_TYPES.PROCESSOR)} color="text-purple-400" bg="bg-purple-500/10" />
-          <SidebarBtn icon={Palette} label="后期增强" desc="光影精修/放大" onClick={() => addNode(NODE_TYPES.POST_PROCESSOR)} color="text-cyan-400" bg="bg-cyan-500/10" />
           <SidebarBtn icon={Film} label="视频生成" desc="图生视频/动效" onClick={() => addNode(NODE_TYPES.VIDEO_GEN)} color="text-rose-400" bg="bg-rose-500/10" />
           <SidebarBtn icon={Download} label="结果输出" desc="预览与下载" onClick={() => addNode(NODE_TYPES.OUTPUT)} color="text-green-400" bg="bg-green-500/10" />
 
-          <div className="mt-4 pt-3 border-t border-slate-800">
-            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">页面</div>
+          <div className="mt-3 pt-3 border-t border-slate-800">
+            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">技能</div>
             <SidebarBtn
-              icon={ImagePlus}
-              label="流水线换脸"
-              desc="批量替换主图人脸"
-              onClick={() => navigate("/app/face-swap")}
-              color="text-pink-400"
-              bg="bg-pink-500/10"
+              icon={Scissors}
+              label="背景移除"
+              desc="抠图去背景（可串联）"
+              onClick={() => addNode(NODE_TYPES.PROCESSOR, "rmbg")}
+              color="text-indigo-400"
+              bg="bg-indigo-500/10"
             />
+            <SidebarBtn
+              icon={Scan}
+              label="特征提取"
+              desc="面部/背景/服装首饰"
+              onClick={() => addNode(NODE_TYPES.PROCESSOR, "feature_extract")}
+              color="text-lime-400"
+              bg="bg-lime-500/10"
+            />
+            <SidebarBtn
+              icon={Clapperboard}
+              label="多角度镜头"
+              desc="单图扩展为 8 个机位"
+              onClick={() => addNode(NODE_TYPES.PROCESSOR, "multi_angleshots")}
+              color="text-amber-400"
+              bg="bg-amber-500/10"
+            />
+            <SidebarBtn
+              icon={Sparkles}
+              label="超分辨率视频"
+              desc="3 秒切片后逐段超分"
+              onClick={() => addNode(NODE_TYPES.PROCESSOR, "video_upscale")}
+              color="text-cyan-400"
+              bg="bg-cyan-500/10"
+            />
+          </div>
+
+          <div className="mt-4 pt-3 border-t border-slate-800">
+            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">工作流</div>
             <SidebarBtn
               icon={Layers}
-              label="批量换背景"
-              desc="批量替换主图背景"
-              onClick={() => navigate("/app/bg-swap")}
+              label="三合一换图"
+              desc="换脸/换背景/换装"
+              onClick={() => navigate("/app/swap")}
               color="text-emerald-400"
               bg="bg-emerald-500/10"
-            />
-            <SidebarBtn
-              icon={ShoppingBag}
-              label="批量换装"
-              desc="批量替换主图服装"
-              onClick={() => navigate("/app/outfit-swap")}
-              color="text-orange-400"
-              bg="bg-orange-500/10"
             />
             <SidebarBtn
               icon={Clapperboard}
@@ -2618,22 +2968,6 @@ const createConnectedImg2ImgBranch = useCallback(
               onClick={() => navigate("/app/batch-wordart")}
               color="text-fuchsia-400"
               bg="bg-fuchsia-500/10"
-            />
-            <SidebarBtn
-              icon={Scan}
-              label="特征提取"
-              desc="面部/背景/服装首饰"
-              onClick={() => navigate("/app/feature-extract")}
-              color="text-lime-400"
-              bg="bg-lime-500/10"
-            />
-            <SidebarBtn
-              icon={Scissors}
-              label="背景移除"
-              desc="一键抠图去背景"
-              onClick={() => navigate("/app/rmbg")}
-              color="text-indigo-400"
-              bg="bg-indigo-500/10"
             />
           </div>
         </div>

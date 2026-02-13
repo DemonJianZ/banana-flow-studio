@@ -18,6 +18,8 @@ MODEL_DOUBAO = "doubao-seedream-4.5"
 MODEL_AGENT  = "gemini-3-flash-preview"
 MODEL_COMFYUI_OVERLAYTEXT = "comfyui-overlaytext"
 MODEL_COMFYUI_RMBG = "comfyui-rmbg"
+MODEL_COMFYUI_MULTI_ANGLESHOTS = "comfyui-multi-angleshots"
+MODEL_COMFYUI_VIDEO_UPSCALE = "comfyui-video-upscale"
 
 ARK_VIDEO_API_URL = "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks"
 ARK_VIDEO_MODEL_ID = "ep-20250708120248-4w7w5"
@@ -29,16 +31,28 @@ VIDEO_MODEL_1_5 = "Doubao-Seedance-1.5-pro"
 
 BASE_DIR = os.getcwd()
 COMFYUI_URL = os.getenv("COMFYUI_URL", "http://192.168.20.30:8188").rstrip("/")
-COMFYUI_OVERLAYTEXT_PATH = os.getenv(
-    "COMFYUI_OVERLAYTEXT_PATH",
-    os.path.join(BASE_DIR, "workflows", "overlaytext.json"),
-)
-COMFYUI_RMBG_PATH = os.getenv(
-    "COMFYUI_RMBG_PATH",
-    os.path.join(BASE_DIR, "workflows", "RMBG.json"),
-)
+_default_overlaytext = os.path.join(BASE_DIR, "workflows", "textoverlay.json")
+if not os.path.exists(_default_overlaytext):
+    _default_overlaytext = os.path.join(BASE_DIR, "bananaflow", "workflows", "textoverlay.json")
+COMFYUI_OVERLAYTEXT_PATH = os.getenv("COMFYUI_OVERLAYTEXT_PATH", _default_overlaytext)
+_default_rmbg = os.path.join(BASE_DIR, "workflows", "RMBG.json")
+if not os.path.exists(_default_rmbg):
+    _default_rmbg = os.path.join(BASE_DIR, "bananaflow", "workflows", "RMBG.json")
+COMFYUI_RMBG_PATH = os.getenv("COMFYUI_RMBG_PATH", _default_rmbg)
+
+_default_multi_angleshots = os.path.join(BASE_DIR, "workflows", "Multi-angleshots.json")
+if not os.path.exists(_default_multi_angleshots):
+    _default_multi_angleshots = os.path.join(BASE_DIR, "bananaflow", "workflows", "Multi-angleshots.json")
+COMFYUI_MULTI_ANGLESHOTS_PATH = os.getenv("COMFYUI_MULTI_ANGLESHOTS_PATH", _default_multi_angleshots)
+
+_default_upscale = os.path.join(BASE_DIR, "workflows", "upscale.json")
+if not os.path.exists(_default_upscale):
+    _default_upscale = os.path.join(BASE_DIR, "bananaflow", "workflows", "upscale.json")
+COMFYUI_UPSCALE_PATH = os.getenv("COMFYUI_UPSCALE_PATH", _default_upscale)
+
 COMFYUI_OUTPUT_NODE_ID = os.getenv("COMFYUI_OUTPUT_NODE_ID", "4")
 COMFYUI_TIMEOUT_SEC = int(os.getenv("COMFYUI_TIMEOUT_SEC", "120"))
+COMFYUI_VIDEO_UPSCALE_TIMEOUT_SEC = int(os.getenv("COMFYUI_VIDEO_UPSCALE_TIMEOUT_SEC", "900"))
 COMFYUI_POLL_INTERVAL_SEC = float(os.getenv("COMFYUI_POLL_INTERVAL_SEC", "1.0"))
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 DEBUG_DIR = os.path.join(BASE_DIR, "debug_output")

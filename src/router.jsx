@@ -69,14 +69,20 @@ export function useNavigate() {
   return ctx.navigate;
 }
 
-export function Link({ to, children, className }) {
+export function Link({ to, children, className, target, rel, ...rest }) {
   const navigate = useNavigate();
   const handleClick = (e) => {
+    if (e.defaultPrevented) return;
+    if (e.button !== 0) return;
+    if (target && target !== "_self") return;
+    if (e.metaKey || e.altKey || e.ctrlKey || e.shiftKey) return;
+    const href = normalizePath(to);
+    if (href.startsWith("http")) return;
     e.preventDefault();
-    navigate(to);
+    navigate(href);
   };
   return (
-    <a href={normalizePath(to)} onClick={handleClick} className={className}>
+    <a href={normalizePath(to)} onClick={handleClick} className={className} target={target} rel={rel} {...rest}>
       {children}
     </a>
   );

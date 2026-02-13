@@ -2,6 +2,7 @@
 import time
 import json
 import uuid
+import threading
 from typing import Dict, Any, Optional, List
 
 from fastapi import APIRouter, HTTPException, Request, Response, Depends
@@ -9,7 +10,15 @@ from pydantic import BaseModel, Field
 from google.genai import types
 
 
-from core.config import MODEL_GEMINI, MODEL_DOUBAO, MODEL_AGENT, MODEL_COMFYUI_OVERLAYTEXT, MODEL_COMFYUI_RMBG
+from core.config import (
+    MODEL_GEMINI,
+    MODEL_DOUBAO,
+    MODEL_AGENT,
+    MODEL_COMFYUI_OVERLAYTEXT,
+    MODEL_COMFYUI_RMBG,
+    MODEL_COMFYUI_MULTI_ANGLESHOTS,
+    MODEL_COMFYUI_VIDEO_UPSCALE,
+)
 from core.logging import sys_logger
 from auth_routes import get_current_user
 from storage.usage import record_usage
@@ -19,6 +28,9 @@ from schemas.api import (
     MultiImageRequest, MultiImageResponse,
     OverlayTextRequest, OverlayTextResponse,
     RmbgRequest, RmbgResponse,
+    MultiAngleShotsRequest, MultiAngleShotsResponse,
+    VideoUpscaleRequest, VideoUpscaleResponse,
+    VideoUpscaleTaskStartResponse, VideoUpscaleTaskStatusResponse,
     EditRequest, EditResponse,
     Img2VideoRequest, Img2VideoResponse,
     AgentRequest,
@@ -28,7 +40,12 @@ from storage.prompt_log import PromptLogger, LogAnalyzer
 from services.genai_client import call_genai_retry
 from services.ark import call_doubao_image_gen
 from services.ark_video import generate_video_from_image, VideoGenError
-from services.comfyui import run_overlaytext_workflow, run_rmbg_workflow
+from services.comfyui import (
+    run_overlaytext_workflow,
+    run_rmbg_workflow,
+    run_multi_angleshots_workflow,
+    run_video_upscale_workflow,
+)
 
 from utils.images import parse_data_url, bytes_to_data_url, get_image_from_response
 from prompts.business import build_business_prompt
@@ -41,6 +58,21 @@ ALLOWED_VIDEO_MODELS = {"Doubao-Seedance-1.0-pro", "Doubao-Seedance-1.5-pro"}
 router = APIRouter()
 prompt_logger = PromptLogger()
 analyzer = LogAnalyzer("logs/prompts.jsonl")
+video_upscale_tasks: Dict[str, Dict[str, Any]] = {}
+video_upscale_tasks_lock = threading.Lock()
+
+
+def _set_video_upscale_task(task_id: str, **patch: Any) -> None:
+    with video_upscale_tasks_lock:
+        current = video_upscale_tasks.get(task_id, {})
+        current.update(patch)
+        video_upscale_tasks[task_id] = current
+
+
+def _get_video_upscale_task(task_id: str) -> Optional[Dict[str, Any]]:
+    with video_upscale_tasks_lock:
+        current = video_upscale_tasks.get(task_id)
+        return dict(current) if isinstance(current, dict) else None
 
 
 # =========================================================
@@ -201,27 +233,45 @@ def overlay_text(req: OverlayTextRequest, request: Request, current_user=Depends
             req_id=req_id,
             image_data_url=req.image,
             text=req.text,
-            text_color=req.text_color,
-            highlight_color=req.highlight_color,
-            highlight_colors=req.highlight_colors,
-            highlight_text=req.highlight_text,
-            highlight_texts=req.highlight_texts,
-            bold_text=req.bold_text,
-            bold_texts=req.bold_texts,
-            bold_color=req.bold_color,
-            bold_colors=req.bold_colors,
-            bold_size_delta=req.bold_size_delta,
-            bold_strength=req.bold_strength,
-            use_bg_color=bool(req.use_bg_color),
-            bg_color=req.bg_color,
-            size=req.size,
-            aspect_ratio=req.aspect_ratio,
             font_name=req.font_name,
             font_size=req.font_size,
+            bold_strength=req.bold_strength,
+            bold_text_1=req.bold_text_1,
+            bold_text_2=req.bold_text_2,
+            bold_text_3=req.bold_text_3,
+            bold_text_4=req.bold_text_4,
+            bold_text_5=req.bold_text_5,
+            font_color=req.font_color,
+            text_bg_color=req.text_bg_color,
+            text_bg_opacity=req.text_bg_opacity,
+            text_bg_padding=req.text_bg_padding,
+            highlight_text_1=req.highlight_text_1,
+            highlight_text_2=req.highlight_text_2,
+            highlight_text_3=req.highlight_text_3,
+            highlight_text_4=req.highlight_text_4,
+            highlight_text_5=req.highlight_text_5,
+            highlight_color_1=req.highlight_color_1,
+            highlight_color_2=req.highlight_color_2,
+            highlight_color_3=req.highlight_color_3,
+            highlight_color_4=req.highlight_color_4,
+            highlight_color_5=req.highlight_color_5,
             highlight_opacity=req.highlight_opacity,
             highlight_padding=req.highlight_padding,
-            line_spacing=req.line_spacing,
+            align=req.align,
+            justify=req.justify,
             margins=req.margins,
+            line_spacing=req.line_spacing,
+            position_x=req.position_x,
+            position_y=req.position_y,
+            rotation_angle=req.rotation_angle,
+            rotation_options=req.rotation_options,
+            font_color_hex=req.font_color_hex,
+            text_bg_color_hex=req.text_bg_color_hex,
+            highlight_color_hex_1=req.highlight_color_hex_1,
+            highlight_color_hex_2=req.highlight_color_hex_2,
+            highlight_color_hex_3=req.highlight_color_hex_3,
+            highlight_color_hex_4=req.highlight_color_hex_4,
+            highlight_color_hex_5=req.highlight_color_hex_5,
         )
 
         if not img_bytes:
@@ -235,18 +285,12 @@ def overlay_text(req: OverlayTextRequest, request: Request, current_user=Depends
             req.text,
             {
                 "model": MODEL_COMFYUI_OVERLAYTEXT,
-                "text_color": req.text_color,
-                "highlight_color": req.highlight_color,
-                "highlight_text": req.highlight_text,
-                "bold_text": req.bold_text,
-                "bold_color": req.bold_color,
-                "bold_size_delta": req.bold_size_delta,
-                "bg_color": req.bg_color,
-                "use_bg_color": req.use_bg_color,
-                "size": req.size,
-                "aspect_ratio": req.aspect_ratio,
                 "font_name": req.font_name,
                 "font_size": req.font_size,
+                "bold_strength": req.bold_strength,
+                "font_color": req.font_color,
+                "text_bg_color": req.text_bg_color,
+                "highlight_opacity": req.highlight_opacity,
             },
             {"file": "mem"},
             time.time() - t0,
@@ -314,6 +358,224 @@ def remove_background(req: RmbgRequest, request: Request, current_user=Depends(g
             req.model_dump(),
             "",
             {"model": MODEL_COMFYUI_RMBG},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/multi_angleshots", response_model=MultiAngleShotsResponse)
+def multi_angleshots(req: MultiAngleShotsRequest, request: Request, current_user=Depends(get_current_user)):
+    req_id = request.state.req_id
+    t0 = time.time()
+
+    try:
+        image_bytes_list = run_multi_angleshots_workflow(
+            req_id=req_id,
+            image_data_url=req.image,
+            config=req.config or {},
+        )
+        if not image_bytes_list:
+            raise RuntimeError("No image returned")
+
+        output_images = [bytes_to_data_url(img_bytes) for img_bytes in image_bytes_list if img_bytes]
+        if not output_images:
+            raise RuntimeError("No image returned")
+
+        prompt_logger.log(
+            req_id,
+            "multi_angleshots",
+            req.model_dump(),
+            "",
+            {"model": MODEL_COMFYUI_MULTI_ANGLESHOTS},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            output_full={"images": output_images},
+        )
+        record_usage(current_user["id"], MODEL_COMFYUI_MULTI_ANGLESHOTS)
+        return MultiAngleShotsResponse(images=output_images)
+
+    except Exception as e:
+        sys_logger.error(f"[{req_id}] MultiAngleShots Error: {e}")
+        prompt_logger.log(
+            req_id,
+            "multi_angleshots",
+            req.model_dump(),
+            "",
+            {"model": MODEL_COMFYUI_MULTI_ANGLESHOTS},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _run_video_upscale_task(task_id: str, req_id: str, user_id: str, payload: Dict[str, Any]) -> None:
+    t0 = time.time()
+    segment_seconds = max(1, int(payload.get("segment_seconds") or 3))
+
+    def _on_progress(done: int, total: int) -> None:
+        progress = float(done) / float(total) if total > 0 else 0.0
+        _set_video_upscale_task(
+            task_id,
+            status="running",
+            completed_chunks=max(0, int(done)),
+            total_chunks=max(0, int(total)),
+            progress=max(0.0, min(1.0, progress)),
+            updated_at=time.time(),
+        )
+
+    try:
+        _set_video_upscale_task(task_id, status="running", updated_at=time.time())
+        video_bytes, mime_type = run_video_upscale_workflow(
+            req_id=req_id,
+            video_input=str(payload.get("video") or ""),
+            segment_seconds=segment_seconds,
+            progress_cb=_on_progress,
+        )
+        if not video_bytes:
+            raise RuntimeError("No video returned")
+
+        output_data_url = bytes_to_data_url(video_bytes, mime_type=mime_type or "video/mp4")
+        current_task = _get_video_upscale_task(task_id) or {}
+        total_chunks = max(0, int(current_task.get("total_chunks") or 0))
+        _set_video_upscale_task(
+            task_id,
+            status="success",
+            completed_chunks=total_chunks,
+            total_chunks=total_chunks,
+            progress=1.0,
+            video=output_data_url,
+            updated_at=time.time(),
+        )
+        prompt_logger.log(
+            req_id,
+            "video_upscale",
+            payload,
+            "",
+            {"model": MODEL_COMFYUI_VIDEO_UPSCALE, "segment_seconds": segment_seconds},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=user_id,
+            inputs_full=payload,
+            output_full={"videos": [output_data_url]},
+        )
+        record_usage(user_id, MODEL_COMFYUI_VIDEO_UPSCALE)
+    except Exception as e:
+        _set_video_upscale_task(
+            task_id,
+            status="error",
+            error=str(e),
+            updated_at=time.time(),
+        )
+        sys_logger.error(f"[{req_id}] VideoUpscale Task Error: {e}")
+        prompt_logger.log(
+            req_id,
+            "video_upscale",
+            payload,
+            "",
+            {"model": MODEL_COMFYUI_VIDEO_UPSCALE, "segment_seconds": segment_seconds},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=user_id,
+            inputs_full=payload,
+            error=str(e),
+        )
+
+
+@router.post("/api/video_upscale/start", response_model=VideoUpscaleTaskStartResponse)
+def video_upscale_start(req: VideoUpscaleRequest, request: Request, current_user=Depends(get_current_user)):
+    req_id = request.state.req_id
+    payload = req.model_dump()
+    task_id = uuid.uuid4().hex
+    segment_seconds = max(1, int(req.segment_seconds or 3))
+
+    _set_video_upscale_task(
+        task_id,
+        user_id=current_user["id"],
+        status="queued",
+        completed_chunks=0,
+        total_chunks=0,
+        progress=0.0,
+        segment_seconds=segment_seconds,
+        created_at=time.time(),
+        updated_at=time.time(),
+    )
+
+    worker = threading.Thread(
+        target=_run_video_upscale_task,
+        args=(task_id, req_id, current_user["id"], payload),
+        daemon=True,
+    )
+    worker.start()
+    return VideoUpscaleTaskStartResponse(task_id=task_id, status="queued")
+
+
+@router.get("/api/video_upscale/status/{task_id}", response_model=VideoUpscaleTaskStatusResponse)
+def video_upscale_status(task_id: str, current_user=Depends(get_current_user)):
+    task = _get_video_upscale_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if str(task.get("user_id")) != str(current_user["id"]):
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return VideoUpscaleTaskStatusResponse(
+        task_id=task_id,
+        status=str(task.get("status") or "queued"),
+        completed_chunks=max(0, int(task.get("completed_chunks") or 0)),
+        total_chunks=max(0, int(task.get("total_chunks") or 0)),
+        progress=float(task.get("progress") or 0.0),
+        video=task.get("video"),
+        error=task.get("error"),
+    )
+
+
+@router.post("/api/video_upscale", response_model=VideoUpscaleResponse)
+def video_upscale(req: VideoUpscaleRequest, request: Request, current_user=Depends(get_current_user)):
+    req_id = request.state.req_id
+    t0 = time.time()
+    segment_seconds = max(1, int(req.segment_seconds or 3))
+
+    try:
+        video_bytes, mime_type = run_video_upscale_workflow(
+            req_id=req_id,
+            video_input=req.video,
+            segment_seconds=segment_seconds,
+        )
+        if not video_bytes:
+            raise RuntimeError("No video returned")
+
+        output_data_url = bytes_to_data_url(video_bytes, mime_type=mime_type or "video/mp4")
+        prompt_logger.log(
+            req_id,
+            "video_upscale",
+            req.model_dump(),
+            "",
+            {"model": MODEL_COMFYUI_VIDEO_UPSCALE, "segment_seconds": segment_seconds},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            output_full={"videos": [output_data_url]},
+        )
+        record_usage(current_user["id"], MODEL_COMFYUI_VIDEO_UPSCALE)
+        return VideoUpscaleResponse(video=output_data_url)
+
+    except Exception as e:
+        sys_logger.error(f"[{req_id}] VideoUpscale Error: {e}")
+        prompt_logger.log(
+            req_id,
+            "video_upscale",
+            req.model_dump(),
+            "",
+            {"model": MODEL_COMFYUI_VIDEO_UPSCALE, "segment_seconds": segment_seconds},
             {"file": "mem"},
             time.time() - t0,
             user_id=current_user["id"],

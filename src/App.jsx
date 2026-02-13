@@ -3,13 +3,12 @@ import { BrowserRouter, Navigate, Route, Routes } from "./router";
 import { AuthProvider, useAuth } from "./auth/AuthProvider";
 import Workbench from "./pages/Workbench";
 import AuthPage from "./pages/AuthPage";
-import PipelineFaceSwap from "./pages/PipelineFaceSwap";
-import PipelineBackgroundSwap from "./pages/PipelineBackgroundSwap";
-import PipelineOutfitSwap from "./pages/PipelineOutfitSwap";
+import PipelineSwapTrio from "./pages/PipelineSwapTrio";
 import PipelineBatchVideo from "./pages/PipelineBatchVideo";
 import PipelineFeatureExtract from "./pages/PipelineFeatureExtract";
 import PipelineBatchWordArt from "./pages/PipelineBatchWordArt";
 import PipelineRmbg from "./pages/PipelineRmbg";
+import GlobalToast from "./components/GlobalToast";
 
 
 const LoadingScreen = () => (
@@ -39,6 +38,7 @@ export default function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
+        <GlobalToast />
         <Routes>
           <Route path="/login" element={<AuthPage mode="login" />} />
           <Route path="/register" element={<AuthPage mode="register" />} />
@@ -51,10 +51,18 @@ export default function App() {
             }
           />
           <Route
+            path="/app/swap"
+            element={
+              <ProtectedRoute>
+                <PipelineSwapTrio />
+              </ProtectedRoute>
+            }
+          />
+          <Route
             path="/app/face-swap"
             element={
               <ProtectedRoute>
-                <PipelineFaceSwap />
+                <Navigate to="/app/swap" replace />
               </ProtectedRoute>
             }
           />
@@ -62,7 +70,7 @@ export default function App() {
             path="/app/bg-swap"
             element={
               <ProtectedRoute>
-                <PipelineBackgroundSwap />
+                <Navigate to="/app/swap" replace />
               </ProtectedRoute>
             }
           />
@@ -70,7 +78,7 @@ export default function App() {
             path="/app/outfit-swap"
             element={
               <ProtectedRoute>
-                <PipelineOutfitSwap />
+                <Navigate to="/app/swap" replace />
               </ProtectedRoute>
             }
           />

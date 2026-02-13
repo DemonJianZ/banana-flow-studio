@@ -1,5 +1,6 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { API_BASE, TOKEN_KEY } from "../config";
+import { notifyApp } from "../lib/notify";
 
 const AuthContext = createContext(null);
 const API_ROOT = (API_BASE || "").replace(/\/+$/, "");
@@ -16,6 +17,7 @@ export function AuthProvider({ children }) {
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const lastSessionNoticeAtRef = useRef(0);
 
   const clearSession = useCallback(() => {
     localStorage.removeItem(TOKEN_KEY);
@@ -42,6 +44,11 @@ export function AuthProvider({ children }) {
       // ✅ 全局 401：清 session，避免“过期 token 还在跑请求”
       if (resp.status === 401) {
         clearSession();
+        const now = Date.now();
+        if (now - lastSessionNoticeAtRef.current > 8000) {
+          notifyApp({ type: "warning", message: "登录状态已过期，请重新登录。", duration: 3500 });
+          lastSessionNoticeAtRef.current = now;
+        }
       }
 
       return resp;
@@ -84,6 +91,7 @@ export function AuthProvider({ children }) {
     if (!resp.ok) {
       const msg = data.detail || "登录失败";
       setError(msg);
+      notifyApp({ type: "error", message: msg });
       throw new Error(msg);
     }
 
@@ -106,6 +114,7 @@ export function AuthProvider({ children }) {
     if (!resp.ok) {
       const msg = data.detail || "注册失败";
       setError(msg);
+      notifyApp({ type: "error", message: msg });
       throw new Error(msg);
     }
 

@@ -15,8 +15,72 @@ import {
 import { Link } from "../router";
 import { useAuth } from "../auth/AuthProvider";
 
-const DEFAULT_PROMPT =
-  "将主图中的服装替换为参考图的服装，保持人物面部、姿势、光线、背景和整体风格不变，结果自然真实。";
+const SWAP_MODE_META = {
+  face: {
+    value: "face",
+    label: "换脸",
+    title: "流水线三合一换图",
+    subtitle: "批量替换主图内容，可切换换脸/换背景/换装",
+    startBtn: "开始换脸",
+    refSectionTitle: "参考图添加区域",
+    refAddBtn: "添加参考图",
+    refEmptyTitle: "拖拽或点击上传参考图",
+    refEmptyHint: "支持多张，建议清晰正脸、光线自然",
+    promptHint: "用于增强换脸指令，默认已经适配常见场景",
+    resultLabel: "换脸结果",
+    downloadPrefix: "face-swap",
+    defaultPrompt:
+      "将主图中的人脸替换为参考图的人脸，保持主图的姿势、光线、背景、服装和整体风格不变，结果自然真实。",
+  },
+  background: {
+    value: "background",
+    label: "换背景",
+    title: "流水线三合一换图",
+    subtitle: "批量替换主图内容，可切换换脸/换背景/换装",
+    startBtn: "开始换背景",
+    refSectionTitle: "背景参考图添加区域",
+    refAddBtn: "添加背景参考图",
+    refEmptyTitle: "拖拽或点击上传背景参考图",
+    refEmptyHint: "支持多张，建议背景清晰、光线自然",
+    promptHint: "用于增强换背景指令，默认已经适配常见场景",
+    resultLabel: "换背景结果",
+    downloadPrefix: "bg-swap",
+    defaultPrompt:
+      "将主图中的背景替换为参考图的背景，保持主体、光线、构图和整体风格不变，结果自然真实。",
+  },
+  outfit: {
+    value: "outfit",
+    label: "换装",
+    title: "流水线三合一换图",
+    subtitle: "批量替换主图内容，可切换换脸/换背景/换装",
+    startBtn: "开始换装",
+    refSectionTitle: "服装参考图添加区域",
+    refAddBtn: "添加服装参考图",
+    refEmptyTitle: "拖拽或点击上传服装参考图",
+    refEmptyHint: "支持多张，建议服装清晰、光线自然",
+    promptHint: "用于增强换装指令，默认已经适配常见场景",
+    resultLabel: "换装结果",
+    downloadPrefix: "outfit-swap",
+    defaultPrompt:
+      "将主图中的服装替换为参考图的服装，保持人物面部、姿势、光线、背景和整体风格不变，结果自然真实。",
+  },
+};
+
+const SWAP_MODE_OPTIONS = [
+  { value: "face", label: "换脸" },
+  { value: "background", label: "换背景" },
+  { value: "outfit", label: "换装" },
+];
+const DEFAULT_VIDEO_PROMPT =
+  "画面轻微晃动，镜头产生呼吸感；画面中不出现任何额外元素，商品保持静止。";
+const DEFAULT_VIDEO_DURATION = 3;
+const DEFAULT_VIDEO_RESOLUTION = "1080p";
+const DEFAULT_VIDEO_RATIO = "adaptive";
+const MOTION_RESOLUTION_OPTIONS = [
+  { label: "480P", value: "480p" },
+  { label: "720P", value: "720p" },
+  { label: "1080P", value: "1080p" },
+];
 
 const generateId = () => Math.random().toString(36).slice(2, 11);
 
@@ -65,25 +129,32 @@ const buildResultsSeed = (mainItems, refItems) =>
       outputUrl: null,
       status: "pending",
       error: null,
+      videoUrl: null,
+      videoStatus: "idle",
+      videoError: null,
     })),
   );
 
-const PipelineOutfitSwap = () => {
+const PipelineSwapTrio = () => {
   const { apiFetch } = useAuth();
   const [mainImages, setMainImages] = useState([]);
   const [refImages, setRefImages] = useState([]);
-  const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
+  const [swapMode, setSwapMode] = useState("face");
+  const [prompt, setPrompt] = useState(SWAP_MODE_META.face.defaultPrompt);
   const [size, setSize] = useState("1024x1024");
   const [aspectRatio, setAspectRatio] = useState("1:1");
+  const [videoResolution, setVideoResolution] = useState(DEFAULT_VIDEO_RESOLUTION);
   const [results, setResults] = useState([]);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState("");
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [previewImage, setPreviewImage] = useState(null);
+  const [previewVideo, setPreviewVideo] = useState(null);
   const resultsSeedRef = useRef([]);
   const abortControllerRef = useRef(null);
   const mainInputRef = useRef(null);
   const refInputRef = useRef(null);
+  const activeMode = useMemo(() => SWAP_MODE_META[swapMode] || SWAP_MODE_META.face, [swapMode]);
 
   const hasReadyInputs = mainImages.length > 0;
 
@@ -94,6 +165,14 @@ const PipelineOutfitSwap = () => {
   );
   const retryableCount = useMemo(
     () => results.filter((item) => item.status === "error" || item.status === "cancelled" || item.status === "pending").length,
+    [results],
+  );
+  const motionTargets = useMemo(
+    () => results.filter((item) => item.outputUrl && item.videoStatus !== "running"),
+    [results],
+  );
+  const hasMotionRunning = useMemo(
+    () => results.some((item) => item.videoStatus === "running"),
     [results],
   );
   const progressPct = useMemo(() => {
@@ -180,7 +259,7 @@ const PipelineOutfitSwap = () => {
         while (true) {
           const task = nextTask();
           if (!task) break;
-          updateResult(task.id, { status: "running", error: null });
+          updateResult(task.id, { status: "running", error: null, videoUrl: null, videoStatus: "idle", videoError: null });
 
           try {
             const resp = await apiFetch(`/api/multi_image_generate`, {
@@ -188,7 +267,7 @@ const PipelineOutfitSwap = () => {
               headers: { "Content-Type": "application/json" },
               signal: controller.signal,
               body: JSON.stringify({
-                prompt: prompt?.trim() || DEFAULT_PROMPT,
+                prompt: prompt?.trim() || activeMode.defaultPrompt,
                 images: task.refUrl ? [task.inputUrl, task.refUrl] : [task.inputUrl],
                 temperature: 0.7,
                 size,
@@ -202,7 +281,14 @@ const PipelineOutfitSwap = () => {
             const outputUrl = data.image || data.images?.[0];
             if (!outputUrl) throw new Error("未返回生成结果");
 
-            updateResult(task.id, { status: "success", outputUrl, error: null });
+            updateResult(task.id, {
+              status: "success",
+              outputUrl,
+              error: null,
+              videoUrl: null,
+              videoStatus: "idle",
+              videoError: null,
+            });
           } catch (err) {
             if (controller.signal.aborted) {
               updateResult(task.id, { status: "cancelled", error: "任务已取消" });
@@ -219,7 +305,7 @@ const PipelineOutfitSwap = () => {
     await Promise.all(workers);
     abortControllerRef.current = null;
     setIsRunning(false);
-  }, [apiFetch, aspectRatio, isRunning, prompt, size, updateResult]);
+  }, [activeMode.defaultPrompt, apiFetch, aspectRatio, isRunning, prompt, size, updateResult]);
 
   const handleRun = useCallback(async () => {
     if (isRunning) return;
@@ -268,6 +354,45 @@ const PipelineOutfitSwap = () => {
     [handleRefFiles],
   );
 
+  const handleGenerateMotion = useCallback(async (item) => {
+    if (!item?.outputUrl) return;
+    if (item.videoStatus === "running") return;
+
+    updateResult(item.id, { videoStatus: "running", videoError: null });
+    try {
+      const resp = await apiFetch(`/api/img2video`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "Doubao-Seedance-1.0-pro",
+          image: item.outputUrl,
+          last_frame_image: null,
+          prompt: DEFAULT_VIDEO_PROMPT,
+          duration: DEFAULT_VIDEO_DURATION,
+          fps: 24,
+          camera_fixed: false,
+          resolution: videoResolution,
+          ratio: aspectRatio || DEFAULT_VIDEO_RATIO,
+          seed: 21,
+        }),
+      });
+
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(extractApiError(data));
+
+      const outputUrl = data.video || data.image || data.images?.[0];
+      if (!outputUrl) throw new Error("未返回动图结果");
+      updateResult(item.id, { videoStatus: "success", videoUrl: outputUrl, videoError: null });
+    } catch (err) {
+      updateResult(item.id, { videoStatus: "error", videoError: err?.message || String(err) });
+    }
+  }, [apiFetch, aspectRatio, updateResult, videoResolution]);
+
+  const handleGenerateAllMotion = useCallback(async () => {
+    if (motionTargets.length === 0) return;
+    await Promise.allSettled(motionTargets.map((item) => handleGenerateMotion(item)));
+  }, [handleGenerateMotion, motionTargets]);
+
   return (
     <div className="min-h-screen bg-slate-950 text-white flex flex-col">
       <header className="px-4 sm:px-6 py-4 border-b border-slate-800 bg-slate-900/60">
@@ -279,8 +404,8 @@ const PipelineOutfitSwap = () => {
           </Link>
           <div className="w-px h-5 bg-slate-800" />
           <div>
-            <h1 className="text-lg font-bold">流水线换装</h1>
-            <p className="text-xs text-slate-400">批量替换主图服装，保持人物与风格一致</p>
+            <h1 className="text-lg font-bold">{activeMode.title}</h1>
+            <p className="text-xs text-slate-400">{activeMode.subtitle}</p>
           </div>
         </div>
 
@@ -319,7 +444,7 @@ const PipelineOutfitSwap = () => {
             }`}
           >
             {isRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-            {isRunning ? "处理中" : "开始换装"}
+            {isRunning ? "处理中" : activeMode.startBtn}
           </button>
         </div>
         </div>
@@ -427,7 +552,7 @@ const PipelineOutfitSwap = () => {
           >
             <div className="flex items-center justify-between">
               <div>
-                <h2 className="text-sm font-semibold">服装参考图添加区域</h2>
+                <h2 className="text-sm font-semibold">{activeMode.refSectionTitle}</h2>
                 <p className="text-xs text-slate-500">可选，支持多张上传；未提供则按提示词编辑</p>
               </div>
               <div className="flex items-center gap-2">
@@ -436,7 +561,7 @@ const PipelineOutfitSwap = () => {
                   className="text-xs px-3 py-1.5 rounded-md bg-slate-800 border border-slate-700 hover:border-purple-500 hover:text-white transition-colors"
                 >
                   <Upload className="w-3 h-3 inline-block mr-1" />
-                  添加服装参考图
+                  {activeMode.refAddBtn}
                 </button>
                 <button
                   onClick={clearRefImages}
@@ -490,8 +615,8 @@ const PipelineOutfitSwap = () => {
             ) : (
               <div className="flex flex-col items-center justify-center border border-dashed border-slate-700 rounded-xl py-10 text-slate-500">
                 <ImagePlus className="w-8 h-8 mb-2" />
-                <div className="text-sm">拖拽或点击上传服装参考图</div>
-                <div className="text-xs text-slate-600 mt-1">支持多张，建议服装清晰、光线自然</div>
+                <div className="text-sm">{activeMode.refEmptyTitle}</div>
+                <div className="text-xs text-slate-600 mt-1">{activeMode.refEmptyHint}</div>
               </div>
             )}
           </section>
@@ -501,11 +626,31 @@ const PipelineOutfitSwap = () => {
           <div className="flex items-center justify-between gap-4 flex-wrap">
             <div>
               <h2 className="text-sm font-semibold">提示词（可选）</h2>
-              <p className="text-xs text-slate-500">用于增强换装指令，默认已经适配常见场景</p>
+              <p className="text-xs text-slate-500">{activeMode.promptHint}</p>
             </div>
             <div className="text-xs text-slate-500">已完成 {totalSuccess}/{results.length || 0}</div>
           </div>
-          <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="mt-4 grid grid-cols-1 md:grid-cols-4 gap-4">
+            <label className="text-xs text-slate-400 space-y-2">
+              <span className="block">功能类型</span>
+              <select
+                value={swapMode}
+                disabled={isRunning}
+                onChange={(e) => {
+                  const nextMode = e.target.value;
+                  setSwapMode(nextMode);
+                  setPrompt((SWAP_MODE_META[nextMode] || SWAP_MODE_META.face).defaultPrompt);
+                  setResults([]);
+                }}
+                className="w-full rounded-lg bg-slate-950 border border-slate-800 text-sm text-slate-200 px-3 py-2 focus:outline-none focus:border-purple-500 disabled:opacity-60"
+              >
+                {SWAP_MODE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value} className="bg-slate-900">
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <label className="text-xs text-slate-400 space-y-2">
               <span className="block">分辨率</span>
               <select
@@ -532,6 +677,20 @@ const PipelineOutfitSwap = () => {
                     {opt.label}
                   </option>
                 ))}
+                </select>
+              </label>
+            <label className="text-xs text-slate-400 space-y-2">
+              <span className="block">动图分辨率</span>
+              <select
+                value={videoResolution}
+                onChange={(e) => setVideoResolution(e.target.value)}
+                className="w-full rounded-lg bg-slate-950 border border-slate-800 text-sm text-slate-200 px-3 py-2 focus:outline-none focus:border-purple-500"
+              >
+                {MOTION_RESOLUTION_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value} className="bg-slate-900">
+                    {opt.label}
+                  </option>
+                ))}
               </select>
             </label>
           </div>
@@ -547,21 +706,35 @@ const PipelineOutfitSwap = () => {
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold">输出结果</h2>
             {results.some((item) => item.outputUrl) && (
-              <button
-                onClick={() => {
-                  results.forEach((item) => {
-                    if (!item.outputUrl) return;
-                    const link = document.createElement("a");
-                    link.href = item.outputUrl;
-                    link.download = `outfit-swap-${item.id}.png`;
-                    link.click();
-                  });
-                }}
-                className="text-xs px-3 py-1.5 rounded-md bg-slate-800 border border-slate-700 hover:border-purple-500 hover:text-white transition-colors"
-              >
-                <Download className="w-3 h-3 inline-block mr-1" />
-                下载全部
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleGenerateAllMotion}
+                  disabled={isRunning || hasMotionRunning || motionTargets.length === 0}
+                  className={`text-xs px-3 py-1.5 rounded-md border transition-colors ${
+                    !isRunning && !hasMotionRunning && motionTargets.length > 0
+                      ? "bg-slate-800 border-slate-700 hover:border-purple-500 hover:text-white"
+                      : "bg-slate-900 border-slate-800 text-slate-600 cursor-not-allowed"
+                  }`}
+                >
+                  {hasMotionRunning ? <Loader2 className="w-3 h-3 inline-block mr-1 animate-spin" /> : <Play className="w-3 h-3 inline-block mr-1" />}
+                  全部转动图
+                </button>
+                <button
+                  onClick={() => {
+                    results.forEach((item) => {
+                      if (!item.outputUrl) return;
+                      const link = document.createElement("a");
+                      link.href = item.outputUrl;
+                      link.download = `${activeMode.downloadPrefix}-${item.id}.png`;
+                      link.click();
+                    });
+                  }}
+                  className="text-xs px-3 py-1.5 rounded-md bg-slate-800 border border-slate-700 hover:border-purple-500 hover:text-white transition-colors"
+                >
+                  <Download className="w-3 h-3 inline-block mr-1" />
+                  下载全部
+                </button>
+              </div>
             )}
           </div>
 
@@ -632,21 +805,41 @@ const PipelineOutfitSwap = () => {
                     </div>
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
-                        <div className="text-[11px] text-slate-500">换装结果</div>
-                        {item.outputUrl && (
-                          <button
-                            onClick={() => {
-                              const link = document.createElement("a");
-                              link.href = item.outputUrl;
-                              link.download = `outfit-swap-${item.id}.png`;
-                              link.click();
-                            }}
-                            className="text-[11px] px-2 py-0.5 rounded border border-slate-700 text-slate-400 hover:text-white hover:border-purple-500 transition-colors"
-                          >
-                            <Download className="w-3 h-3 inline-block mr-1" />
-                            下载
-                          </button>
-                        )}
+                        <div className="text-[11px] text-slate-500">{activeMode.resultLabel}</div>
+                        <div className="flex items-center gap-1.5">
+                          {item.outputUrl && (
+                            <button
+                              onClick={() => handleGenerateMotion(item)}
+                              disabled={item.videoStatus === "running"}
+                              className={`text-[11px] px-2 py-0.5 rounded border transition-colors ${
+                                item.videoStatus === "running"
+                                  ? "border-slate-800 text-slate-600 cursor-not-allowed"
+                                  : "border-slate-700 text-slate-400 hover:text-white hover:border-purple-500"
+                              }`}
+                            >
+                              {item.videoStatus === "running" ? (
+                                <Loader2 className="w-3 h-3 inline-block mr-1 animate-spin" />
+                              ) : (
+                                <Play className="w-3 h-3 inline-block mr-1" />
+                              )}
+                              一键转动图
+                            </button>
+                          )}
+                          {item.outputUrl && (
+                            <button
+                              onClick={() => {
+                                const link = document.createElement("a");
+                                link.href = item.outputUrl;
+                                link.download = `${activeMode.downloadPrefix}-${item.id}.png`;
+                                link.click();
+                              }}
+                              className="text-[11px] px-2 py-0.5 rounded border border-slate-700 text-slate-400 hover:text-white hover:border-purple-500 transition-colors"
+                            >
+                              <Download className="w-3 h-3 inline-block mr-1" />
+                              下载
+                            </button>
+                          )}
+                        </div>
                       </div>
                       <div className="relative">
                         {item.status === "running" && (
@@ -661,7 +854,7 @@ const PipelineOutfitSwap = () => {
                             className="block w-full h-40 rounded-lg border border-slate-800 overflow-hidden"
                             title="点击放大预览"
                           >
-                            <img src={item.outputUrl} alt="换装结果" className="w-full h-full object-cover" />
+                            <img src={item.outputUrl} alt={activeMode.resultLabel} className="w-full h-full object-cover" />
                           </button>
                         ) : (
                           <div className="w-full h-40 rounded-lg border border-dashed border-slate-800 flex items-center justify-center text-xs text-slate-600">
@@ -669,12 +862,60 @@ const PipelineOutfitSwap = () => {
                           </div>
                         )}
                       </div>
+                      {(item.videoUrl || item.videoStatus === "running" || item.videoError) && (
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <div className="text-[11px] text-slate-500">动图结果</div>
+                            {item.videoUrl && (
+                              <button
+                                onClick={() => {
+                                  const link = document.createElement("a");
+                                  link.href = item.videoUrl;
+                                  link.download = `motion-${item.id}.mp4`;
+                                  link.click();
+                                }}
+                                className="text-[11px] px-2 py-0.5 rounded border border-slate-700 text-slate-400 hover:text-white hover:border-purple-500 transition-colors"
+                              >
+                                <Download className="w-3 h-3 inline-block mr-1" />
+                                下载
+                              </button>
+                            )}
+                          </div>
+                          <div className="relative">
+                            {item.videoStatus === "running" && (
+                              <div className="absolute inset-0 flex items-center justify-center bg-black/40 rounded-lg z-10">
+                                <Loader2 className="w-5 h-5 animate-spin" />
+                              </div>
+                            )}
+                            {item.videoUrl ? (
+                              <button
+                                type="button"
+                                onClick={() => setPreviewVideo(item.videoUrl)}
+                                className="block w-full h-40 rounded-lg border border-slate-800 overflow-hidden"
+                                title="点击放大预览"
+                              >
+                                <video src={item.videoUrl} className="w-full h-full object-cover" muted loop playsInline />
+                              </button>
+                            ) : (
+                              <div className="w-full h-40 rounded-lg border border-dashed border-slate-800 flex items-center justify-center text-xs text-slate-600">
+                                {item.videoError ? "生成失败" : "等待生成"}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                   {item.error && (
                     <div className="text-xs text-red-400 flex items-start gap-2">
                       <AlertCircle className="w-3 h-3 mt-0.5" />
                       {item.error}
+                    </div>
+                  )}
+                  {item.videoError && (
+                    <div className="text-xs text-red-400 flex items-start gap-2">
+                      <AlertCircle className="w-3 h-3 mt-0.5" />
+                      动图生成失败：{item.videoError}
                     </div>
                   )}
                 </div>
@@ -700,8 +941,29 @@ const PipelineOutfitSwap = () => {
           </div>
         </div>
       )}
+      {previewVideo && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-6"
+          onClick={() => setPreviewVideo(null)}
+        >
+          <div className="relative max-w-[90vw] max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
+            <video
+              src={previewVideo}
+              controls
+              autoPlay
+              className="max-w-full max-h-[90vh] rounded-lg border border-slate-700 object-contain"
+            />
+            <button
+              className="absolute -top-10 right-0 text-white/70 hover:text-white transition-colors bg-slate-800/70 p-2 rounded-full hover:bg-slate-700/80"
+              onClick={() => setPreviewVideo(null)}
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
 
-export default PipelineOutfitSwap;
+export default PipelineSwapTrio;
