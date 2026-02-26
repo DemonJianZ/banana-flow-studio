@@ -20,6 +20,7 @@ MODEL_COMFYUI_OVERLAYTEXT = "comfyui-overlaytext"
 MODEL_COMFYUI_RMBG = "comfyui-rmbg"
 MODEL_COMFYUI_MULTI_ANGLESHOTS = "comfyui-multi-angleshots"
 MODEL_COMFYUI_VIDEO_UPSCALE = "comfyui-video-upscale"
+MODEL_COMFYUI_CONTROLNET = "comfyui-controlnet"
 
 ARK_VIDEO_API_URL = "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks"
 ARK_VIDEO_MODEL_ID = "ep-20250708120248-4w7w5"
@@ -49,6 +50,11 @@ _default_upscale = os.path.join(BASE_DIR, "workflows", "upscale.json")
 if not os.path.exists(_default_upscale):
     _default_upscale = os.path.join(BASE_DIR, "bananaflow", "workflows", "upscale.json")
 COMFYUI_UPSCALE_PATH = os.getenv("COMFYUI_UPSCALE_PATH", _default_upscale)
+
+_default_controlnet = os.path.join(BASE_DIR, "workflows", "Controlnet.json")
+if not os.path.exists(_default_controlnet):
+    _default_controlnet = os.path.join(BASE_DIR, "bananaflow", "workflows", "Controlnet.json")
+COMFYUI_CONTROLNET_PATH = os.getenv("COMFYUI_CONTROLNET_PATH", _default_controlnet)
 
 COMFYUI_OUTPUT_NODE_ID = os.getenv("COMFYUI_OUTPUT_NODE_ID", "4")
 COMFYUI_TIMEOUT_SEC = int(os.getenv("COMFYUI_TIMEOUT_SEC", "120"))

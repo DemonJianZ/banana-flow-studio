@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 import time
+import unicodedata
 import uuid
 from base64 import b64decode
 from io import BytesIO
@@ -21,6 +22,7 @@ from core.config import (
     COMFYUI_RMBG_PATH,
     COMFYUI_MULTI_ANGLESHOTS_PATH,
     COMFYUI_UPSCALE_PATH,
+    COMFYUI_CONTROLNET_PATH,
     COMFYUI_OUTPUT_NODE_ID,
     COMFYUI_TIMEOUT_SEC,
     COMFYUI_VIDEO_UPSCALE_TIMEOUT_SEC,
@@ -33,6 +35,12 @@ from utils.size import calculate_target_resolution
 
 class ComfyUiError(RuntimeError):
     pass
+
+
+OVERLAYTEXT_TOP_SAFE_AREA_RATIO = 0.06
+OVERLAYTEXT_TOP_SAFE_AREA_RATIO_3_4 = 0.01
+OVERLAYTEXT_SIDE_SAFE_AREA_RATIO = 0.105
+OVERLAYTEXT_WRAP_WIDTH_SAFETY_RATIO = 0.94
 
 
 def _load_workflow(path: str) -> Dict[str, Any]:
@@ -238,6 +246,72 @@ def _split_keywords(text: Optional[str]) -> list[str]:
         return []
     parts = re.split(r"[\\n,，;；|]+", text)
     return [p.strip() for p in parts if p and p.strip()]
+
+
+def _estimate_overlay_char_width_px(ch: str, font_size: float) -> float:
+    if not ch:
+        return 0.0
+    if ch == "\t":
+        return font_size * 2.0
+    if ch.isspace():
+        return font_size * 0.35
+
+    if ch in ",.;:!|`'":
+        return font_size * 0.32
+    if ch in "，。；：！？、":
+        return font_size * 0.5
+    if ch in "()[]{}<>":
+        return font_size * 0.45
+    if ch in "（）【】《》":
+        return font_size * 0.65
+
+    eaw = unicodedata.east_asian_width(ch)
+    if eaw in ("W", "F"):
+        return font_size * 1.0
+    if eaw == "A":
+        return font_size * 0.85
+    if ch.isdigit():
+        return font_size * 0.58
+    if ch.isascii() and ch.isalpha():
+        return font_size * (0.68 if ch.isupper() else 0.6)
+    if ch.isascii():
+        return font_size * 0.55
+    return font_size * 0.85
+
+
+def _wrap_overlay_text_to_safe_width(text: str, max_width_px: float, font_size: float) -> str:
+    if not text:
+        return text
+    if max_width_px <= 1 or font_size <= 0:
+        return text
+
+    width_limit = max(1.0, float(max_width_px) * OVERLAYTEXT_WRAP_WIDTH_SAFETY_RATIO)
+    line_source = text.split("\n")
+    wrapped_lines: list[str] = []
+
+    for raw_line in line_source:
+        if raw_line == "":
+            wrapped_lines.append("")
+            continue
+
+        current_chars: list[str] = []
+        current_width = 0.0
+
+        for ch in raw_line:
+            ch_width = _estimate_overlay_char_width_px(ch, font_size)
+            if current_chars and current_width + ch_width > width_limit:
+                wrapped_lines.append("".join(current_chars).rstrip())
+                current_chars = []
+                current_width = 0.0
+                if ch.isspace():
+                    continue
+
+            current_chars.append(ch)
+            current_width += ch_width
+
+        wrapped_lines.append("".join(current_chars))
+
+    return "\n".join(wrapped_lines)
 
 
 def _placeholder_for_char(ch: str) -> str:
@@ -578,6 +652,7 @@ def run_overlaytext_workflow(
     line_spacing: Optional[int] = None,
     position_x: Optional[float] = None,
     position_y: Optional[float] = None,
+    ratio_adapt_3_4: Optional[bool] = False,
     rotation_angle: Optional[float] = None,
     rotation_options: Optional[str] = None,
     font_color_hex: Optional[str] = None,
@@ -592,6 +667,22 @@ def run_overlaytext_workflow(
     workflow = copy.deepcopy(workflow)
 
     mime_type, img_bytes = parse_data_url(image_data_url)
+    top_safe_area_ratio = (
+        OVERLAYTEXT_TOP_SAFE_AREA_RATIO_3_4 if bool(ratio_adapt_3_4) else OVERLAYTEXT_TOP_SAFE_AREA_RATIO
+    )
+    image_width_px = 0
+    safe_top_offset_px = 0.0
+    safe_side_margin_px = 0
+    try:
+        with Image.open(BytesIO(img_bytes)) as img:
+            image_width_px = int(img.width)
+            safe_top_offset_px = float(round(img.height * top_safe_area_ratio))
+            safe_side_margin_px = int(round(img.width * OVERLAYTEXT_SIDE_SAFE_AREA_RATIO))
+    except Exception:
+        # Best effort only; if size parsing fails, fall back to caller-provided values.
+        image_width_px = 0
+        safe_top_offset_px = 0.0
+        safe_side_margin_px = 0
     ext = "png"
     if "jpeg" in mime_type or "jpg" in mime_type:
         ext = "jpg"
@@ -603,7 +694,6 @@ def run_overlaytext_workflow(
     uploaded = _upload_image(img_bytes, upload_name)
 
     _set_node_input(workflow, "2", "image", uploaded)
-    _set_node_input(workflow, "6", "text", text)
 
     def _set_if_not_none(key: str, value: Any, cast: Optional[type] = None) -> None:
         if value is None:
@@ -636,10 +726,13 @@ def run_overlaytext_workflow(
     _set_if_not_none("highlight_padding", highlight_padding, int)
     _set_if_not_none("align", align)
     _set_if_not_none("justify", justify)
-    _set_if_not_none("margins", margins, int)
+    requested_margins = int(margins) if margins is not None else 0
+    effective_margins = max(requested_margins, safe_side_margin_px)
+    _set_node_input(workflow, "6", "margins", effective_margins)
     _set_if_not_none("line_spacing", line_spacing, int)
     _set_if_not_none("position_x", position_x, float)
-    _set_if_not_none("position_y", position_y, float)
+    effective_position_y = safe_top_offset_px + (float(position_y) if position_y is not None else 0.0)
+    _set_node_input(workflow, "6", "position_y", effective_position_y)
     _set_if_not_none("rotation_angle", rotation_angle, float)
     _set_if_not_none("rotation_options", rotation_options)
     _set_if_not_none("font_color_hex", font_color_hex)
@@ -649,6 +742,23 @@ def run_overlaytext_workflow(
     _set_if_not_none("highlight_color_hex_3", highlight_color_hex_3)
     _set_if_not_none("highlight_color_hex_4", highlight_color_hex_4)
     _set_if_not_none("highlight_color_hex_5", highlight_color_hex_5)
+
+    effective_font_size = int(_get_node_input(workflow, "6", "font_size", 50) or 50)
+    effective_text_bg_padding = int(_get_node_input(workflow, "6", "text_bg_padding", 0) or 0)
+    effective_bold_strength = int(_get_node_input(workflow, "6", "bold_strength", 0) or 0)
+    wrap_padding_px = max(0, effective_text_bg_padding) * 2 + max(0, effective_bold_strength) * 2
+    safe_text_width_px = max(1, image_width_px - effective_margins * 2 - wrap_padding_px)
+    wrapped_text = (
+        _wrap_overlay_text_to_safe_width(text, safe_text_width_px, float(effective_font_size))
+        if image_width_px > 0
+        else text
+    )
+    if wrapped_text != text:
+        sys_logger.info(
+            f"[{req_id}] Auto-wrapped overlay text to keep safe area "
+            f"(img_w={image_width_px}, margins={effective_margins}, font_size={effective_font_size})"
+        )
+    _set_node_input(workflow, "6", "text", wrapped_text)
 
     client_id = uuid.uuid4().hex
     sys_logger.info(f"[{req_id}] ComfyUI queue prompt client_id={client_id}")
@@ -907,6 +1017,90 @@ def run_multi_angleshots_workflow(
         )
 
     return [_download_image(info) for info in image_infos[: len(save_node_ids)]]
+
+
+def run_controlnet_pose_video_workflow(
+    *,
+    req_id: str,
+    image_data_url: str,
+    control_video_input: str,
+    positive_prompt: Optional[str] = None,
+    negative_prompt: Optional[str] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    length: Optional[int] = None,
+    fps: Optional[int] = None,
+    seed: Optional[int] = None,
+    filename_prefix: Optional[str] = None,
+) -> tuple[bytes, str]:
+    workflow = _load_workflow(COMFYUI_CONTROLNET_PATH)
+    workflow = copy.deepcopy(workflow)
+
+    mime_type, img_bytes = parse_data_url(image_data_url)
+    img_bytes, orientation_fixed = _normalize_orientation_if_needed(img_bytes)
+    img_ext = "png"
+    if not orientation_fixed:
+        if "jpeg" in mime_type or "jpg" in mime_type:
+            img_ext = "jpg"
+        elif "webp" in mime_type:
+            img_ext = "webp"
+    image_upload_name = f"controlnet-ref-{uuid.uuid4().hex}.{img_ext}"
+    sys_logger.info(f"[{req_id}] Uploading ControlNet ref image to ComfyUI: {image_upload_name}")
+    uploaded_image = _upload_file(img_bytes, image_upload_name, f"image/{'jpeg' if img_ext == 'jpg' else img_ext}")
+    _set_node_input(workflow, "178", "image", uploaded_image)
+
+    with tempfile.TemporaryDirectory(prefix="comfyui-controlnet-pose-") as temp_dir:
+        control_path = _materialize_video_input(control_video_input, temp_dir)
+        video_ext = os.path.splitext(control_path)[1].lower() or ".mp4"
+        video_mime = _guess_mime_from_ext(video_ext)
+        with open(control_path, "rb") as f:
+            control_bytes = f.read()
+        video_upload_name = f"controlnet-pose-{uuid.uuid4().hex}{video_ext}"
+        sys_logger.info(f"[{req_id}] Uploading ControlNet pose video to ComfyUI: {video_upload_name}")
+        uploaded_video = _upload_file(control_bytes, video_upload_name, video_mime)
+        _set_node_input(workflow, "174", "file", uploaded_video)
+
+    if positive_prompt is not None:
+        _set_node_input(workflow, "179", "text", str(positive_prompt))
+    if negative_prompt is not None:
+        _set_node_input(workflow, "162", "text", str(negative_prompt))
+    if width is not None:
+        _set_node_input(
+            workflow,
+            "180",
+            "width",
+            max(1, _to_int(width, _to_int(_get_node_input(workflow, "180", "width", 480), 480))),
+        )
+    if height is not None:
+        _set_node_input(
+            workflow,
+            "180",
+            "height",
+            max(1, _to_int(height, _to_int(_get_node_input(workflow, "180", "height", 720), 720))),
+        )
+    if length is not None:
+        _set_node_input(workflow, "180", "length", max(1, _to_int(length, _to_int(_get_node_input(workflow, "180", "length", 49), 49))))
+    if fps is not None:
+        _set_node_input(workflow, "163", "fps", max(1, _to_int(fps, _to_int(_get_node_input(workflow, "163", "fps", 16), 16))))
+    if seed is not None:
+        _set_node_input(workflow, "169", "noise_seed", _to_int(seed, _to_int(_get_node_input(workflow, "169", "noise_seed", 0), 0)))
+
+    save_prefix = (filename_prefix or "").strip() or f"video/controlnet-pose-{req_id}"
+    _set_node_input(workflow, "170", "filename_prefix", save_prefix)
+
+    client_id = uuid.uuid4().hex
+    sys_logger.info(f"[{req_id}] ComfyUI controlnet-pose queue prompt client_id={client_id}")
+    prompt_id = _queue_prompt(workflow, client_id)
+    history = _wait_for_history(prompt_id, timeout_sec=COMFYUI_VIDEO_UPSCALE_TIMEOUT_SEC)
+
+    output_info = _pick_output_file(history, preferred_node_ids=["170"])
+    output_bytes = _download_file(output_info)
+    output_name = str(output_info.get("filename") or "")
+    output_ext = os.path.splitext(output_name)[1].lower() or ".mp4"
+    output_mime = _guess_mime_from_ext(output_ext)
+    if output_mime == "application/octet-stream":
+        output_mime = "video/mp4"
+    return output_bytes, output_mime
 
 
 def run_video_upscale_workflow(

@@ -253,7 +253,7 @@ const getProcessorModeDefaults = (mode) => {
     return { mode, prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1" } };
   }
   if (mode === "multi_image_generate") {
-    return { mode, prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1", note: "" } };
+    return { mode, prompt: "", templates: { size: "1024x1024", note: "" } };
   }
   if (mode === "rmbg") {
     return { mode, prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1" } };
@@ -926,13 +926,26 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
 
               <div>
                 <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">比例 (Ratio)</div>
+                {node.data.mode === "multi_image_generate" && (
+                  <div className="text-[10px] text-slate-500 mb-2">可不选；不选时默认跟随输入图像尺寸</div>
+                )}
                 <div className="grid grid-cols-5 gap-2">
                   {ASPECT_RATIOS.map((ar) => {
-                    const isSelected = (node.data.templates?.aspect_ratio || "1:1") === ar.label;
+                    const selectedRatio = node.data.templates?.aspect_ratio;
+                    const isImg2Img = node.data.mode === "multi_image_generate";
+                    const isSelected = (isImg2Img ? selectedRatio : selectedRatio || "1:1") === ar.label;
                     return (
                       <button
                         key={ar.label}
-                        onClick={() => updateData(node.id, { templates: { ...(node.data.templates || {}), aspect_ratio: ar.label } })}
+                        onClick={() => {
+                          const nextTemplates = { ...(node.data.templates || {}) };
+                          if (isImg2Img && isSelected) {
+                            delete nextTemplates.aspect_ratio;
+                          } else {
+                            nextTemplates.aspect_ratio = ar.label;
+                          }
+                          updateData(node.id, { templates: nextTemplates });
+                        }}
                         className={`flex flex-col items-center gap-1 p-1 rounded-md border transition-all ${
                           isSelected
                             ? "bg-purple-600 border-purple-500 text-white"
@@ -2004,7 +2017,7 @@ const handleNodeMouseDown = (e, nid) => {
     pushHistory();
     const n0 = { id: generateId(), type: NODE_TYPES.TEXT_INPUT, x: 100, y: 100, data: { text: "保持原图构图，转为水彩风格" } };
     const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 350, data: { images: [] } };
-    const n2 = { id: generateId(), type: NODE_TYPES.PROCESSOR, x: 500, y: 200, data: { mode: "multi_image_generate", prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1", note: "" }, batchSize: 1, uploadedImages: [], status: "idle", model: "gemini-3-pro-image-preview" } };
+    const n2 = { id: generateId(), type: NODE_TYPES.PROCESSOR, x: 500, y: 200, data: { mode: "multi_image_generate", prompt: "", templates: { size: "1024x1024", note: "" }, batchSize: 1, uploadedImages: [], status: "idle", model: "gemini-3-pro-image-preview" } };
     const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
     setNodes([n0, n1, n2, n3]);
     setConnections([
@@ -2103,7 +2116,7 @@ const createConnectedImg2ImgBranch = useCallback(
       data: {
         mode: "multi_image_generate",
         prompt: "",
-        templates: { size: "1024x1024", aspect_ratio: "1:1" },
+        templates: { size: "1024x1024", note: "" },
         batchSize: 1,
         uploadedImages: [],
         status: "idle",
@@ -2609,6 +2622,7 @@ const createConnectedImg2ImgBranch = useCallback(
                 if (!resp.ok) throw new Error(extractApiError(data));
                 resultUrl = data.image; // 若后端返回字段不同（例如 data.video），在这里改
               } else if (procNode.data.mode === "multi_image_generate") {
+                const selectedAspectRatio = procNode.data.templates?.aspect_ratio;
                 const resp = await apiFetch(`/api/multi_image_generate`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
@@ -2616,8 +2630,12 @@ const createConnectedImg2ImgBranch = useCallback(
                     prompt: sourceText || procNode.data.prompt,
                     images: inputImages,
                     temperature: 0.7,
-                    size: procNode.data.templates?.size || "1024x1024",
-                    aspect_ratio: procNode.data.templates?.aspect_ratio || "1:1",
+                    ...(selectedAspectRatio
+                      ? {
+                          size: procNode.data.templates?.size || "1024x1024",
+                          aspect_ratio: selectedAspectRatio,
+                        }
+                      : {}),
                   }),
                 });
                 const data = await resp.json();
@@ -2968,6 +2986,18 @@ const createConnectedImg2ImgBranch = useCallback(
               onClick={() => navigate("/app/batch-wordart")}
               color="text-fuchsia-400"
               bg="bg-fuchsia-500/10"
+            />
+          </div>
+
+          <div className="mt-4 pt-3 border-t border-slate-800">
+            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">AI深度学习</div>
+            <SidebarBtn
+              icon={Film}
+              label="视频：姿态控制"
+              desc="参考图 + 姿态视频驱动"
+              onClick={() => navigate("/app/pose-control-video")}
+              color="text-rose-300"
+              bg="bg-rose-500/10"
             />
           </div>
         </div>

@@ -31,7 +31,7 @@ class MultiImageRequest(BaseModel):
     images: List[str]
     temperature: float = 0.7
     size: Optional[str] = "1024x1024"
-    aspect_ratio: Optional[str] = "1:1"
+    aspect_ratio: Optional[str] = None
 
 class MultiImageResponse(BaseModel):
     image: str
@@ -69,6 +69,7 @@ class OverlayTextRequest(BaseModel):
     line_spacing: Optional[int] = None
     position_x: Optional[float] = None
     position_y: Optional[float] = None
+    ratio_adapt_3_4: Optional[bool] = False
     rotation_angle: Optional[float] = None
     rotation_options: Optional[str] = None
     font_color_hex: Optional[str] = None
@@ -102,6 +103,21 @@ class VideoUpscaleRequest(BaseModel):
     segment_seconds: Optional[int] = 3
 
 class VideoUpscaleResponse(BaseModel):
+    video: str
+
+class ControlnetPoseVideoRequest(BaseModel):
+    image: str
+    control_video: str
+    positive_prompt: Optional[str] = None
+    negative_prompt: Optional[str] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    length: Optional[int] = None
+    fps: Optional[int] = None
+    seed: Optional[int] = None
+    filename_prefix: Optional[str] = None
+
+class ControlnetPoseVideoResponse(BaseModel):
     video: str
 
 class VideoUpscaleTaskStartResponse(BaseModel):

@@ -23,20 +23,21 @@ const DEFAULT_BOLD_STRENGTH = 2;
 const DEFAULT_BOLD_TEXTS = ["YSL!!!", "你真的让我感觉陌生", "", "", ""];
 const DEFAULT_TEXT_BG_OPACITY = 1;
 const DEFAULT_TEXT_BG_PADDING = 10;
+const DEFAULT_RATIO_ADAPT_3_4 = false;
 const DEFAULT_HIGHLIGHT_TEXTS = ["YSL!!!", "", "", "", ""];
 const DEFAULT_HIGHLIGHT_OPACITY = 1;
 const DEFAULT_HIGHLIGHT_PADDING = 1;
 const DEFAULT_COLOR_MODE = "custom";
 const DEFAULT_ALIGN = "top";
 const DEFAULT_JUSTIFY = "center";
-const DEFAULT_MARGINS = 5;
+const DEFAULT_MARGINS = 0;
 const DEFAULT_LINE_SPACING = 10;
 const DEFAULT_POSITION_X = 0;
 const DEFAULT_POSITION_Y = 0;
 const DEFAULT_ROTATION_ANGLE = 0;
 const DEFAULT_ROTATION_OPTIONS = "text center";
 const DEFAULT_FONT_COLOR_HEX = "#000000";
-const DEFAULT_TEXT_BG_COLOR_HEX = "#000000";
+const DEFAULT_TEXT_BG_COLOR_HEX = "#FFFFFF";
 const DEFAULT_HIGHLIGHT_COLOR_HEXES = ["#FFFF00", "#FFFF00", "#FFFF00", "#FFFF00", "#FFFF00"];
 const DEFAULT_VIDEO_PROMPT =
   "画面轻微晃动，镜头产生呼吸感；画面中不出现任何额外元素，商品保持静止。";
@@ -105,6 +106,7 @@ const PipelineBatchWordArt = () => {
   const [textBgColorHex, setTextBgColorHex] = useState(DEFAULT_TEXT_BG_COLOR_HEX);
   const [textBgOpacity, setTextBgOpacity] = useState(DEFAULT_TEXT_BG_OPACITY);
   const [textBgPadding, setTextBgPadding] = useState(DEFAULT_TEXT_BG_PADDING);
+  const [ratioAdapt34, setRatioAdapt34] = useState(DEFAULT_RATIO_ADAPT_3_4);
   const [highlightTexts, setHighlightTexts] = useState(DEFAULT_HIGHLIGHT_TEXTS);
   const [highlightColorHexes, setHighlightColorHexes] = useState(DEFAULT_HIGHLIGHT_COLOR_HEXES);
   const [highlightOpacity, setHighlightOpacity] = useState(DEFAULT_HIGHLIGHT_OPACITY);
@@ -279,6 +281,7 @@ const PipelineBatchWordArt = () => {
                 text_bg_color: DEFAULT_COLOR_MODE,
                 text_bg_opacity: textBgOpacity,
                 text_bg_padding: textBgPadding,
+                ratio_adapt_3_4: ratioAdapt34,
                 highlight_text_1: highlightTextValues[0] || "",
                 highlight_text_2: highlightTextValues[1] || "",
                 highlight_text_3: highlightTextValues[2] || "",
@@ -349,6 +352,7 @@ const PipelineBatchWordArt = () => {
     boldTexts,
     textBgOpacity,
     textBgPadding,
+    ratioAdapt34,
     highlightTexts,
     highlightOpacity,
     highlightPadding,
@@ -799,6 +803,17 @@ const PipelineBatchWordArt = () => {
                         className={COMPACT_INPUT_CLASS}
                       />
                     </label>
+                    <div className="space-y-1.5 sm:col-span-2 xl:col-span-3">
+                      <span className="block">比例适配（3:4）</span>
+                      <label className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={ratioAdapt34}
+                          onChange={(e) => setRatioAdapt34(e.target.checked)}
+                          className="h-4 w-4 rounded border-slate-600 bg-slate-950 text-purple-500 focus:ring-purple-500"
+                        />
+                      </label>
+                    </div>
                     <label className="space-y-1.5">
                       <span className="block">对齐（align）</span>
                       <input

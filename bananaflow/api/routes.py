@@ -18,6 +18,7 @@ from core.config import (
     MODEL_COMFYUI_RMBG,
     MODEL_COMFYUI_MULTI_ANGLESHOTS,
     MODEL_COMFYUI_VIDEO_UPSCALE,
+    MODEL_COMFYUI_CONTROLNET,
 )
 from core.logging import sys_logger
 from auth_routes import get_current_user
@@ -30,6 +31,7 @@ from schemas.api import (
     RmbgRequest, RmbgResponse,
     MultiAngleShotsRequest, MultiAngleShotsResponse,
     VideoUpscaleRequest, VideoUpscaleResponse,
+    ControlnetPoseVideoRequest, ControlnetPoseVideoResponse,
     VideoUpscaleTaskStartResponse, VideoUpscaleTaskStatusResponse,
     EditRequest, EditResponse,
     Img2VideoRequest, Img2VideoResponse,
@@ -44,6 +46,7 @@ from services.comfyui import (
     run_overlaytext_workflow,
     run_rmbg_workflow,
     run_multi_angleshots_workflow,
+    run_controlnet_pose_video_workflow,
     run_video_upscale_workflow,
 )
 
@@ -169,21 +172,23 @@ def multi_image_generate(req: MultiImageRequest, request: Request, current_user=
             m, b = parse_data_url(img_str)
             contents.append(types.Part.from_bytes(data=b, mime_type=m))
 
-        gemini_resolution = "1K"
-        s = (req.size or "").lower()
-        if "2k" in s:
-            gemini_resolution = "2K"
-        elif "4k" in s:
-            gemini_resolution = "4K"
-
-        gen_config = types.GenerateContentConfig(
-            temperature=req.temperature,
-            response_modalities=["IMAGE"],
-            image_config=types.ImageConfig(
-                aspect_ratio=req.aspect_ratio or "1:1",
+        gen_config_kwargs = {
+            "temperature": req.temperature,
+            "response_modalities": ["IMAGE"],
+        }
+        if req.aspect_ratio:
+            gemini_resolution = "1K"
+            s = (req.size or "").lower()
+            if "2k" in s:
+                gemini_resolution = "2K"
+            elif "4k" in s:
+                gemini_resolution = "4K"
+            gen_config_kwargs["image_config"] = types.ImageConfig(
+                aspect_ratio=req.aspect_ratio,
                 image_size=gemini_resolution,
-            ),
-        )
+            )
+
+        gen_config = types.GenerateContentConfig(**gen_config_kwargs)
 
         response = call_genai_retry(contents=contents, config=gen_config, req_id=req_id)
         img_bytes = get_image_from_response(response)
@@ -263,6 +268,7 @@ def overlay_text(req: OverlayTextRequest, request: Request, current_user=Depends
             line_spacing=req.line_spacing,
             position_x=req.position_x,
             position_y=req.position_y,
+            ratio_adapt_3_4=req.ratio_adapt_3_4,
             rotation_angle=req.rotation_angle,
             rotation_options=req.rotation_options,
             font_color_hex=req.font_color_hex,
@@ -408,6 +414,60 @@ def multi_angleshots(req: MultiAngleShotsRequest, request: Request, current_user
             req.model_dump(),
             "",
             {"model": MODEL_COMFYUI_MULTI_ANGLESHOTS},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/controlnet_pose_video", response_model=ControlnetPoseVideoResponse)
+def controlnet_pose_video(req: ControlnetPoseVideoRequest, request: Request, current_user=Depends(get_current_user)):
+    req_id = request.state.req_id
+    t0 = time.time()
+
+    try:
+        video_bytes, mime_type = run_controlnet_pose_video_workflow(
+            req_id=req_id,
+            image_data_url=req.image,
+            control_video_input=req.control_video,
+            positive_prompt=req.positive_prompt,
+            negative_prompt=req.negative_prompt,
+            width=req.width,
+            height=req.height,
+            length=req.length,
+            fps=req.fps,
+            seed=req.seed,
+            filename_prefix=req.filename_prefix,
+        )
+        if not video_bytes:
+            raise RuntimeError("No video returned")
+
+        output_data_url = bytes_to_data_url(video_bytes, mime_type=mime_type or "video/mp4")
+        prompt_logger.log(
+            req_id,
+            "controlnet_pose_video",
+            req.model_dump(),
+            req.positive_prompt or "",
+            {"model": MODEL_COMFYUI_CONTROLNET, "width": req.width, "height": req.height, "length": req.length, "fps": req.fps},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            output_full={"videos": [output_data_url]},
+        )
+        record_usage(current_user["id"], MODEL_COMFYUI_CONTROLNET)
+        return ControlnetPoseVideoResponse(video=output_data_url)
+    except Exception as e:
+        sys_logger.error(f"[{req_id}] ControlnetPoseVideo Error: {e}")
+        prompt_logger.log(
+            req_id,
+            "controlnet_pose_video",
+            req.model_dump(),
+            req.positive_prompt or "",
+            {"model": MODEL_COMFYUI_CONTROLNET},
             {"file": "mem"},
             time.time() - t0,
             user_id=current_user["id"],
