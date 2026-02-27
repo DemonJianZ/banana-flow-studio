@@ -6,7 +6,10 @@ from typing import TYPE_CHECKING
 from .schemas import AssetQuery
 
 if TYPE_CHECKING:
-    from bananaflow.agent.idea_script.schemas import ShotItem
+    try:
+        from agent.idea_script.schemas import ShotItem
+    except Exception:  # pragma: no cover
+        from bananaflow.agent.idea_script.schemas import ShotItem
 
 _TOKEN_RE = re.compile(r"[a-z0-9_]+|[\u4e00-\u9fff]+", re.IGNORECASE)
 

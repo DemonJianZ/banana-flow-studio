@@ -4,7 +4,10 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-from bananaflow.assets.schemas import AssetCandidate, MatchBucket
+try:
+    from ...assets.schemas import AssetCandidate, MatchBucket
+except Exception:  # pragma: no cover - 兼容 python bananaflow/main.py 直跑
+    from assets.schemas import AssetCandidate, MatchBucket
 
 
 AngleType = Literal["persona", "scene", "misconception"]

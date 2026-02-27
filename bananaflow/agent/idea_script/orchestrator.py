@@ -5,9 +5,14 @@ from contextlib import contextmanager, nullcontext
 import inspect
 from typing import Any, Dict, Iterator, Optional
 
-from ...assets.index_tool import AssetIndexTool
-from ...assets.query_builder import ShotQueryBuilder
-from ...core.logging import sys_logger
+try:
+    from ...assets.index_tool import AssetIndexTool
+    from ...assets.query_builder import ShotQueryBuilder
+    from ...core.logging import sys_logger
+except Exception:  # pragma: no cover - 兼容 python bananaflow/main.py 直跑
+    from assets.index_tool import AssetIndexTool
+    from assets.query_builder import ShotQueryBuilder
+    from core.logging import sys_logger
 from .config import IdeaScriptAgentConfig
 from .edit_plan_builder import EditPlanBuilder
 from .generator import IdeaScriptGeneratorNode
