@@ -141,6 +141,7 @@ def text_to_image(req: Text2ImgRequest, request: Request, current_user=Depends(g
                 contents=[types.Part(text=req.prompt)],
                 config=gen_config,
                 req_id=req_id,
+                model=selected_model,
             )
             img_bytes = get_image_from_response(response)
 
@@ -210,7 +211,7 @@ def multi_image_generate(req: MultiImageRequest, request: Request, current_user=
 
         gen_config = types.GenerateContentConfig(**gen_config_kwargs)
 
-        response = call_genai_retry(contents=contents, config=gen_config, req_id=req_id)
+        response = call_genai_retry(contents=contents, config=gen_config, req_id=req_id, model=MODEL_GEMINI)
         img_bytes = get_image_from_response(response)
         if not img_bytes:
             raise RuntimeError("No image returned")
@@ -700,6 +701,7 @@ def edit_image(req: EditRequest, request: Request, current_user=Depends(get_curr
                 contents=contents,
                 config=types.GenerateContentConfig(temperature=temp),
                 req_id=req_id,
+                model=selected_model,
             )
             img_bytes = get_image_from_response(response)
 

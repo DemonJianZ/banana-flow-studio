@@ -22,7 +22,7 @@ def init_client():
 def get_client():
     return init_client()
 
-def call_genai_retry(contents, config, req_id: str, retries=2):
+def call_genai_retry(contents, config, req_id: str, retries=2, model: str = MODEL_GEMINI):
     client = get_client()
     if client is None:
         raise RuntimeError("AI client not initialized")
@@ -30,9 +30,9 @@ def call_genai_retry(contents, config, req_id: str, retries=2):
     last_err = None
     for i in range(retries):
         try:
-            return client.models.generate_content(model=MODEL_GEMINI, contents=contents, config=config)
+            return client.models.generate_content(model=model or MODEL_GEMINI, contents=contents, config=config)
         except Exception as e:
             last_err = e
-            sys_logger.warning(f"[{req_id}] Gemini Retry {i+1}/{retries} failed: {e}")
+            sys_logger.warning(f"[{req_id}] Gemini Retry {i+1}/{retries} failed (model={model}): {e}")
             time.sleep(1 * (i + 1))
     raise RuntimeError(f"Gemini AI Service Failed: {last_err}")

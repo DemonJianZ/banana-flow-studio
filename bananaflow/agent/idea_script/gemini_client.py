@@ -1,21 +1,17 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from typing import Any, Dict, List, Optional
 
-try:
-    from google import genai  # type: ignore
-except Exception:  # pragma: no cover - 依赖缺失时优雅降级
-    genai = None  # type: ignore
+from google.genai import types
 
 try:
-    from ...core.config import API_KEY, LOCATION, PROJECT_ID
     from ...core.logging import sys_logger
+    from ...services.genai_client import call_genai_retry, get_client
 except Exception:  # pragma: no cover - 兼容 python bananaflow/main.py 直跑
-    from core.config import API_KEY, LOCATION, PROJECT_ID
     from core.logging import sys_logger
+    from services.genai_client import call_genai_retry, get_client
 
 
 DEFAULT_IDEA_SCRIPT_MODEL = "gemini-2.5-flash-lite"
@@ -41,9 +37,9 @@ def _to_int(value: Any) -> Optional[int]:
 
 class IdeaScriptGeminiClient:
     """
-    Idea Script 的轻量 Gemini 客户端。
-    - 默认模型: gemini-2.5-flash-lite
-    - 输出约束: 统一要求 JSON，解析失败时抛错让节点回退规则逻辑
+    Idea Script 的 Gemini 客户端。
+    调用方式与文生图一致：统一走 services.genai_client.call_genai_retry，
+    仅模型名改为 gemini-2.5-flash-lite（可被节点配置覆盖）。
     """
 
     def __init__(
@@ -57,36 +53,13 @@ class IdeaScriptGeminiClient:
         self.temperature = _to_float(temperature)
         self.top_p = _to_float(top_p)
         self.max_tokens = _to_int(max_tokens)
-        self._client: Any = None
-        self._init_failed = False
 
     @classmethod
     def is_runtime_available(cls) -> bool:
-        if genai is None:
-            return False
-        if API_KEY:
-            return True
-        # 未提供 API KEY 时，默认不主动启用 Vertex，避免本地环境误触发
-        return (os.getenv("IDEA_SCRIPT_ENABLE_VERTEXAI", "0").strip() == "1")
-
-    def _get_client(self) -> Any:
-        if self._client is not None:
-            return self._client
-        if self._init_failed:
-            raise RuntimeError("gemini_client_init_failed")
-        if genai is None:
-            self._init_failed = True
-            raise RuntimeError("google_genai_unavailable")
-
         try:
-            if API_KEY:
-                self._client = genai.Client(api_key=API_KEY)
-            else:
-                self._client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
-            return self._client
-        except Exception as e:
-            self._init_failed = True
-            raise RuntimeError(f"gemini_client_init_failed:{e}") from e
+            return get_client() is not None
+        except Exception:
+            return False
 
     def _extract_text(self, response: Any) -> str:
         text = getattr(response, "text", None)
@@ -145,21 +118,21 @@ class IdeaScriptGeminiClient:
         raise ValueError("json_parse_failed")
 
     def _call_json(self, prompt: str) -> Any:
-        client = self._get_client()
-        cfg: Dict[str, Any] = {"response_mime_type": "application/json"}
+        cfg_kwargs: Dict[str, Any] = {"response_mime_type": "application/json"}
         if self.temperature is not None:
-            cfg["temperature"] = self.temperature
+            cfg_kwargs["temperature"] = self.temperature
         if self.top_p is not None:
-            cfg["top_p"] = self.top_p
+            cfg_kwargs["top_p"] = self.top_p
         if self.max_tokens is not None and self.max_tokens > 0:
-            cfg["max_output_tokens"] = self.max_tokens
+            cfg_kwargs["max_output_tokens"] = self.max_tokens
 
-        resp = client.models.generate_content(
+        response = call_genai_retry(
+            contents=[types.Part(text=prompt)],
+            config=types.GenerateContentConfig(**cfg_kwargs),
+            req_id=f"idea_script:{self.model}",
             model=self.model,
-            contents=prompt,
-            config=cfg,
         )
-        text = self._extract_text(resp)
+        text = self._extract_text(response)
         return self._extract_json(text)
 
     def infer_audience(self, product: str, retry: bool = False, previous: Optional[Any] = None) -> Dict[str, Any]:
