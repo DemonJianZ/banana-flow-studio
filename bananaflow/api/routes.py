@@ -55,6 +55,9 @@ from prompts.business import build_business_prompt
 
 # agent
 from agent.planner import agent_plan_impl
+from agent.idea_script.orchestrator import IdeaScriptOrchestrator
+from agent.idea_script.schemas import EditPlan, IdeaScriptRequest, IdeaScriptResponse
+from agent.idea_script.exporters.ffmpeg_exporter import export_ffmpeg_bundle
 ALLOWED_VIDEO_MODELS = {"Doubao-Seedance-1.0-pro", "Doubao-Seedance-1.5-pro"}
 
 
@@ -63,6 +66,9 @@ prompt_logger = PromptLogger()
 analyzer = LogAnalyzer("logs/prompts.jsonl")
 video_upscale_tasks: Dict[str, Dict[str, Any]] = {}
 video_upscale_tasks_lock = threading.Lock()
+idea_script_orchestrator = IdeaScriptOrchestrator()
+idea_script_plan_cache: Dict[str, Dict[str, Any]] = {}
+idea_script_plan_cache_lock = threading.Lock()
 
 
 def _set_video_upscale_task(task_id: str, **patch: Any) -> None:
@@ -76,6 +82,24 @@ def _get_video_upscale_task(task_id: str) -> Optional[Dict[str, Any]]:
     with video_upscale_tasks_lock:
         current = video_upscale_tasks.get(task_id)
         return dict(current) if isinstance(current, dict) else None
+
+
+def _cache_edit_plans(plans: List[EditPlan]) -> None:
+    with idea_script_plan_cache_lock:
+        for plan in list(plans or []):
+            key = str(getattr(plan, "plan_id", "") or "").strip()
+            if not key:
+                continue
+            idea_script_plan_cache[key] = plan.model_dump(mode="json")
+
+
+def _get_cached_edit_plan(plan_id: str) -> Optional[Dict[str, Any]]:
+    key = str(plan_id or "").strip()
+    if not key:
+        return None
+    with idea_script_plan_cache_lock:
+        data = idea_script_plan_cache.get(key)
+        return dict(data) if isinstance(data, dict) else None
 
 
 # =========================================================
@@ -805,6 +829,178 @@ def img_to_video(req: Img2VideoRequest, request: Request, current_user=Depends(g
 # =========================================================
 # Agent endpoints
 # =========================================================
+
+@router.post("/api/agent/idea_script", response_model=IdeaScriptResponse)
+def agent_idea_script(req: IdeaScriptRequest, request: Request, current_user=Depends(get_current_user)) -> IdeaScriptResponse:
+    req_id = getattr(request.state, "req_id", "noid")
+    t0 = time.time()
+    tenant_id = request.headers.get("X-Tenant-Id") or current_user.get("email_domain") or "unknown"
+    user_id = current_user.get("id")
+
+    try:
+        out = idea_script_orchestrator.run(req)
+        _cache_edit_plans(list(out.edit_plans or []))
+
+        sys_logger.info(
+            json.dumps(
+                {
+                    "event": "idea_script",
+                    "req_id": req_id,
+                    "tenant_id": str(tenant_id),
+                    "user_id": user_id,
+                    "product": req.product,
+                    "persona": out.audience_context.persona,
+                    "confidence": out.audience_context.confidence,
+                    "unsafe_claim_risk": out.audience_context.unsafe_claim_risk,
+                    "retry_count": out.retry_count,
+                    "inference_warning": out.inference_warning,
+                    "generation_retry_count": out.generation_retry_count,
+                    "generation_warning": out.generation_warning,
+                    "generation_warning_reason": out.generation_warning_reason,
+                    "blocking_issues": out.blocking_issues,
+                    "non_blocking_issues": out.non_blocking_issues,
+                    "failure_tags": out.failure_tags,
+                    "topic_count": len(out.topics),
+                    "prompt_version": out.prompt_version,
+                    "policy_version": out.policy_version,
+                    "config_hash": out.config_hash,
+                    "budget_exhausted": out.budget_exhausted,
+                    "budget_exhausted_reason": out.budget_exhausted_reason,
+                    "total_llm_calls": out.total_llm_calls,
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        prompt_logger.log(
+            req_id,
+            "agent_idea_script",
+            req.model_dump(),
+            "",
+            {"pipeline": "idea_script_v1"},
+            {
+                "topics_count": len(out.topics),
+                "retry_count": out.retry_count,
+                "warning": out.inference_warning,
+                "confidence": out.audience_context.confidence,
+                "generation_retry_count": out.generation_retry_count,
+                "generation_warning": out.generation_warning,
+                "generation_warning_reason": out.generation_warning_reason,
+                "blocking_issues": out.blocking_issues,
+                "non_blocking_issues": out.non_blocking_issues,
+                "failure_tags": out.failure_tags,
+                "topic_count": len(out.topics),
+                "prompt_version": out.prompt_version,
+                "policy_version": out.policy_version,
+                "config_hash": out.config_hash,
+                "budget_exhausted": out.budget_exhausted,
+                "budget_exhausted_reason": out.budget_exhausted_reason,
+                "total_llm_calls": out.total_llm_calls,
+            },
+            time.time() - t0,
+            user_id=user_id,
+            inputs_full=req.model_dump(),
+            output_full=out.model_dump(),
+        )
+        record_usage(user_id, MODEL_AGENT)
+        return out
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        sys_logger.error(f"[{req_id}] /api/agent/idea_script error: {e}")
+        prompt_logger.log(
+            req_id,
+            "agent_idea_script",
+            req.model_dump(),
+            "",
+            {"pipeline": "idea_script_v1"},
+            {"topics_count": 0},
+            time.time() - t0,
+            user_id=user_id,
+            inputs_full=req.model_dump(),
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class IdeaScriptExportFfmpegRequest(BaseModel):
+    plan_id: Optional[str] = Field(default=None, description="优先使用已缓存的 plan_id")
+    plan: Optional[EditPlan] = Field(default=None, description="未命中 plan_id 时可直接传 EditPlan")
+    out_dir: str = Field(default="./exports/ffmpeg")
+    w: int = Field(default=720, ge=64)
+    h: int = Field(default=1280, ge=64)
+    fps: int = Field(default=30, ge=1, le=120)
+
+
+@router.post("/api/agent/idea_script/export_ffmpeg", response_model=Dict[str, Any])
+def agent_idea_script_export_ffmpeg(
+    req: IdeaScriptExportFfmpegRequest,
+    request: Request,
+    current_user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    req_id = getattr(request.state, "req_id", "noid")
+    t0 = time.time()
+    try:
+        plan_data: Optional[Dict[str, Any]] = None
+        if (req.plan_id or "").strip():
+            plan_data = _get_cached_edit_plan(req.plan_id or "")
+            if plan_data is None:
+                raise HTTPException(status_code=404, detail=f"plan_id not found: {req.plan_id}")
+        elif req.plan is not None:
+            plan_data = req.plan.model_dump(mode="json")
+        else:
+            raise HTTPException(status_code=400, detail="plan_id or plan is required")
+
+        result = export_ffmpeg_bundle(
+            plan=plan_data,
+            out_dir=req.out_dir,
+            resolution=(req.w, req.h),
+            fps=req.fps,
+        )
+        files = list(result.get("files") or [])
+        payload = {
+            "plan_id": result.get("plan_id"),
+            "bundle_dir": result.get("bundle_dir"),
+            "render_script_path": result.get("render_script_path"),
+            "files": files,
+            "clip_count": result.get("clip_count"),
+            "missing_primary_asset_count": result.get("missing_primary_asset_count"),
+            "warning": result.get("warning"),
+            "warning_reason": result.get("warning_reason"),
+            "resolution": result.get("resolution"),
+            "fps": result.get("fps"),
+        }
+        prompt_logger.log(
+            req_id,
+            "agent_idea_script_export_ffmpeg",
+            req.model_dump(mode="json"),
+            "",
+            {"pipeline": "idea_script_export_ffmpeg"},
+            payload,
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(mode="json"),
+            output_full=payload,
+        )
+        return payload
+    except HTTPException:
+        raise
+    except Exception as e:
+        sys_logger.error(f"[{req_id}] /api/agent/idea_script/export_ffmpeg error: {e}")
+        prompt_logger.log(
+            req_id,
+            "agent_idea_script_export_ffmpeg",
+            req.model_dump(mode="json"),
+            "",
+            {"pipeline": "idea_script_export_ffmpeg"},
+            {"ok": False},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(mode="json"),
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/api/agent/plan", response_model=Dict[str, Any])
 def agent_plan(req: AgentRequest, request: Request, response: Response, current_user=Depends(get_current_user)) -> Dict[str, Any]:
