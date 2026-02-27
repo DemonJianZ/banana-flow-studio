@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useEffect } from "react";
+import React, { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import {
   Upload,
   Image as ImageIcon,
@@ -55,12 +55,21 @@ import {
   Activity,
   Layout,
   Send,
-  Bot,
   Scan,
   Scissors,
 } from "lucide-react";
 import { useAuth } from "../auth/AuthProvider";
 import { useNavigate } from "../router";
+import TopicCards from "../components/agent-canvas/TopicCards";
+import StoryboardView from "../components/agent-canvas/StoryboardView";
+import AssetMatchView from "../components/agent-canvas/AssetMatchView";
+import EditPlanView from "../components/agent-canvas/EditPlanView";
+import ExportPanel from "../components/agent-canvas/ExportPanel";
+import {
+  extractProductKeyword,
+  exportIdeaScriptFfmpegBundle,
+  generateIdeaScriptMission,
+} from "../api/agentCanvas";
 
 // ==========================================
 // Config & Constants
@@ -70,6 +79,21 @@ const GRID_SIZE = 20;
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 3;
 const CANVAS_KEY = "bananaflow_canvas_id";
+const AGENT_SESSION_STORE_KEY = "bananaflow_agent_canvas_sessions_v1";
+const AGENT_RUN_STEPS = [
+  "推断受众",
+  "生成脚本",
+  "合规扫描",
+  "生成分镜",
+  "素材匹配",
+  "生成剪辑计划",
+];
+const AGENT_WARNING_KEYS = [
+  { key: "inference_warning", label: "Inference" },
+  { key: "compliance_warning", label: "Compliance" },
+  { key: "edit_plan_warning", label: "EditPlan" },
+  { key: "budget_exhausted", label: "Budget" },
+];
 
 const LOADING_TIPS = [
   "正在重塑光影氛围...",
@@ -80,6 +104,50 @@ const LOADING_TIPS = [
   "正在构思光影布局...",
   "精彩马上呈现...",
 ];
+
+const makeAgentId = () => Math.random().toString(36).slice(2, 10);
+
+const createDefaultAgentSession = () => ({
+  id: `session_${makeAgentId()}`,
+  title: "新会话",
+  createdAt: Date.now(),
+  updatedAt: Date.now(),
+  turns: [],
+});
+
+const cloneDeep = (obj) => JSON.parse(JSON.stringify(obj));
+
+const shortenSessionTitle = (text, maxLen = 16) => {
+  const value = String(text || "").trim();
+  if (!value) return "新会话";
+  return value.length > maxLen ? `${value.slice(0, maxLen)}...` : value;
+};
+
+const loadAgentStore = () => {
+  try {
+    const text = localStorage.getItem(AGENT_SESSION_STORE_KEY);
+    if (!text) {
+      const session = createDefaultAgentSession();
+      return { sessions: [session], activeSessionId: session.id };
+    }
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed?.sessions) || parsed.sessions.length === 0) {
+      const session = createDefaultAgentSession();
+      return { sessions: [session], activeSessionId: session.id };
+    }
+    return {
+      sessions: parsed.sessions,
+      activeSessionId: parsed.activeSessionId || parsed.sessions[0].id,
+    };
+  } catch {
+    const session = createDefaultAgentSession();
+    return { sessions: [session], activeSessionId: session.id };
+  }
+};
+
+const saveAgentStore = (store) => {
+  localStorage.setItem(AGENT_SESSION_STORE_KEY, JSON.stringify(store));
+};
 
 const NODE_TYPES = {
   INPUT: "input",
@@ -389,50 +457,6 @@ const VideoPlayer = ({ src, className, controls = false, autoPlay = true, ...pro
   );
 };
 
-const AgentInputBar = ({ onSend, isLoading }) => {
-  const [text, setText] = useState("");
-
-  const handleSend = () => {
-    if (!text.trim() || isLoading) return;
-    onSend(text);
-    setText("");
-  };
-
-  return (
-    <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-50 w-full max-w-lg animate-in slide-in-from-bottom-5 fade-in duration-300">
-      <div className="relative group">
-        <div className="absolute -inset-0.5 bg-gradient-to-r from-pink-600 to-purple-600 rounded-xl blur opacity-30 group-hover:opacity-60 transition duration-1000 group-hover:duration-200"></div>
-        <div className="relative flex items-center bg-slate-900 border border-slate-700 rounded-xl shadow-2xl overflow-hidden">
-          <div className="pl-3 pr-2 text-purple-400 animate-pulse">
-            <Bot className="w-5 h-5" />
-          </div>
-          <input
-            type="text"
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleSend()}
-            placeholder="输入指令，例如：生成一张赛博朋克风格的猫"
-            className="flex-1 bg-transparent border-none outline-none text-sm text-white placeholder-slate-500 h-12"
-            disabled={isLoading}
-          />
-          <button
-            onClick={handleSend}
-            disabled={!text.trim() || isLoading}
-            className={`mr-1 p-2 rounded-lg transition-colors ${
-              text.trim() && !isLoading ? "text-purple-400 hover:bg-purple-500/10" : "text-slate-600"
-            }`}
-          >
-            {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-          </button>
-        </div>
-        <div className="absolute -top-3 left-3 px-2 py-0.5 bg-gradient-to-r from-purple-600 to-pink-600 rounded-full text-[9px] font-bold text-white shadow-lg pointer-events-none">
-          AI Agent
-        </div>
-      </div>
-    </div>
-  );
-};
-
 const ToolIconBtn = ({ icon: Icon, onClick, disabled, active, title }) => (
   <button
     onClick={onClick}
@@ -465,6 +489,133 @@ const SidebarBtn = ({ icon: Icon, label, desc, onClick, color, bg }) => (
     <Plus className="w-3 h-3 ml-auto text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity" />
   </button>
 );
+
+const AgentResultCardContent = ({
+  turn,
+  onRetry,
+  onSelectPrimary,
+  onExport,
+  onCopyPath,
+}) => {
+  const response = turn?.response || null;
+  const topics = response?.topics || [];
+  const matchedAssets = response?.matched_assets || {};
+  const plans = turn?.localEditPlans || response?.edit_plans || [];
+  const exportMap = turn?.exports || {};
+
+  if (turn?.status === "running") {
+    return (
+      <div className="space-y-2">
+        <div className="inline-flex items-center gap-2 text-xs text-slate-200">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          Agent 执行中
+        </div>
+        <div className="text-[11px] text-slate-400">
+          当前步骤：{AGENT_RUN_STEPS[Math.min(turn?.stepIndex || 0, AGENT_RUN_STEPS.length - 1)]}
+        </div>
+      </div>
+    );
+  }
+
+  if (turn?.status === "clarify") {
+    return <div className="text-xs text-slate-200">{turn?.assistantText || "你想做哪个产品/品类？"}</div>;
+  }
+
+  if (turn?.status === "error") {
+    return (
+      <div className="space-y-2">
+        <div className="inline-flex items-center gap-1.5 text-xs text-red-300">
+          <AlertCircle className="w-3.5 h-3.5" />
+          {turn?.error || "请求失败"}
+        </div>
+        <button
+          type="button"
+          onClick={() => onRetry?.(turn?.id)}
+          className="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-700 text-[11px] text-slate-200 hover:bg-slate-800"
+        >
+          <RotateCcw className="w-3 h-3" />
+          重试
+        </button>
+      </div>
+    );
+  }
+
+  if (!response) {
+    return <div className="text-xs text-slate-500">暂无结果</div>;
+  }
+
+  return (
+    <div className="space-y-2.5">
+      <div className="grid grid-cols-2 gap-1 text-[11px] text-slate-300">
+        <div>persona: {response?.audience_context?.persona || "-"}</div>
+        <div>confidence: {response?.audience_context?.confidence ?? "-"}</div>
+        <div>prompt: {response?.prompt_version || "-"}</div>
+        <div>policy: {response?.policy_version || "-"}</div>
+      </div>
+      <div className="flex flex-wrap gap-1">
+        {AGENT_WARNING_KEYS.map((item) => {
+          const active = !!response?.[item.key];
+          return (
+            <span
+              key={item.key}
+              className={`px-1.5 py-0.5 rounded border text-[10px] ${
+                active
+                  ? "bg-amber-500/15 border-amber-400/40 text-amber-200"
+                  : "bg-slate-800 border-slate-700 text-slate-400"
+              }`}
+            >
+              {item.label}:{active ? "Y" : "N"}
+            </span>
+          );
+        })}
+      </div>
+
+      <details className="rounded border border-slate-800 bg-slate-950/70" open>
+        <summary className="cursor-pointer px-2 py-1.5 text-xs text-slate-200">Topics</summary>
+        <div className="px-2 pb-2">
+          <TopicCards topics={topics} />
+        </div>
+      </details>
+
+      <details className="rounded border border-slate-800 bg-slate-950/70">
+        <summary className="cursor-pointer px-2 py-1.5 text-xs text-slate-200">Storyboard</summary>
+        <div className="px-2 pb-2">
+          <StoryboardView topics={topics} />
+        </div>
+      </details>
+
+      <details className="rounded border border-slate-800 bg-slate-950/70">
+        <summary className="cursor-pointer px-2 py-1.5 text-xs text-slate-200">Asset Match</summary>
+        <div className="px-2 pb-2">
+          <AssetMatchView
+            topics={topics}
+            matchedAssets={matchedAssets}
+            onSelectPrimary={(shotId, candidate) => onSelectPrimary?.(turn?.id, shotId, candidate)}
+          />
+        </div>
+      </details>
+
+      <details className="rounded border border-slate-800 bg-slate-950/70">
+        <summary className="cursor-pointer px-2 py-1.5 text-xs text-slate-200">EditPlan</summary>
+        <div className="px-2 pb-2">
+          <EditPlanView plans={plans} />
+        </div>
+      </details>
+
+      <details className="rounded border border-slate-800 bg-slate-950/70">
+        <summary className="cursor-pointer px-2 py-1.5 text-xs text-slate-200">Export</summary>
+        <div className="px-2 pb-2">
+          <ExportPanel
+            plans={plans}
+            exportMap={exportMap}
+            onExport={(plan) => onExport?.(turn?.id, plan)}
+            onCopyPath={onCopyPath}
+          />
+        </div>
+      </details>
+    </div>
+  );
+};
 
 
 
@@ -1512,15 +1663,6 @@ const NodeComponent = ({
   );
 };
 
-const getOrCreateThreadId = () => {
-  const key = "bananaflow_thread_id";
-  const saved = localStorage.getItem(key);
-  if (saved) return saved;
-  const tid = "canvas_" + Math.random().toString(36).slice(2, 14);
-  localStorage.setItem(key, tid);
-  return tid;
-};
-
 const newCanvasId = () => "canvas_" + Math.random().toString(36).slice(2, 12);
 
 const Workbench = () => {
@@ -1545,7 +1687,6 @@ const Workbench = () => {
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
 
   const [isRunning, setIsRunning] = useState(false);
-  const [isAgentThinking, setIsAgentThinking] = useState(false);
   const [runScope, setRunScope] = useState("selected_downstream");
   const [apiStatus, setApiStatus] = useState("checking");
   const [globalError, setGlobalError] = useState(null);
@@ -1558,6 +1699,26 @@ const Workbench = () => {
   const [expandedHistoryIds, setExpandedHistoryIds] = useState(new Set());
   const [apiStats, setApiStats] = useState(null);
   const [runToast, setRunToast] = useState(null);
+  const [agentStore, setAgentStore] = useState(() => loadAgentStore());
+  const [agentInput, setAgentInput] = useState("");
+  const [agentHistoryCollapsed, setAgentHistoryCollapsed] = useState(false);
+  const [agentResultCards, setAgentResultCards] = useState([]);
+  const [selectedAgentCardIds, setSelectedAgentCardIds] = useState(new Set());
+  const [activeAgentCardId, setActiveAgentCardId] = useState(null);
+  const agentInputRef = useRef(null);
+  const viewportRef = useRef(viewport);
+  const agentCardDragRef = useRef(null);
+  const agentConversationBottomRef = useRef(null);
+
+  const agentSessions = agentStore.sessions || [];
+  const activeAgentSession = useMemo(
+    () => agentSessions.find((session) => session.id === agentStore.activeSessionId) || agentSessions[0],
+    [agentSessions, agentStore.activeSessionId],
+  );
+  const agentTurns = activeAgentSession?.turns || [];
+  const isAgentMissionRunning = agentTurns.some((turn) => turn.status === "running");
+  const hasAgentResultCards = agentResultCards.length > 0;
+  const minimizedAgentCards = agentResultCards.filter((card) => card.minimized);
 
   const canvasRef = useRef(null);
   const nodesRef = useRef(nodes);
@@ -1577,7 +1738,6 @@ const Workbench = () => {
     setViewport({ x: 0, y: 0, zoom: 1 });
   };
 
-  const [threadId] = useState(getOrCreateThreadId);
   const [canvasId, setCanvasId] = useState(() => {
     // 如果你后续支持“画布列表/切换”，这里可以从 URL 参数取
     const saved = localStorage.getItem(CANVAS_KEY);
@@ -1586,9 +1746,63 @@ const Workbench = () => {
 
   useEffect(() => { nodesRef.current = nodes; }, [nodes]);
   useEffect(() => { connectionsRef.current = connections; }, [connections]);
+  useEffect(() => { viewportRef.current = viewport; }, [viewport]);
   useEffect(() => {
     localStorage.setItem(CANVAS_KEY, canvasId);
   }, [canvasId]);
+  useEffect(() => {
+    saveAgentStore(agentStore);
+  }, [agentStore]);
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setAgentStore((prev) => {
+        const sessionsNext = (prev.sessions || []).map((session) => {
+          if (session.id !== prev.activeSessionId) return session;
+          let hasRunning = false;
+          const turnsNext = (session.turns || []).map((turn) => {
+            if (turn.status !== "running") return turn;
+            hasRunning = true;
+            return {
+              ...turn,
+              stepIndex: ((turn.stepIndex || 0) + 1) % AGENT_RUN_STEPS.length,
+            };
+          });
+          if (!hasRunning) return session;
+          return { ...session, turns: turnsNext, updatedAt: Date.now() };
+        });
+        return { ...prev, sessions: sessionsNext };
+      });
+    }, 900);
+    return () => window.clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    agentConversationBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [agentTurns]);
+  useEffect(() => {
+    const turns = activeAgentSession?.turns || [];
+    const resultTurns = turns.filter((turn) => ["done", "error", "clarify"].includes(turn?.status));
+    setAgentResultCards((prev) => {
+      const prevByTurnId = new Map(prev.map((item) => [item.turnId, item]));
+      return resultTurns.map((turn, idx) => {
+        const existing = prevByTurnId.get(turn.id);
+        if (existing) return existing;
+        return {
+          id: `agent_card_${makeAgentId()}`,
+          turnId: turn.id,
+          x: 120 + (idx % 2) * 500,
+          y: 120 + Math.floor(idx / 2) * 360,
+          w: 460,
+          collapsed: false,
+          minimized: false,
+        };
+      });
+    });
+    setActiveAgentCardId(null);
+    setSelectedAgentCardIds(new Set());
+  }, [activeAgentSession?.id]);
+  useEffect(() => () => {
+    agentCardDragRef.current = null;
+  }, []);
   const [activeArtifact, setActiveArtifact] = useState(null);
 
   const applyPatch = useCallback((patchOps) => {
@@ -1862,12 +2076,15 @@ const Workbench = () => {
       return;
     }
     if (e.button === 0 && !isSpacePressed && !e.altKey && !e.metaKey) {
-      if (!e.shiftKey && !e.ctrlKey) {
+      const appendSelection = e.shiftKey || e.ctrlKey;
+      if (!appendSelection) {
         setSelectedNodeIds(new Set());
         setSelectedConnectionIds(new Set());
+        setSelectedAgentCardIds(new Set());
+        setActiveAgentCardId(null);
       }
       const s = screenToCanvas(e.clientX, e.clientY);
-      setSelectionBox({ startX: s.x, startY: s.y, curX: s.x, curY: s.y });
+      setSelectionBox({ startX: s.x, startY: s.y, curX: s.x, curY: s.y, appendSelection });
       setInteractionMode("selecting");
     }
   };
@@ -1925,11 +2142,23 @@ const handleNodeMouseDown = (e, nid) => {
       const x2 = Math.max(selectionBox.startX, selectionBox.curX);
       const y1 = Math.min(selectionBox.startY, selectionBox.curY);
       const y2 = Math.max(selectionBox.startY, selectionBox.curY);
-      const s = new Set(selectedNodeIds);
+      const appendSelection = !!selectionBox.appendSelection;
+      const s = appendSelection ? new Set(selectedNodeIds) : new Set();
       nodes.forEach((n) => {
         if (n.x < x2 && n.x + 280 > x1 && n.y < y2 && n.y + 200 > y1) s.add(n.id);
       });
       setSelectedNodeIds(s);
+      const selectedCards = appendSelection ? new Set(selectedAgentCardIds) : new Set();
+      agentResultCards.forEach((card) => {
+        if (card.minimized) return;
+        const cardHeight = card.collapsed ? 70 : 420;
+        if (card.x < x2 && card.x + (card.w || 460) > x1 && card.y < y2 && card.y + cardHeight > y1) {
+          selectedCards.add(card.id);
+        }
+      });
+      setSelectedAgentCardIds(selectedCards);
+      if (selectedCards.size === 1) setActiveAgentCardId(Array.from(selectedCards)[0]);
+      if (selectedCards.size === 0) setActiveAgentCardId(null);
     }
     setInteractionMode("idle");
     setSelectionBox(null);
@@ -2149,78 +2378,352 @@ const createConnectedImg2ImgBranch = useCallback(
   [pushHistory, activeArtifact]
 );
 
-  // ✅ Agent
-  const handleAgentCommand = async (prompt) => {
-    if (!prompt.trim()) return;
-
-    setIsAgentThinking(true);
-    setRunToast({ message: "Agent 正在构思工作流...", type: "info" });
-
-    try {
-      const resp = await apiFetch(`/api/agent/plan`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt,
-          canvas_id: canvasId,
-          thread_id: threadId, // ✅ 新增：稳定 thread_id
-          current_nodes: nodesRef.current,
-          current_connections: connectionsRef.current,
-          selected_artifact: activeArtifact || null,
-        }),
+  const updateActiveAgentSession = useCallback((updater) => {
+    setAgentStore((prev) => {
+      const sessionsNext = (prev.sessions || []).map((session) => {
+        if (session.id !== prev.activeSessionId) return session;
+        const next = updater(session);
+        return { ...next, updatedAt: Date.now() };
       });
+      return { ...prev, sessions: sessionsNext };
+    });
+  }, []);
 
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error(extractApiError(data));
+  const createAgentSession = () => {
+    const nextSession = createDefaultAgentSession();
+    setAgentStore((prev) => ({
+      sessions: [nextSession, ...(prev.sessions || [])],
+      activeSessionId: nextSession.id,
+    }));
+    setAgentInput("");
+  };
 
-      // patch 增量
-      if (data?.patch) {
-        pushHistory();
-        applyPatch(data.patch);
-        setRunToast({ message: data.summary || `已增量更新：${data.patch.length} 步`, type: "info" });
+  const setActiveAgentSession = (sessionId) => {
+    setAgentStore((prev) => ({ ...prev, activeSessionId: sessionId }));
+  };
+
+  const ensureAgentResultCard = useCallback((turnId) => {
+    setAgentResultCards((prev) => {
+      if (prev.some((card) => card.turnId === turnId)) return prev;
+      const idx = prev.length;
+      return [
+        ...prev,
+        {
+          id: `agent_card_${makeAgentId()}`,
+          turnId,
+          x: 120 + (idx % 2) * 500,
+          y: 120 + Math.floor(idx / 2) * 360,
+          w: 460,
+          collapsed: false,
+          minimized: false,
+        },
+      ];
+    });
+  }, []);
+
+  const handleAgentCardMouseDown = (e, cardId) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.shiftKey || e.ctrlKey) {
+      setSelectedAgentCardIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(cardId)) next.delete(cardId);
+        else next.add(cardId);
+        return next;
+      });
+      return;
+    }
+    const card = agentResultCards.find((item) => item.id === cardId);
+    if (!card) return;
+    let dragCardIds = selectedAgentCardIds;
+    if (!selectedAgentCardIds.has(cardId)) {
+      dragCardIds = new Set([cardId]);
+      setSelectedAgentCardIds(new Set([cardId]));
+    }
+    setSelectedNodeIds(new Set());
+    setSelectedConnectionIds(new Set());
+    setActiveAgentCardId(cardId);
+    const startPositions = {};
+    agentResultCards.forEach((item) => {
+      if (dragCardIds.has(item.id)) {
+        startPositions[item.id] = { x: item.x, y: item.y };
+      }
+    });
+    agentCardDragRef.current = {
+      cardIds: Array.from(dragCardIds),
+      startMouseX: e.clientX,
+      startMouseY: e.clientY,
+      startPositions,
+    };
+
+    const onMouseMove = (event) => {
+      const dragState = agentCardDragRef.current;
+      if (!dragState) return;
+      const zoom = viewportRef.current?.zoom || 1;
+      const dx = (event.clientX - dragState.startMouseX) / zoom;
+      const dy = (event.clientY - dragState.startMouseY) / zoom;
+      setAgentResultCards((prev) =>
+        prev.map((item) =>
+          dragState.cardIds.includes(item.id)
+            ? {
+                ...item,
+                x: (dragState.startPositions[item.id]?.x || item.x) + dx,
+                y: (dragState.startPositions[item.id]?.y || item.y) + dy,
+              }
+            : item,
+        ),
+      );
+    };
+
+    const onMouseUp = () => {
+      agentCardDragRef.current = null;
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+  };
+
+  const focusAgentResultCard = (turnId) => {
+    const card = agentResultCards.find((item) => item.turnId === turnId);
+    if (card) {
+      setAgentResultCards((prev) =>
+        prev.map((item) =>
+          item.turnId === turnId ? { ...item, minimized: false, collapsed: false } : item,
+        ),
+      );
+      setSelectedAgentCardIds(new Set([card.id]));
+      setActiveAgentCardId(card.id);
+      return;
+    }
+    ensureAgentResultCard(turnId);
+  };
+
+  const toggleAgentResultCardCollapsed = (cardId) => {
+    setAgentResultCards((prev) =>
+      prev.map((item) =>
+        item.id === cardId ? { ...item, collapsed: !item.collapsed } : item,
+      ),
+    );
+  };
+
+  const minimizeAgentResultCard = (cardId) => {
+    setAgentResultCards((prev) =>
+      prev.map((item) =>
+        item.id === cardId ? { ...item, minimized: true, collapsed: true } : item,
+      ),
+    );
+    setSelectedAgentCardIds((prev) => {
+      const next = new Set(prev);
+      next.delete(cardId);
+      return next;
+    });
+    if (activeAgentCardId === cardId) setActiveAgentCardId(null);
+  };
+
+  const runMissionOnTurn = useCallback(
+    async (turnId, userText, extractedProduct) => {
+      try {
+        const response = await generateIdeaScriptMission(extractedProduct, apiFetch);
+        updateActiveAgentSession((session) => ({
+          ...session,
+          turns: (session.turns || []).map((turn) =>
+            turn.id === turnId
+              ? {
+                  ...turn,
+                  status: "done",
+                  stepIndex: AGENT_RUN_STEPS.length - 1,
+                  response,
+                  localEditPlans: cloneDeep(response?.edit_plans || []),
+                  exports: turn.exports || {},
+                }
+              : turn,
+          ),
+        }));
+        ensureAgentResultCard(turnId);
+      } catch (error) {
+        updateActiveAgentSession((session) => ({
+          ...session,
+          turns: (session.turns || []).map((turn) =>
+            turn.id === turnId
+              ? {
+                  ...turn,
+                  status: "error",
+                  error: error?.message || String(error) || "请求失败",
+                }
+              : turn,
+          ),
+        }));
+        ensureAgentResultCard(turnId);
+        setRunToast({ message: error?.message || "Idea Script 生成失败", type: "error" });
+      }
+    },
+    [apiFetch, ensureAgentResultCard, updateActiveAgentSession],
+  );
+
+  const sendAgentMissionFromText = useCallback(
+    (text) => {
+      const missionText = String(text || "").trim();
+      if (!missionText) return;
+      const product = extractProductKeyword(missionText);
+      const turnId = `turn_${makeAgentId()}`;
+      if (!product) {
+        updateActiveAgentSession((session) => ({
+          ...session,
+          title: session.title === "新会话" ? shortenSessionTitle(missionText) : session.title,
+          turns: [
+            ...(session.turns || []),
+            {
+              id: turnId,
+              userText: missionText,
+              extractedProduct: "",
+              status: "clarify",
+              assistantText: "你想做哪个产品/品类？",
+              createdAt: Date.now(),
+              stepIndex: 0,
+            },
+          ],
+        }));
+        ensureAgentResultCard(turnId);
         return;
       }
 
-      // 全量重建
-      const plan = data;
-      pushHistory();
+      updateActiveAgentSession((session) => ({
+        ...session,
+        title: session.title === "新会话" ? shortenSessionTitle(missionText) : session.title,
+        turns: [
+          ...(session.turns || []),
+          {
+            id: turnId,
+            userText: missionText,
+            extractedProduct: product,
+            status: "running",
+            createdAt: Date.now(),
+            stepIndex: 0,
+            exports: {},
+          },
+        ],
+      }));
+      runMissionOnTurn(turnId, missionText, product);
+    },
+    [ensureAgentResultCard, runMissionOnTurn, updateActiveAgentSession],
+  );
 
-      const newNodes = (plan.nodes || []).map((planNode) => {
-        const nodeData = {
-          ...planNode.data,
-          status: "idle",
-          images: [],
-          progress: 0,
-          total: 0,
-        };
+  const sendAgentMission = () => {
+    const text = String(agentInput || "").trim();
+    if (!text) return;
+    setAgentInput("");
+    sendAgentMissionFromText(text);
+  };
 
-        if (planNode.type === NODE_TYPES.VIDEO_GEN) {
-          nodeData.mode = nodeData.mode || "img2video";
-          nodeData.templates = nodeData.templates || { motion: "标准(Standard)", camera: "固定镜头(Fixed)", duration: "5秒", resolution: "1080p", ratio: "16:9", note: "" };
-          nodeData.model = nodeData.model || "Doubao-Seedance-1.0-pro"; // ✅
+  const retryAgentTurn = (turnId) => {
+    const turn = (activeAgentSession?.turns || []).find((item) => item.id === turnId);
+    if (!turn) return;
+    const product = turn.extractedProduct || extractProductKeyword(turn.userText || "");
+    if (!product) {
+      setRunToast({ message: "请先说明产品/品类", type: "error" });
+      return;
+    }
+    updateActiveAgentSession((session) => ({
+      ...session,
+      turns: (session.turns || []).map((item) =>
+        item.id === turnId
+          ? { ...item, status: "running", error: "", stepIndex: 0, extractedProduct: product }
+          : item,
+      ),
+    }));
+    runMissionOnTurn(turnId, turn.userText || "", product);
+  };
+
+  const selectPrimaryAssetForShot = (turnId, shotId, candidate) => {
+    updateActiveAgentSession((session) => ({
+      ...session,
+      turns: (session.turns || []).map((turn) => {
+        if (turn.id !== turnId) return turn;
+        const plans = cloneDeep(turn.localEditPlans || turn.response?.edit_plans || []);
+        for (const plan of plans) {
+          for (const track of plan.tracks || []) {
+            for (const clip of track.clips || []) {
+              if (clip.shot_id !== shotId) continue;
+              const oldPrimary = clip.primary_asset || null;
+              clip.primary_asset = {
+                asset_id: candidate?.asset_id || "",
+                uri: candidate?.uri || "",
+                score: candidate?.score ?? 0,
+                bucket: candidate?.bucket || "fallback",
+                reason: candidate?.reason || "",
+              };
+              const merged = [oldPrimary, ...(clip.alternates || []), clip.primary_asset]
+                .filter(Boolean)
+                .filter((item, idx, arr) => arr.findIndex((x) => x.asset_id === item.asset_id) === idx);
+              clip.alternates = merged
+                .filter((item) => item.asset_id !== clip.primary_asset.asset_id)
+                .slice(0, 3);
+            }
+          }
         }
+        return { ...turn, localEditPlans: plans };
+      }),
+    }));
+  };
 
-        return { ...planNode, data: nodeData };
-      });
+  const exportAgentPlan = async (turnId, plan) => {
+    const planId = plan?.plan_id || `plan_${makeAgentId()}`;
+    updateActiveAgentSession((session) => ({
+      ...session,
+      turns: (session.turns || []).map((turn) => {
+        if (turn.id !== turnId) return turn;
+        const exports = { ...(turn.exports || {}) };
+        exports[planId] = { ...(exports[planId] || {}), loading: true, error: "" };
+        return { ...turn, exports };
+      }),
+    }));
 
-      const validatedConnections = (plan.connections || [])
-        .filter((c) => newNodes.some((n) => n.id === c.from_id) && newNodes.some((n) => n.id === c.to_id))
-        .map((c) => ({ id: `conn_${Math.random().toString(36).substr(2, 9)}`, from: c.from_id, to: c.to_id }));
+    try {
+      const result = await exportIdeaScriptFfmpegBundle(
+        {
+          planId: plan?.plan_id || "",
+          plan,
+          outDir: "./exports/ffmpeg",
+          w: 720,
+          h: 1280,
+          fps: 30,
+        },
+        apiFetch,
+      );
 
-      setNodes(newNodes);
-      setConnections(validatedConnections);
+      updateActiveAgentSession((session) => ({
+        ...session,
+        turns: (session.turns || []).map((turn) => {
+          if (turn.id !== turnId) return turn;
+          const exports = { ...(turn.exports || {}) };
+          exports[planId] = { loading: false, error: "", result };
+          return { ...turn, exports };
+        }),
+      }));
+      setRunToast({ message: "FFmpeg 渲染包导出成功", type: "info" });
+    } catch (error) {
+      updateActiveAgentSession((session) => ({
+        ...session,
+        turns: (session.turns || []).map((turn) => {
+          if (turn.id !== turnId) return turn;
+          const exports = { ...(turn.exports || {}) };
+          exports[planId] = { loading: false, error: error?.message || "导出失败" };
+          return { ...turn, exports };
+        }),
+      }));
+      setRunToast({ message: error?.message || "导出失败", type: "error" });
+    }
+  };
 
-      if (newNodes.length > 0) {
-        const firstProc = newNodes.find((n) => n.type === "processor") || newNodes[0];
-        setViewport({ x: window.innerWidth / 2 - firstProc.x * 0.8, y: window.innerHeight / 2 - firstProc.y * 0.8, zoom: 0.8 });
-      }
-
-      setRunToast({ message: `Agent 已成功搭建：${newNodes.length}个节点`, type: "info" });
-    } catch (e) {
-      console.error("Agent Error:", e);
-      setRunToast({ message: `Agent 构思失败：${e.message || "请重试"}`, type: "error" });
-    } finally {
-      setIsAgentThinking(false);
+  const copyRenderScriptPath = async (path) => {
+    if (!path) return;
+    try {
+      await navigator.clipboard.writeText(path);
+      setRunToast({ message: "render.sh 路径已复制", type: "info" });
+    } catch {
+      setRunToast({ message: "复制 render.sh 路径失败", type: "error" });
     }
   };
 
@@ -2912,9 +3415,6 @@ const createConnectedImg2ImgBranch = useCallback(
         </div>
       )}
 
-      {/* Agent Input Bar (temporarily hidden) */}
-      {false && <AgentInputBar onSend={handleAgentCommand} isLoading={isAgentThinking} />}
-
       <div className="flex-1 flex relative">
         {/* Sidebar */}
         <div className="w-64 bg-slate-900 border-r border-slate-800 p-3 z-40 flex flex-col gap-2 shadow-xl select-none shrink-0">
@@ -3021,7 +3521,7 @@ const createConnectedImg2ImgBranch = useCallback(
             }}
           />
 
-          {nodes.length === 0 && (
+          {nodes.length === 0 && !hasAgentResultCards && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
               <div className="bg-slate-900/80 border border-slate-700 p-8 rounded-2xl shadow-2xl backdrop-blur-sm text-center max-w-lg pointer-events-auto" onMouseDown={(e) => e.stopPropagation()}>
                 <div className="flex justify-center mb-4">
@@ -3119,6 +3619,287 @@ const createConnectedImg2ImgBranch = useCallback(
                 }}
               />
             )}
+
+            {agentResultCards.map((card) => {
+              const turn = agentTurns.find((item) => item.id === card.turnId);
+              if (!turn || card.minimized) return null;
+              const statusText =
+                turn.status === "done"
+                  ? "completed"
+                  : turn.status === "running"
+                  ? "running"
+                  : turn.status === "error"
+                  ? "error"
+                  : turn.status === "clarify"
+                  ? "clarify"
+                  : turn.status;
+              return (
+                <div
+                  key={card.id}
+                  className={`absolute rounded-xl border bg-slate-900/95 shadow-2xl overflow-hidden ${
+                    selectedAgentCardIds.has(card.id)
+                      ? "border-cyan-400/70 ring-1 ring-cyan-400/45"
+                      : activeAgentCardId === card.id
+                      ? "border-violet-400/70 ring-1 ring-violet-400/50"
+                      : "border-slate-700"
+                  }`}
+                  style={{ left: card.x, top: card.y, width: card.w, zIndex: activeAgentCardId === card.id ? 85 : 70 }}
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    if (e.shiftKey || e.ctrlKey) {
+                      setSelectedAgentCardIds((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(card.id)) next.delete(card.id);
+                        else next.add(card.id);
+                        return next;
+                      });
+                    } else if (!selectedAgentCardIds.has(card.id)) {
+                      setSelectedAgentCardIds(new Set([card.id]));
+                    }
+                    setActiveAgentCardId(card.id);
+                  }}
+                >
+                  <div className="h-9 px-2.5 border-b border-slate-800 bg-slate-800/90 flex items-center gap-2">
+                    <div
+                      className="flex-1 min-w-0 flex items-center justify-between cursor-move"
+                      onMouseDown={(e) => handleAgentCardMouseDown(e, card.id)}
+                    >
+                      <div className="text-[11px] font-semibold text-slate-200 truncate">
+                        Agent Result · {turn?.extractedProduct || "unknown"}
+                      </div>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded border border-slate-600 text-slate-300 ml-2">
+                        {statusText}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="p-1 rounded hover:bg-slate-700 text-slate-300"
+                      title={card.collapsed ? "展开" : "折叠"}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleAgentResultCardCollapsed(card.id);
+                      }}
+                    >
+                      {card.collapsed ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
+                    </button>
+                    <button
+                      type="button"
+                      className="p-1 rounded hover:bg-slate-700 text-slate-300"
+                      title="最小化到对话流"
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        minimizeAgentResultCard(card.id);
+                      }}
+                    >
+                      <Minus className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  {!card.collapsed && (
+                    <div className="p-2.5 max-h-[62vh] overflow-y-auto custom-scrollbar" onMouseDown={(e) => e.stopPropagation()}>
+                      <div className="mb-2 text-[11px] text-slate-400 whitespace-pre-wrap break-words">
+                        Mission: {turn?.userText || "-"}
+                      </div>
+                      <AgentResultCardContent
+                        turn={turn}
+                        onRetry={retryAgentTurn}
+                        onSelectPrimary={selectPrimaryAssetForShot}
+                        onExport={exportAgentPlan}
+                        onCopyPath={copyRenderScriptPath}
+                      />
+                    </div>
+                  )}
+                  {card.collapsed && (
+                    <div className="px-2.5 py-2 text-[11px] text-slate-400">
+                      已折叠，点击上方按钮可展开。
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          <div
+            className={`absolute right-4 top-4 bottom-28 z-40 transition-all duration-200 pointer-events-auto ${
+              agentHistoryCollapsed ? "w-12" : "w-80"
+            }`}
+            onMouseDown={(e) => e.stopPropagation()}
+            onWheel={(e) => e.stopPropagation()}
+          >
+            <div className="h-full rounded-xl border border-slate-700 bg-slate-900/95 shadow-xl overflow-hidden">
+              <div className="h-11 border-b border-slate-800 px-3 flex items-center justify-between">
+                {!agentHistoryCollapsed && (
+                  <div className="inline-flex items-center gap-1.5 text-xs text-slate-300">
+                    <History className="w-3.5 h-3.5" />
+                    对话流
+                  </div>
+                )}
+                <div className="ml-auto flex items-center gap-1">
+                  {!agentHistoryCollapsed && (
+                    <button
+                      type="button"
+                      onClick={createAgentSession}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-700 text-[11px] text-slate-300 hover:bg-slate-800"
+                    >
+                      <Plus className="w-3 h-3" />
+                      新建
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setAgentHistoryCollapsed((prev) => !prev)}
+                    className="p-1.5 rounded border border-slate-700 text-slate-300 hover:bg-slate-800"
+                  >
+                    {agentHistoryCollapsed ? <ArrowLeft className="w-3.5 h-3.5" /> : <ArrowRight className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+              </div>
+              {!agentHistoryCollapsed ? (
+                <div className="h-[calc(100%-44px)] flex flex-col">
+                  <div className="border-b border-slate-800 p-2">
+                    <select
+                      value={activeAgentSession?.id || ""}
+                      onChange={(e) => setActiveAgentSession(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-[11px] text-slate-200 outline-none"
+                    >
+                      {agentSessions.map((session) => (
+                        <option key={session.id} value={session.id}>
+                          {session.title || "新会话"} ({(session.turns || []).length})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {minimizedAgentCards.length > 0 && (
+                    <div className="border-b border-slate-800 p-2 space-y-1.5">
+                      <div className="text-[10px] uppercase tracking-wider text-slate-500">已最小化结果</div>
+                      {minimizedAgentCards.map((card) => {
+                        const turn = agentTurns.find((item) => item.id === card.turnId);
+                        if (!turn) return null;
+                        return (
+                          <button
+                            key={card.id}
+                            type="button"
+                            onClick={() => focusAgentResultCard(turn.id)}
+                            className="w-full text-left px-2 py-1.5 rounded border border-slate-700 bg-slate-950 text-[11px] text-slate-200 hover:bg-slate-800"
+                          >
+                            恢复 · {turn.extractedProduct || "result"}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <div className="flex-1 overflow-y-auto p-2 space-y-2 custom-scrollbar">
+                    {agentTurns.length === 0 && (
+                      <div className="text-[11px] text-slate-500 px-1 py-2">暂无对话，发送 Mission 开始。</div>
+                    )}
+                    {agentTurns.map((turn) => {
+                      const relatedCard = agentResultCards.find((item) => item.turnId === turn.id);
+                      return (
+                      <div key={turn.id} className="space-y-1.5">
+                        <div className="flex justify-end">
+                          <div className="max-w-[92%] rounded-lg border border-violet-500/30 bg-violet-500/10 px-2 py-1.5 text-[11px] text-violet-100 whitespace-pre-wrap break-words">
+                            {turn.userText}
+                          </div>
+                        </div>
+                        <div className="flex justify-start">
+                          <div className="max-w-[92%] rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-[11px] text-slate-200">
+                            {turn.status === "running" && (
+                              <div className="inline-flex items-center gap-1.5 text-slate-300">
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                {AGENT_RUN_STEPS[Math.min(turn.stepIndex || 0, AGENT_RUN_STEPS.length - 1)]}
+                              </div>
+                            )}
+                            {turn.status === "clarify" && (turn.assistantText || "你想做哪个产品/品类？")}
+                            {turn.status === "error" && (
+                              <div className="space-y-1.5">
+                                <div className="text-red-300">{turn.error || "请求失败"}</div>
+                                <button
+                                  type="button"
+                                  onClick={() => retryAgentTurn(turn.id)}
+                                  className="px-2 py-1 rounded border border-slate-700 text-[10px] hover:bg-slate-800"
+                                >
+                                  重试
+                                </button>
+                              </div>
+                            )}
+                            {turn.status === "done" && (
+                              <div className="space-y-1.5">
+                                <div className="text-slate-300">
+                                  已生成 {(turn.response?.topics || []).length} 个 topic / {(turn.response?.edit_plans || []).length} 个 plan
+                                </div>
+                                <div className="flex gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => focusAgentResultCard(turn.id)}
+                                    className="px-2 py-1 rounded border border-slate-700 text-[10px] hover:bg-slate-800"
+                                  >
+                                    {relatedCard?.minimized ? "恢复结果卡片" : "定位结果卡片"}
+                                  </button>
+                                  {relatedCard && !relatedCard.minimized && (
+                                    <button
+                                      type="button"
+                                      onClick={() => minimizeAgentResultCard(relatedCard.id)}
+                                      className="px-2 py-1 rounded border border-slate-700 text-[10px] hover:bg-slate-800"
+                                    >
+                                      最小化到对话流
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )})}
+                    <div ref={agentConversationBottomRef} />
+                  </div>
+                </div>
+              ) : (
+                <div className="h-[calc(100%-44px)] flex items-center justify-center text-[10px] text-slate-500 [writing-mode:vertical-rl]">
+                  对话
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div
+            className="absolute left-1/2 -translate-x-1/2 bottom-4 z-40 w-[min(100%-2rem,640px)] pointer-events-auto"
+            onMouseDown={(e) => e.stopPropagation()}
+            onWheel={(e) => e.stopPropagation()}
+          >
+            <div className="rounded-xl border border-cyan-500/25 bg-slate-900/92 shadow-2xl backdrop-blur px-2.5 py-2">
+              <div className="flex items-end gap-1.5">
+                <textarea
+                  ref={agentInputRef}
+                  value={agentInput}
+                  onChange={(e) => setAgentInput(e.target.value)}
+                  rows={1}
+                  placeholder="输入 Mission，例如：帮我设计一个洗面奶的爆款脚本"
+                  className="flex-1 min-h-[38px] max-h-24 rounded-md border border-slate-700 bg-slate-950/90 px-2.5 py-2 text-xs outline-none focus:border-cyan-400 resize-y"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      sendAgentMission();
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={sendAgentMission}
+                  disabled={!agentInput.trim() || isAgentMissionRunning}
+                  className={`h-9 px-3 rounded-md text-white inline-flex items-center gap-1 text-xs font-semibold ${
+                    !agentInput.trim() || isAgentMissionRunning
+                      ? "bg-slate-700 cursor-not-allowed"
+                      : "bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500"
+                  }`}
+                >
+                  {isAgentMissionRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                  发送
+                </button>
+              </div>
+              <div className="mt-1 text-[10px] text-slate-500">Enter 发送，Shift+Enter 换行</div>
+            </div>
           </div>
         </div>
 

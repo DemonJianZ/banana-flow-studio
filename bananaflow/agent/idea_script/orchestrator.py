@@ -15,6 +15,7 @@ except Exception:  # pragma: no cover - 兼容 python bananaflow/main.py 直跑
     from core.logging import sys_logger
 from .config import IdeaScriptAgentConfig
 from .edit_plan_builder import EditPlanBuilder
+from .gemini_client import DEFAULT_IDEA_SCRIPT_MODEL, build_idea_script_gemini_client
 from .generator import IdeaScriptGeneratorNode
 from .inference import AudienceInferenceNode
 from .prompts import INFERENCE_CONFIDENCE_THRESHOLD, PROMPT_VERSION
@@ -57,13 +58,34 @@ class IdeaScriptOrchestrator:
         config: Optional[IdeaScriptAgentConfig] = None,
     ) -> None:
         self.config = config or IdeaScriptAgentConfig.from_env()
-        self.inference_node = inference_node or AudienceInferenceNode(model_config=self.config.inference)
-        self.generator_node = generator_node or IdeaScriptGeneratorNode(model_config=self.config.generation)
+        self.default_llm_model = (
+            (self.config.generation.model or "").strip() or DEFAULT_IDEA_SCRIPT_MODEL
+        )
+        self.inference_node = inference_node or AudienceInferenceNode(
+            llm_client=build_idea_script_gemini_client(self.config.inference),
+            model_config=self.config.inference,
+        )
+        self.generator_node = generator_node or IdeaScriptGeneratorNode(
+            llm_client=build_idea_script_gemini_client(self.config.generation),
+            model_config=self.config.generation,
+        )
         self.reviewer_node = reviewer_node or IdeaScriptReviewerNode(model_config=self.config.review)
-        self.risk_scanner_node = risk_scanner_node or ComplianceGuardNode(model_config=self.config.risk_scan)
-        self.safe_rewrite_node = safe_rewrite_node or SafeRewriteNode(model_config=self.config.safe_rewrite)
-        self.scoring_node = scoring_node or ScoringReviewerNode(model_config=self.config.score)
-        self.storyboard_node = storyboard_node or StoryboardAgentNode(model_config=self.config.storyboard_generate)
+        self.risk_scanner_node = risk_scanner_node or ComplianceGuardNode(
+            llm_client=build_idea_script_gemini_client(self.config.risk_scan),
+            model_config=self.config.risk_scan,
+        )
+        self.safe_rewrite_node = safe_rewrite_node or SafeRewriteNode(
+            llm_client=build_idea_script_gemini_client(self.config.safe_rewrite),
+            model_config=self.config.safe_rewrite,
+        )
+        self.scoring_node = scoring_node or ScoringReviewerNode(
+            llm_client=build_idea_script_gemini_client(self.config.score),
+            model_config=self.config.score,
+        )
+        self.storyboard_node = storyboard_node or StoryboardAgentNode(
+            llm_client=build_idea_script_gemini_client(self.config.storyboard_generate),
+            model_config=self.config.storyboard_generate,
+        )
         self.storyboard_reviewer_node = storyboard_reviewer_node or StoryboardReviewerNode(model_config=self.config.storyboard_review)
         self.asset_index_tool = asset_index_tool or AssetIndexTool(
             db_path=self.config.asset_db_path,
