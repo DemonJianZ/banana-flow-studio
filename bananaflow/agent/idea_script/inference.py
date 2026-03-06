@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+try:
+    from ...context.context_builder import ContextPack, render_context_sections
+except Exception:  # pragma: no cover - 兼容 python bananaflow/main.py 直跑
+    from context.context_builder import ContextPack, render_context_sections
+
 from .prompts import (
     GENERIC_PERSONA_BANNED_TERMS,
     INFERENCE_CONFIDENCE_THRESHOLD,
@@ -75,13 +80,21 @@ class AudienceInferenceNode:
         retry: bool = False,
         previous: Optional[AudienceInferenceResult] = None,
         allow_llm: bool = True,
+        context_pack: Optional[ContextPack] = None,
     ) -> AudienceInferenceResult:
         product = (product or "").strip()
-        _ = build_inference_prompt(product, retry=retry, previous_persona=(previous.persona if previous else None))
+        prompt = build_inference_prompt(product, retry=retry, previous_persona=(previous.persona if previous else None))
+        if context_pack is not None:
+            prompt = f"{prompt}\n\n{render_context_sections(context_pack)}"
 
         if allow_llm and self.llm_client and hasattr(self.llm_client, "infer_audience"):
             try:
-                out = self.llm_client.infer_audience(product=product, retry=retry, previous=previous)
+                out = self.llm_client.infer_audience(
+                    product=product,
+                    retry=retry,
+                    previous=previous,
+                    prompt_override=prompt,
+                )
                 if isinstance(out, AudienceInferenceResult):
                     result = out
                 else:

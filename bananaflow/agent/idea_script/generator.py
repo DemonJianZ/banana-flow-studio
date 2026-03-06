@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Optional, Sequence
 
+try:
+    from ...context.context_builder import ContextPack, render_context_sections
+except Exception:  # pragma: no cover - 兼容 python bananaflow/main.py 直跑
+    from context.context_builder import ContextPack, render_context_sections
+
 from .prompts import GENERATION_ANGLES, SCRIPT_STRUCTURE_TAGS, build_generator_prompt
 from .schemas import AudienceInferenceResult, IdeaTopic
 
@@ -30,8 +35,9 @@ class IdeaScriptGeneratorNode:
         reviewer_blocking_issues: Sequence[str] | None = None,
         previous_topics: Sequence[IdeaTopic] | None = None,
         allow_llm: bool = True,
+        context_pack: Optional[ContextPack] = None,
     ) -> list[IdeaTopic]:
-        _ = build_generator_prompt(
+        prompt = build_generator_prompt(
             product=audience_context.product,
             persona=audience_context.persona,
             pain_points=audience_context.pain_points,
@@ -39,6 +45,8 @@ class IdeaScriptGeneratorNode:
             retry=retry,
             blocking_issues=reviewer_blocking_issues,
         )
+        if context_pack is not None:
+            prompt = f"{prompt}\n\n{render_context_sections(context_pack)}"
 
         if allow_llm and self.llm_client and hasattr(self.llm_client, "generate_idea_scripts"):
             try:
@@ -47,6 +55,7 @@ class IdeaScriptGeneratorNode:
                     retry=retry,
                     reviewer_blocking_issues=list(reviewer_blocking_issues or []),
                     previous_topics=[t.model_dump() if hasattr(t, "model_dump") else t for t in (previous_topics or [])],
+                    prompt_override=prompt,
                 )
                 topics = [t if isinstance(t, IdeaTopic) else IdeaTopic(**t) for t in out]
                 return self._enforce_output_contract(topics, audience_context)

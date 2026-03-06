@@ -3,6 +3,23 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    --bf-bg: #020617;
+    --bf-panel: rgba(15, 23, 42, 0.9);
+    --bf-panel-strong: rgba(15, 23, 42, 0.96);
+    --bf-panel-soft: rgba(15, 23, 42, 0.72);
+    --bf-border: rgba(71, 85, 105, 0.58);
+    --bf-border-strong: rgba(100, 116, 139, 0.72);
+    --bf-text: rgba(241, 245, 249, 0.96);
+    --bf-text-muted: rgba(148, 163, 184, 0.94);
+    --bf-text-subtle: rgba(100, 116, 139, 0.96);
+    --bf-shadow-lg: 0 18px 48px -24px rgba(2, 6, 23, 0.85);
+    --bf-shadow-md: 0 12px 34px -20px rgba(2, 6, 23, 0.75);
+    --bf-radius-md: 10px;
+    --bf-radius-lg: 14px;
+    --bf-radius-xl: 18px;
+  }
+
   html, body, #root {
     height: 100%;
   }
@@ -23,6 +40,28 @@
 }
 
 @layer utilities {
+  .bf-panel {
+    background: var(--bf-panel);
+    border: 1px solid var(--bf-border);
+    border-radius: var(--bf-radius-lg);
+    box-shadow: var(--bf-shadow-md);
+  }
+
+  .bf-panel-strong {
+    background: var(--bf-panel-strong);
+    border: 1px solid var(--bf-border);
+    border-radius: var(--bf-radius-xl);
+    box-shadow: var(--bf-shadow-lg);
+  }
+
+  .bf-muted-text {
+    color: var(--bf-text-muted);
+  }
+
+  .bf-subtle-text {
+    color: var(--bf-text-subtle);
+  }
+
   /* subtle float for large panels */
   @keyframes bf-float {
     0%, 100% { transform: translateY(0px); }
@@ -69,5 +108,40 @@
     mix-blend-mode: soft-light;
     opacity: .22;
     pointer-events: none;
+  }
+
+  /* themed scrollbar for panels/sidebar */
+  .custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(234, 179, 8, 0.45) rgba(15, 23, 42, 0.55);
+  }
+
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 9px;
+    height: 9px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: linear-gradient(180deg, rgba(15, 23, 42, 0.75), rgba(2, 6, 23, 0.85));
+    border-radius: 9999px;
+    border: 1px solid rgba(51, 65, 85, 0.65);
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, rgba(234, 179, 8, 0.5), rgba(168, 85, 247, 0.38));
+    border-radius: 9999px;
+    border: 1px solid rgba(148, 163, 184, 0.28);
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(180deg, rgba(250, 204, 21, 0.68), rgba(192, 132, 252, 0.46));
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb:active {
+    background: linear-gradient(180deg, rgba(250, 204, 21, 0.78), rgba(192, 132, 252, 0.55));
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-corner {
+    background: transparent;
   }
 }

@@ -1,7 +1,11 @@
 import time
 from google import genai
-from core.config import API_KEY, PROJECT_ID, LOCATION, MODEL_GEMINI
-from core.logging import sys_logger
+try:
+    from ..core.config import API_KEY, PROJECT_ID, LOCATION, MODEL_GEMINI
+    from ..core.logging import sys_logger
+except Exception:  # pragma: no cover - 兼容 python bananaflow/main.py 直跑
+    from core.config import API_KEY, PROJECT_ID, LOCATION, MODEL_GEMINI
+    from core.logging import sys_logger
 
 _client = None
 

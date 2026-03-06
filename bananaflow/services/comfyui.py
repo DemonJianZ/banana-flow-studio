@@ -21,6 +21,8 @@ from core.config import (
     COMFYUI_OVERLAYTEXT_PATH,
     COMFYUI_RMBG_PATH,
     COMFYUI_MULTI_ANGLESHOTS_PATH,
+    COMFYUI_IMAGE_Z_IMAGE_TURBO_PATH,
+    COMFYUI_VIDEO_WAN_I2V_PATH,
     COMFYUI_UPSCALE_PATH,
     COMFYUI_CONTROLNET_PATH,
     COMFYUI_OUTPUT_NODE_ID,
@@ -181,6 +183,27 @@ def _get_node_input(workflow: Dict[str, Any], node_id: str, key: str, default: A
     node = workflow.get(str(node_id)) or {}
     inputs = node.get("inputs") or {}
     return inputs.get(key, default)
+
+
+def _find_workflow_node_id(
+    workflow: Dict[str, Any],
+    class_types: List[str],
+    required_inputs: Optional[List[str]] = None,
+) -> Optional[str]:
+    targets = {str(item).strip().lower() for item in class_types if str(item).strip()}
+    required = [str(item) for item in (required_inputs or []) if str(item)]
+
+    for node_id, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
+        class_type = str(node.get("class_type") or "").strip().lower()
+        if targets and class_type not in targets:
+            continue
+        inputs = node.get("inputs") or {}
+        if required and any(key not in inputs for key in required):
+            continue
+        return str(node_id)
+    return None
 
 
 def _resize_image_if_needed(
@@ -1019,6 +1042,86 @@ def run_multi_angleshots_workflow(
     return [_download_image(info) for info in image_infos[: len(save_node_ids)]]
 
 
+def run_image_z_image_turbo_workflow(
+    *,
+    req_id: str,
+    prompt: str,
+    width: int = 1024,
+    height: int = 1024,
+    seed: Optional[int] = None,
+    filename_prefix: Optional[str] = None,
+) -> bytes:
+    workflow = _load_workflow(COMFYUI_IMAGE_Z_IMAGE_TURBO_PATH)
+    workflow = copy.deepcopy(workflow)
+
+    _set_node_input(workflow, "58", "value", str(prompt or "").strip())
+    _set_node_input(workflow, "57:13", "width", max(64, int(width or 1024)))
+    _set_node_input(workflow, "57:13", "height", max(64, int(height or 1024)))
+    if seed is not None:
+        _set_node_input(workflow, "57:3", "seed", int(seed))
+    if filename_prefix:
+        _set_node_input(workflow, "9", "filename_prefix", str(filename_prefix))
+
+    client_id = uuid.uuid4().hex
+    sys_logger.info(f"[{req_id}] ComfyUI z-image queue prompt client_id={client_id}")
+    prompt_id = _queue_prompt(workflow, client_id)
+    history = _wait_for_history(prompt_id)
+    image_info = _pick_output_image(history)
+    return _download_image(image_info)
+
+
+def run_video_wan_i2v_workflow(
+    *,
+    req_id: str,
+    image_bytes: bytes,
+    positive_prompt: str,
+    negative_prompt: Optional[str] = None,
+    width: int = 640,
+    height: int = 640,
+    length: int = 81,
+    fps: int = 16,
+    seed: Optional[int] = None,
+    filename_prefix: Optional[str] = None,
+) -> tuple[bytes, str]:
+    workflow = _load_workflow(COMFYUI_VIDEO_WAN_I2V_PATH)
+    workflow = copy.deepcopy(workflow)
+
+    image_upload_name = f"wan-i2v-{uuid.uuid4().hex}.png"
+    sys_logger.info(f"[{req_id}] Uploading image to ComfyUI for Wan i2v: {image_upload_name}")
+    uploaded_image = _upload_image(image_bytes, image_upload_name)
+
+    _set_node_input(workflow, "97", "image", uploaded_image)
+    _set_node_input(workflow, "93", "text", str(positive_prompt or "").strip())
+    if negative_prompt is not None:
+        _set_node_input(workflow, "89", "text", str(negative_prompt))
+
+    _set_node_input(workflow, "98", "width", max(64, int(width or 640)))
+    _set_node_input(workflow, "98", "height", max(64, int(height or 640)))
+    _set_node_input(workflow, "98", "length", max(1, int(length or 81)))
+    _set_node_input(workflow, "94", "fps", max(1, int(fps or 16)))
+
+    if seed is not None:
+        seed_int = int(seed)
+        _set_node_input(workflow, "86", "noise_seed", seed_int)
+        _set_node_input(workflow, "85", "noise_seed", seed_int)
+
+    if filename_prefix:
+        _set_node_input(workflow, "108", "filename_prefix", str(filename_prefix))
+
+    client_id = uuid.uuid4().hex
+    sys_logger.info(f"[{req_id}] ComfyUI Wan i2v queue prompt client_id={client_id}")
+    prompt_id = _queue_prompt(workflow, client_id)
+    history = _wait_for_history(prompt_id, timeout_sec=COMFYUI_VIDEO_UPSCALE_TIMEOUT_SEC)
+    output_info = _pick_output_file(history, preferred_node_ids=["108"])
+    output_bytes = _download_file(output_info)
+    output_name = str(output_info.get("filename") or "")
+    output_ext = os.path.splitext(output_name)[1].lower() or ".mp4"
+    output_mime = _guess_mime_from_ext(output_ext)
+    if output_mime == "application/octet-stream":
+        output_mime = "video/mp4"
+    return output_bytes, output_mime
+
+
 def run_controlnet_pose_video_workflow(
     *,
     req_id: str,
@@ -1108,9 +1211,41 @@ def run_video_upscale_workflow(
     req_id: str,
     video_input: str,
     segment_seconds: int = 3,
+    output_resolution: int = 1440,
+    workflow_batch_size: int = 1,
     progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> tuple[bytes, str]:
     workflow_template = _load_workflow(COMFYUI_UPSCALE_PATH)
+    load_node_id = _find_workflow_node_id(
+        workflow_template,
+        ["LoadVideo", "VHS_LoadVideo", "VHS_LoadVideoPath"],
+        required_inputs=["file"],
+    ) or ("9" if str("9") in workflow_template else None)
+    save_node_id = _find_workflow_node_id(
+        workflow_template,
+        ["SaveVideo", "VHS_VideoCombine"],
+        required_inputs=["filename_prefix"],
+    ) or ("12" if str("12") in workflow_template else None)
+    upscale_node_id = _find_workflow_node_id(
+        workflow_template,
+        ["SeedVR2VideoUpscaler"],
+        required_inputs=["resolution", "batch_size"],
+    ) or ("10" if str("10") in workflow_template else None)
+    if not load_node_id:
+        raise ComfyUiError(
+            f"Upscale workflow missing video load node (class_type in LoadVideo/VHS_LoadVideo/VHS_LoadVideoPath). "
+            f"workflow={COMFYUI_UPSCALE_PATH}"
+        )
+    if not save_node_id:
+        raise ComfyUiError(
+            f"Upscale workflow missing video save node (class_type in SaveVideo/VHS_VideoCombine). "
+            f"workflow={COMFYUI_UPSCALE_PATH}"
+        )
+    target_resolution = _to_int(output_resolution, 1440)
+    if target_resolution <= 0:
+        target_resolution = 1440
+    target_batch_size = _to_int(workflow_batch_size, 1)
+    target_batch_size = max(1, target_batch_size)
     segment_seconds = max(1, _to_int(segment_seconds, 3))
 
     with tempfile.TemporaryDirectory(prefix="comfyui-video-upscale-") as temp_dir:
@@ -1132,13 +1267,16 @@ def run_video_upscale_workflow(
             with open(chunk_path, "rb") as f:
                 uploaded = _upload_file(f.read(), upload_name, _guess_mime_from_ext(chunk_ext))
 
-            _set_node_input(workflow, "9", "file", uploaded)
-            _set_node_input(workflow, "12", "filename_prefix", f"video/upscale-{req_id}-{idx:04d}")
+            _set_node_input(workflow, load_node_id, "file", uploaded)
+            if upscale_node_id:
+                _set_node_input(workflow, upscale_node_id, "resolution", target_resolution)
+                _set_node_input(workflow, upscale_node_id, "batch_size", target_batch_size)
+            _set_node_input(workflow, save_node_id, "filename_prefix", f"video/upscale-{req_id}-{idx:04d}")
 
             client_id = uuid.uuid4().hex
             prompt_id = _queue_prompt(workflow, client_id)
             history = _wait_for_history(prompt_id, timeout_sec=COMFYUI_VIDEO_UPSCALE_TIMEOUT_SEC)
-            output_info = _pick_output_file(history, preferred_node_ids=["12"])
+            output_info = _pick_output_file(history, preferred_node_ids=[save_node_id])
             output_bytes = _download_file(output_info)
 
             output_filename = str(output_info.get("filename") or f"chunk_{idx:04d}.mp4")

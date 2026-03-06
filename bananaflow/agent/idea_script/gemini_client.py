@@ -135,7 +135,13 @@ class IdeaScriptGeminiClient:
         text = self._extract_text(response)
         return self._extract_json(text)
 
-    def infer_audience(self, product: str, retry: bool = False, previous: Optional[Any] = None) -> Dict[str, Any]:
+    def infer_audience(
+        self,
+        product: str,
+        retry: bool = False,
+        previous: Optional[Any] = None,
+        prompt_override: Optional[str] = None,
+    ) -> Dict[str, Any]:
         prev_payload = {}
         if previous is not None:
             try:
@@ -147,22 +153,26 @@ class IdeaScriptGeminiClient:
                 prev_payload = {}
 
         prompt = (
-            "You are an audience inference node for short-video script planning.\n"
-            "Return JSON object only.\n"
-            "Schema:\n"
-            "{"
-            "\"product\": string,"
-            "\"persona\": string,"
-            "\"pain_points\": string[],"
-            "\"scenes\": string[],"
-            "\"why_this_persona\": string,"
-            "\"confidence\": number(0~1),"
-            "\"unsafe_claim_risk\": \"low\"|\"medium\"|\"high\""
-            "}\n"
-            "Rules: persona must be concrete and shootable; avoid generic personas; avoid medical or absolute claims.\n"
-            f"Input product: {product}\n"
-            f"Retry: {bool(retry)}\n"
-            f"Previous result: {json.dumps(prev_payload, ensure_ascii=False)}"
+            prompt_override
+            if isinstance(prompt_override, str) and prompt_override.strip()
+            else (
+                "You are an audience inference node for short-video script planning.\n"
+                "Return JSON object only.\n"
+                "Schema:\n"
+                "{"
+                "\"product\": string,"
+                "\"persona\": string,"
+                "\"pain_points\": string[],"
+                "\"scenes\": string[],"
+                "\"why_this_persona\": string,"
+                "\"confidence\": number(0~1),"
+                "\"unsafe_claim_risk\": \"low\"|\"medium\"|\"high\""
+                "}\n"
+                "Rules: persona must be concrete and shootable; avoid generic personas; avoid medical or absolute claims.\n"
+                f"Input product: {product}\n"
+                f"Retry: {bool(retry)}\n"
+                f"Previous result: {json.dumps(prev_payload, ensure_ascii=False)}"
+            )
         )
         data = self._call_json(prompt)
         if not isinstance(data, dict):
@@ -175,24 +185,29 @@ class IdeaScriptGeminiClient:
         retry: bool = False,
         reviewer_blocking_issues: Optional[List[str]] = None,
         previous_topics: Optional[List[Any]] = None,
+        prompt_override: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         ctx = audience_context.model_dump(mode="json") if hasattr(audience_context, "model_dump") else dict(audience_context or {})
         prompt = (
-            "You are an idea_script generator.\n"
-            "Return JSON array only with exactly 3 items and unique angles: persona, scene, misconception.\n"
-            "Each item schema:\n"
-            "{"
-            "\"angle\":\"persona|scene|misconception\","
-            "\"title\":string,"
-            "\"hook\":string,"
-            "\"script_60s\":string(with mandatory tags in order [HOOK][VIEW][STEPS][PRODUCT][CTA]),"
-            "\"visual_keywords\":string[5..8]"
-            "}\n"
-            "Avoid medical/absolute claims.\n"
-            f"Audience context: {json.dumps(ctx, ensure_ascii=False)}\n"
-            f"Retry: {bool(retry)}\n"
-            f"Blocking issues: {json.dumps(list(reviewer_blocking_issues or []), ensure_ascii=False)}\n"
-            f"Previous topics: {json.dumps(list(previous_topics or []), ensure_ascii=False)}"
+            prompt_override
+            if isinstance(prompt_override, str) and prompt_override.strip()
+            else (
+                "You are an idea_script generator.\n"
+                "Return JSON array only with exactly 3 items and unique angles: persona, scene, misconception.\n"
+                "Each item schema:\n"
+                "{"
+                "\"angle\":\"persona|scene|misconception\","
+                "\"title\":string,"
+                "\"hook\":string,"
+                "\"script_60s\":string(with mandatory tags in order [HOOK][VIEW][STEPS][PRODUCT][CTA]),"
+                "\"visual_keywords\":string[5..8]"
+                "}\n"
+                "Avoid medical/absolute claims.\n"
+                f"Audience context: {json.dumps(ctx, ensure_ascii=False)}\n"
+                f"Retry: {bool(retry)}\n"
+                f"Blocking issues: {json.dumps(list(reviewer_blocking_issues or []), ensure_ascii=False)}\n"
+                f"Previous topics: {json.dumps(list(previous_topics or []), ensure_ascii=False)}"
+            )
         )
         data = self._call_json(prompt)
         if isinstance(data, dict) and isinstance(data.get("topics"), list):

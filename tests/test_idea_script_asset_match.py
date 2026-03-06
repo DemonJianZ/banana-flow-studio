@@ -367,6 +367,54 @@ class IdeaScriptAssetIndexTests(unittest.TestCase):
                     self.assertIn(candidates[0].bucket, {"best_match", "partial_match", "fallback"})
             self.assertGreater(matched_with_candidates, 0)
 
+    def test_orchestrator_should_support_mcp_asset_match_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "assets.db")
+            ensure_asset_db(db_path)
+            execute(
+                db_path,
+                """
+                INSERT INTO assets (
+                    asset_id, uri, asset_type, tags, scene, objects, style, aspect, duration_sec
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "scene_pack_2",
+                    "/assets/scene_pack_2.mp4",
+                    "scene",
+                    json.dumps(["占位素材", "hook", "view", "steps1", "steps2", "product", "cta", "view2"], ensure_ascii=False),
+                    "口播场景",
+                    "[]",
+                    "真实实拍",
+                    "9:16",
+                    10.0,
+                ),
+            )
+
+            cfg = IdeaScriptAgentConfig(
+                scoring_enabled=False,
+                cache_enabled=False,
+                asset_db_path=db_path,
+                asset_match_top_k=2,
+                asset_match_use_mcp=True,
+            )
+            orchestrator = IdeaScriptOrchestrator(
+                inference_node=_StubInferenceNode(),
+                generator_node=_StubGeneratorNode(),
+                reviewer_node=_StubReviewerNode(),
+                risk_scanner_node=_StubRiskScannerNode(),
+                storyboard_node=_StubStoryboardNode(),
+                storyboard_reviewer_node=_StubStoryboardReviewerNode(),
+                config=cfg,
+            )
+            out = orchestrator.run(IdeaScriptRequest(product="耳机"))
+
+            shot_count = sum(len(topic.shots or []) for topic in (out.topics or []))
+            self.assertGreater(shot_count, 0)
+            self.assertEqual(len(out.matched_assets), shot_count)
+            self.assertGreater(out.shot_match_rate, 0.0)
+            self.assertFalse(out.asset_match_warning)
+
 
 if __name__ == "__main__":
     unittest.main()

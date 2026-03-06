@@ -21,6 +21,20 @@ class VideoGenError(RuntimeError):
     pass
 
 
+def _post_direct_without_proxy(url: str, **kwargs) -> requests.Response:
+    # Ensure ARK calls ignore HTTP(S)_PROXY and always go direct.
+    with requests.Session() as session:
+        session.trust_env = False
+        return session.post(url, **kwargs)
+
+
+def _get_direct_without_proxy(url: str, **kwargs) -> requests.Response:
+    # Ensure ARK calls ignore HTTP(S)_PROXY and always go direct.
+    with requests.Session() as session:
+        session.trust_env = False
+        return session.get(url, **kwargs)
+
+
 def submit_video_task(
     req_id: str,
     image_data_url: str,
@@ -92,7 +106,7 @@ def submit_video_task(
     sys_logger.info(f"[{req_id}] Submitting Video Task to {ARK_VIDEO_API_URL}, model={payload['model']}")
     sys_logger.info(f"[{req_id}] payload_keys={list(payload.keys())}")
 
-    resp = requests.post(ARK_VIDEO_API_URL, headers=headers, json=payload, timeout=30)
+    resp = _post_direct_without_proxy(ARK_VIDEO_API_URL, headers=headers, json=payload, timeout=30)
     if resp.status_code != 200:
         raise VideoGenError(f"Task Submission Failed: {resp.status_code} {resp.text}")
 
@@ -161,7 +175,7 @@ def poll_video_task(req_id: str, task_id: str, max_rounds: int = 40, interval_se
     last_status_data = None
     for _ in range(max_rounds):
         time.sleep(interval_sec)
-        r = requests.get(status_url, headers=headers, timeout=10)
+        r = _get_direct_without_proxy(status_url, headers=headers, timeout=10)
         if r.status_code != 200:
             continue
         status_data = r.json()
@@ -188,5 +202,4 @@ def download_video_as_data_url(video_url: str, req_id: str) -> Optional[str]:
     except Exception as e:
         sys_logger.warning(f"[{req_id}] download video failed: {e}")
     return None
-
 

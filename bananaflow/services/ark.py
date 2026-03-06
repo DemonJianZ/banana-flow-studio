@@ -3,6 +3,14 @@ from core.config import ARK_API_KEY, ARK_IMAGE_API_URL, ARK_IMAGE_MODEL_ID
 from core.logging import sys_logger
 from utils.size import calculate_target_resolution
 
+
+def _post_direct_without_proxy(url: str, **kwargs) -> requests.Response:
+    # Ensure ARK calls ignore HTTP(S)_PROXY and always go direct.
+    with requests.Session() as session:
+        session.trust_env = False
+        return session.post(url, **kwargs)
+
+
 def call_doubao_image_gen(prompt: str, req_id: str, size_param: str = "1024x1024", aspect_ratio: str = "1:1") -> bytes:
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {ARK_API_KEY}"}
     valid_size = calculate_target_resolution(size_param, aspect_ratio)
@@ -18,7 +26,7 @@ def call_doubao_image_gen(prompt: str, req_id: str, size_param: str = "1024x1024
     }
 
     sys_logger.info(f"[{req_id}] Calling Doubao (Ark): {prompt[:80]}... Size: {valid_size}")
-    response = requests.post(ARK_IMAGE_API_URL, headers=headers, json=payload, timeout=60)
+    response = _post_direct_without_proxy(ARK_IMAGE_API_URL, headers=headers, json=payload, timeout=60)
     if response.status_code != 200:
         raise RuntimeError(f"Doubao API Failed: {response.text}")
 

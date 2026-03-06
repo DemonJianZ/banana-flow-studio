@@ -46,10 +46,44 @@ if not os.path.exists(_default_multi_angleshots):
     _default_multi_angleshots = os.path.join(BASE_DIR, "bananaflow", "workflows", "Multi-angleshots.json")
 COMFYUI_MULTI_ANGLESHOTS_PATH = os.getenv("COMFYUI_MULTI_ANGLESHOTS_PATH", _default_multi_angleshots)
 
-_default_upscale = os.path.join(BASE_DIR, "workflows", "upscale.json")
+_default_upscale = os.path.join(BASE_DIR, "workflows", "UpScale_V2.json")
 if not os.path.exists(_default_upscale):
-    _default_upscale = os.path.join(BASE_DIR, "bananaflow", "workflows", "upscale.json")
-COMFYUI_UPSCALE_PATH = os.getenv("COMFYUI_UPSCALE_PATH", _default_upscale)
+    _default_upscale = os.path.join(BASE_DIR, "bananaflow", "workflows", "UpScale_V2.json")
+_env_upscale = (os.getenv("COMFYUI_UPSCALE_PATH") or "").strip()
+_upscale_aliases = {"upscale.json", "upscale_v2.json"}
+if _env_upscale:
+    _env_upscale_abs = _env_upscale if os.path.isabs(_env_upscale) else os.path.abspath(os.path.join(BASE_DIR, _env_upscale))
+    _env_upscale_basename = os.path.basename(_env_upscale).lower()
+    if _env_upscale_basename in _upscale_aliases:
+        _upscale_dir = os.path.dirname(_env_upscale_abs) or BASE_DIR
+        _upscale_candidates = (
+            "UpScale_V2.json",
+            "UpScale_v2.json",
+            "upscale_v2.json",
+            "upscale.json",
+        )
+        _resolved_upscale = ""
+        for _name in _upscale_candidates:
+            _candidate = os.path.join(_upscale_dir, _name)
+            if os.path.exists(_candidate):
+                _resolved_upscale = _candidate
+                break
+        if _resolved_upscale:
+            COMFYUI_UPSCALE_PATH = _resolved_upscale
+        elif os.path.exists(_env_upscale):
+            COMFYUI_UPSCALE_PATH = _env_upscale
+        elif os.path.exists(_env_upscale_abs):
+            COMFYUI_UPSCALE_PATH = _env_upscale_abs
+        else:
+            COMFYUI_UPSCALE_PATH = _default_upscale
+    elif os.path.exists(_env_upscale):
+        COMFYUI_UPSCALE_PATH = _env_upscale
+    elif os.path.exists(_env_upscale_abs):
+        COMFYUI_UPSCALE_PATH = _env_upscale_abs
+    else:
+        COMFYUI_UPSCALE_PATH = _env_upscale
+else:
+    COMFYUI_UPSCALE_PATH = _default_upscale
 
 _default_controlnet = os.path.join(BASE_DIR, "workflows", "Controlnet.json")
 if not os.path.exists(_default_controlnet):
@@ -60,6 +94,17 @@ COMFYUI_OUTPUT_NODE_ID = os.getenv("COMFYUI_OUTPUT_NODE_ID", "4")
 COMFYUI_TIMEOUT_SEC = int(os.getenv("COMFYUI_TIMEOUT_SEC", "120"))
 COMFYUI_VIDEO_UPSCALE_TIMEOUT_SEC = int(os.getenv("COMFYUI_VIDEO_UPSCALE_TIMEOUT_SEC", "900"))
 COMFYUI_POLL_INTERVAL_SEC = float(os.getenv("COMFYUI_POLL_INTERVAL_SEC", "1.0"))
+
+_default_image_z_image_turbo = os.path.join(BASE_DIR, "workflows", "image_z_image_turbo.json")
+if not os.path.exists(_default_image_z_image_turbo):
+    _default_image_z_image_turbo = os.path.join(BASE_DIR, "bananaflow", "workflows", "image_z_image_turbo.json")
+COMFYUI_IMAGE_Z_IMAGE_TURBO_PATH = os.getenv("COMFYUI_IMAGE_Z_IMAGE_TURBO_PATH", _default_image_z_image_turbo)
+
+_default_video_wan_i2v = os.path.join(BASE_DIR, "workflows", "video_wan2_2_14B_i2v.json")
+if not os.path.exists(_default_video_wan_i2v):
+    _default_video_wan_i2v = os.path.join(BASE_DIR, "bananaflow", "workflows", "video_wan2_2_14B_i2v.json")
+COMFYUI_VIDEO_WAN_I2V_PATH = os.getenv("COMFYUI_VIDEO_WAN_I2V_PATH", _default_video_wan_i2v)
+
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 DEBUG_DIR = os.path.join(BASE_DIR, "debug_output")
 os.makedirs(LOG_DIR, exist_ok=True)
