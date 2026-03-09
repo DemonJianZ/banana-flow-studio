@@ -1,11 +1,16 @@
 # routes.py
 import time
 import json
+import os
+import re
 import uuid
+import hashlib
 import threading
+from contextlib import contextmanager, nullcontext
 from typing import Dict, Any, Optional, List
+from urllib.parse import unquote
 
-from fastapi import APIRouter, HTTPException, Request, Response, Depends
+from fastapi import APIRouter, HTTPException, Request, Depends, Query, Response
 from pydantic import BaseModel, Field
 from google.genai import types
 
@@ -13,12 +18,13 @@ from google.genai import types
 from core.config import (
     MODEL_GEMINI,
     MODEL_DOUBAO,
-    MODEL_AGENT,
     MODEL_COMFYUI_OVERLAYTEXT,
     MODEL_COMFYUI_RMBG,
     MODEL_COMFYUI_MULTI_ANGLESHOTS,
     MODEL_COMFYUI_VIDEO_UPSCALE,
     MODEL_COMFYUI_CONTROLNET,
+    MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO,
+    MODEL_COMFYUI_QWEN_I2V,
 )
 from core.logging import sys_logger
 from auth_routes import get_current_user
@@ -35,7 +41,7 @@ from schemas.api import (
     VideoUpscaleTaskStartResponse, VideoUpscaleTaskStatusResponse,
     EditRequest, EditResponse,
     Img2VideoRequest, Img2VideoResponse,
-    AgentRequest,
+    AgentVideoGenerationRequest, AgentVideoGenerationResponse, AgentVideoShotArtifact,
 )
 
 from storage.prompt_log import PromptLogger, LogAnalyzer
@@ -43,19 +49,53 @@ from services.genai_client import call_genai_retry
 from services.ark import call_doubao_image_gen
 from services.ark_video import generate_video_from_image, VideoGenError
 from services.comfyui import (
+    run_image_z_image_turbo_workflow,
     run_overlaytext_workflow,
     run_rmbg_workflow,
     run_multi_angleshots_workflow,
+    run_qwen_i2v_workflow,
     run_controlnet_pose_video_workflow,
     run_video_upscale_workflow,
 )
+from services.video_generation_pipeline import run_e2e_video_workflow
 
 from utils.images import parse_data_url, bytes_to_data_url, get_image_from_response
+from utils.size import calculate_target_resolution
 from prompts.business import build_business_prompt
 
-# agent
-from agent.planner import agent_plan_impl
+from agent.idea_script.orchestrator import IdeaScriptOrchestrator
+from agent.idea_script.schemas import EditPlan, IdeaScriptRequest, IdeaScriptResponse
+from mcp.client import MCPClientError, MCPStdioClient
+from mcp.registry import MCPRegistryError, MCPToolInvocationError, get_global_registry
+from mcp.tool_export_ffmpeg import (
+    EXPORT_FFMPEG_TOOL_HASH,
+    EXPORT_FFMPEG_TOOL_NAME,
+    EXPORT_FFMPEG_TOOL_VERSION,
+)
+from quality.harvester import harvest_eval_case
+from quality.metrics_schema import build_quality_metrics
+from memory.service import (
+    deactivate_preference as deactivate_user_preference,
+    expire_preferences as expire_user_preferences,
+    list_preferences as list_user_preferences,
+    set_preference as set_user_preference,
+)
+from sessions.service import (
+    SessionAccessDeniedError,
+    SessionNotFoundError,
+    append_event as append_session_event,
+    create_or_get_session,
+    get_session as get_session_detail,
+    list_sessions as list_session_items,
+    summarize_session as summarize_session_item,
+    update_state as update_session_state,
+)
 ALLOWED_VIDEO_MODELS = {"Doubao-Seedance-1.0-pro", "Doubao-Seedance-1.5-pro"}
+
+try:
+    from opentelemetry import trace as _otel_trace  # type: ignore
+except Exception:
+    _otel_trace = None
 
 
 router = APIRouter()
@@ -63,6 +103,220 @@ prompt_logger = PromptLogger()
 analyzer = LogAnalyzer("logs/prompts.jsonl")
 video_upscale_tasks: Dict[str, Dict[str, Any]] = {}
 video_upscale_tasks_lock = threading.Lock()
+idea_script_orchestrator = IdeaScriptOrchestrator()
+idea_script_plan_cache: Dict[str, Dict[str, Any]] = {}
+idea_script_plan_cache_lock = threading.Lock()
+_tracer = _otel_trace.get_tracer(__name__) if _otel_trace else None
+
+
+class _NoopSpan:
+    def set_attribute(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+def _as_bool(value: Optional[str], default: bool = False) -> bool:
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _decode_agent_header(value: Optional[str]) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        text = unquote(text)
+    except Exception:
+        pass
+    try:
+        repaired = text.encode("latin1").decode("utf-8")
+        if repaired:
+            text = repaired
+    except Exception:
+        pass
+    return text
+
+
+def _tenant_user_from_request(request: Request, current_user: Dict[str, Any]) -> tuple[str, str]:
+    tenant_id = str(request.headers.get("X-Tenant-Id") or current_user.get("email_domain") or "unknown").strip() or "unknown"
+    user_id = str(current_user.get("id") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Missing user id")
+    return tenant_id, user_id
+
+
+def _safe_json_hash(data: Dict[str, Any]) -> str:
+    encoded = json.dumps(dict(data or {}), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+_PREFERENCE_COMMAND_PATTERNS = [
+    (re.compile(r"^\s*偏好平台\s*[:=：]\s*(.+?)\s*$"), "platform"),
+    (re.compile(r"^\s*偏好语气\s*[:=：]\s*(.+?)\s*$"), "tone"),
+    (re.compile(r"^\s*镜头偏好\s*[:=：]\s*(.+?)\s*$"), "camera_style"),
+    (re.compile(r"^\s*风控偏好\s*[:=：]\s*(.+?)\s*$"), "risk_posture"),
+]
+
+
+def _parse_preference_command(text: str) -> Optional[Dict[str, str]]:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    for pattern, key in _PREFERENCE_COMMAND_PATTERNS:
+        matched = pattern.match(raw)
+        if matched is None:
+            continue
+        value = str(matched.group(1) or "").strip()
+        if not value:
+            return None
+        return {"key": key, "value": value}
+    return None
+
+
+def _resolve_agent_session(
+    request: Request,
+    response: Response,
+    current_user: Dict[str, Any],
+    requested_session_id: Optional[str] = None,
+) -> tuple[str, str, str, bool]:
+    tenant_id, user_id = _tenant_user_from_request(request, current_user)
+    session = create_or_get_session(tenant_id=tenant_id, user_id=user_id, session_id=requested_session_id)
+    session_id = str(session.get("session_id") or "")
+    summary_present = bool(str(session.get("summary_text") or "").strip())
+    is_new = bool(session.get("is_new"))
+    if session_id:
+        response.headers["X-Agent-Session-Id"] = session_id
+    sys_logger.info(
+        json.dumps(
+            {
+                "event": ("agent_session_created" if is_new else "agent_session_loaded"),
+                "session_id": session_id,
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+            },
+            ensure_ascii=False,
+        )
+    )
+    return session_id, tenant_id, user_id, summary_present
+
+
+def _append_session_event_audit(
+    tenant_id: str,
+    user_id: str,
+    session_id: str,
+    event_type: str,
+    payload: Dict[str, Any],
+    idempotency_key: Optional[str] = None,
+) -> Optional[int]:
+    if not session_id:
+        return None
+    try:
+        event_id = append_session_event(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            type=event_type,
+            payload=payload,
+            idempotency_key=idempotency_key,
+        )
+        sys_logger.info(
+            json.dumps(
+                {
+                    "event": "agent_session_event_appended",
+                    "event_type": event_type,
+                    "event_id": event_id,
+                    "session_id": session_id,
+                    "tenant_id": tenant_id,
+                    "user_id": user_id,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return event_id
+    except (SessionNotFoundError, SessionAccessDeniedError):
+        raise
+    except Exception as e:
+        sys_logger.warning(f"session event append skipped: type={event_type} session_id={session_id} err={e}")
+        return None
+
+
+def _emit_quality_metrics_event(
+    *,
+    out: IdeaScriptResponse,
+    session_id: str,
+    tenant_id: str,
+    user_id: str,
+    latency_ms: Optional[int],
+    req_id: str,
+) -> Dict[str, Any]:
+    quality_metrics = build_quality_metrics(
+        response=out,
+        session_id=session_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        prompt_version=out.prompt_version,
+        policy_version=out.policy_version,
+        config_hash=out.config_hash,
+        total_tool_calls=2,
+        mcp_calls_count=(1 if bool(getattr(idea_script_orchestrator.config, "asset_match_use_mcp", False)) else 0),
+        latency_ms=(int(latency_ms or 0) if latency_ms is not None else None),
+        clarification_rate=None,
+        asset_match_use_mcp=bool(getattr(idea_script_orchestrator.config, "asset_match_use_mcp", False)),
+    )
+    _append_session_event_audit(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        session_id=session_id,
+        event_type="QUALITY_METRICS",
+        payload=quality_metrics.model_dump(mode="json"),
+        idempotency_key=f"quality_metrics:{req_id}:{session_id}",
+    )
+    return quality_metrics.model_dump(mode="json")
+
+
+def _emit_trajectory_event(
+    *,
+    session_id: str,
+    tenant_id: str,
+    user_id: str,
+    trajectory_payload: Optional[Dict[str, Any]],
+    req_id: str,
+) -> Optional[Dict[str, Any]]:
+    if not bool(getattr(idea_script_orchestrator.config, "trajectory_eval_enabled", False)):
+        return None
+    payload = dict(trajectory_payload or {})
+    if not payload:
+        return None
+    _append_session_event_audit(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        session_id=session_id,
+        event_type="TRAJECTORY_EVAL",
+        payload=payload,
+        idempotency_key=f"trajectory_eval:{req_id}:{session_id}",
+    )
+    return payload
+
+
+@contextmanager
+def _span(name: str, attributes: Optional[Dict[str, Any]] = None):
+    if _tracer is None:
+        with nullcontext():
+            yield _NoopSpan()
+        return
+    with _tracer.start_as_current_span(name) as span:
+        for key, value in dict(attributes or {}).items():
+            try:
+                if value is not None:
+                    span.set_attribute(key, value)
+            except Exception:
+                continue
+        yield span
 
 
 def _set_video_upscale_task(task_id: str, **patch: Any) -> None:
@@ -76,6 +330,79 @@ def _get_video_upscale_task(task_id: str) -> Optional[Dict[str, Any]]:
     with video_upscale_tasks_lock:
         current = video_upscale_tasks.get(task_id)
         return dict(current) if isinstance(current, dict) else None
+
+
+VIDEO_UPSCALE_ALLOWED_RESOLUTIONS = {1080, 1440, 2160}
+
+
+def _normalize_video_upscale_resolution(value: Any) -> int:
+    try:
+        parsed = int(str(value).strip())
+    except Exception:
+        return 1440
+    return parsed if parsed in VIDEO_UPSCALE_ALLOWED_RESOLUTIONS else 1440
+
+
+def _normalize_video_upscale_batch_size(value: Any) -> int:
+    try:
+        parsed = int(str(value).strip())
+    except Exception:
+        return 1
+    return max(1, parsed)
+
+
+def _parse_size_to_dimensions(size: Optional[str], aspect_ratio: Optional[str], *, default: tuple[int, int] = (1024, 1024)) -> tuple[int, int]:
+    target = str(calculate_target_resolution(size or "1024x1024", aspect_ratio or "1:1") or "").strip()
+    matched = re.match(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$", target)
+    if not matched:
+        return default
+    width = max(64, int(matched.group(1)))
+    height = max(64, int(matched.group(2)))
+    return width, height
+
+
+def _parse_local_i2v_dimensions(resolution: Optional[str], ratio: Optional[str]) -> tuple[int, int]:
+    text = str(resolution or "").strip().lower()
+    direct = re.match(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$", text)
+    if direct:
+        return max(64, int(direct.group(1))), max(64, int(direct.group(2)))
+
+    p_match = re.match(r"^\s*(\d+)\s*p\s*$", text)
+    base = int(p_match.group(1)) if p_match else 640
+    base = max(64, base)
+
+    ratio_text = str(ratio or "").strip().lower()
+    ratio_match = re.match(r"^\s*(\d+)\s*:\s*(\d+)\s*$", ratio_text)
+    if not ratio_match:
+        return base, base
+
+    ratio_w = max(1, int(ratio_match.group(1)))
+    ratio_h = max(1, int(ratio_match.group(2)))
+    if ratio_w >= ratio_h:
+        height = base
+        width = max(64, int(round(base * ratio_w / ratio_h)))
+    else:
+        width = base
+        height = max(64, int(round(base * ratio_h / ratio_w)))
+    return width, height
+
+
+def _cache_edit_plans(plans: List[EditPlan]) -> None:
+    with idea_script_plan_cache_lock:
+        for plan in list(plans or []):
+            key = str(getattr(plan, "plan_id", "") or "").strip()
+            if not key:
+                continue
+            idea_script_plan_cache[key] = plan.model_dump(mode="json")
+
+
+def _get_cached_edit_plan(plan_id: str) -> Optional[Dict[str, Any]]:
+    key = str(plan_id or "").strip()
+    if not key:
+        return None
+    with idea_script_plan_cache_lock:
+        data = idea_script_plan_cache.get(key)
+        return dict(data) if isinstance(data, dict) else None
 
 
 # =========================================================
@@ -121,6 +448,7 @@ def text_to_image(req: Text2ImgRequest, request: Request, current_user=Depends(g
                 contents=[types.Part(text=req.prompt)],
                 config=gen_config,
                 req_id=req_id,
+                model=selected_model,
             )
             img_bytes = get_image_from_response(response)
 
@@ -190,7 +518,7 @@ def multi_image_generate(req: MultiImageRequest, request: Request, current_user=
 
         gen_config = types.GenerateContentConfig(**gen_config_kwargs)
 
-        response = call_genai_retry(contents=contents, config=gen_config, req_id=req_id)
+        response = call_genai_retry(contents=contents, config=gen_config, req_id=req_id, model=MODEL_GEMINI)
         img_bytes = get_image_from_response(response)
         if not img_bytes:
             raise RuntimeError("No image returned")
@@ -219,6 +547,115 @@ def multi_image_generate(req: MultiImageRequest, request: Request, current_user=
             req.model_dump(),
             req.prompt,
             {"temperature": req.temperature, "ar": req.aspect_ratio},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/local/text2img", response_model=Text2ImgResponse)
+def local_text_to_image(req: Text2ImgRequest, request: Request, current_user=Depends(get_current_user)):
+    req_id = request.state.req_id
+    t0 = time.time()
+    try:
+        width, height = _parse_size_to_dimensions(req.size, req.aspect_ratio, default=(1024, 1024))
+        img_bytes = run_image_z_image_turbo_workflow(
+            req_id=req_id,
+            prompt=req.prompt,
+            width=width,
+            height=height,
+            filename_prefix=f"local/text2img-{req_id}",
+        )
+        if not img_bytes:
+            raise RuntimeError("No image returned")
+
+        output_data_url = bytes_to_data_url(img_bytes)
+        prompt_logger.log(
+            req_id,
+            "local_text2img",
+            req.model_dump(),
+            req.prompt,
+            {"model": MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO, "width": width, "height": height},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            output_full={"images": [output_data_url]},
+        )
+        record_usage(current_user["id"], MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO)
+        return Text2ImgResponse(images=[output_data_url])
+    except Exception as e:
+        sys_logger.error(f"[{req_id}] Local Text2Img Error: {e}")
+        prompt_logger.log(
+            req_id,
+            "local_text2img",
+            req.model_dump(),
+            req.prompt,
+            {"model": MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/local/img2video", response_model=Img2VideoResponse)
+def local_img_to_video(req: Img2VideoRequest, request: Request, current_user=Depends(get_current_user)):
+    req_id = request.state.req_id
+    t0 = time.time()
+    try:
+        _, image_bytes = parse_data_url(req.image)
+        fps = max(1, int(req.fps or 16))
+        duration = max(1, int(req.duration or 5))
+        length = max(1, min(321, duration * fps + 1))
+        width, height = _parse_local_i2v_dimensions(req.resolution, req.ratio)
+        video_bytes, mime_type = run_qwen_i2v_workflow(
+            req_id=req_id,
+            image_bytes=image_bytes,
+            positive_prompt=req.prompt or "natural motion",
+            width=width,
+            height=height,
+            length=length,
+            fps=fps,
+            seed=req.seed,
+            filename_prefix=f"local/qwen-i2v-{req_id}",
+        )
+        output_data_url = bytes_to_data_url(video_bytes, mime_type)
+        prompt_logger.log(
+            req_id,
+            "local_img2video",
+            req.model_dump(),
+            req.prompt or "",
+            {
+                "model": MODEL_COMFYUI_QWEN_I2V,
+                "width": width,
+                "height": height,
+                "fps": fps,
+                "length": length,
+                "resolution": req.resolution,
+                "ratio": req.ratio,
+            },
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            output_full={"videos": [output_data_url]},
+        )
+        record_usage(current_user["id"], MODEL_COMFYUI_QWEN_I2V)
+        return Img2VideoResponse(image=output_data_url)
+    except Exception as e:
+        sys_logger.error(f"[{req_id}] Local Img2Video Error: {e}")
+        prompt_logger.log(
+            req_id,
+            "local_img2video",
+            req.model_dump(),
+            req.prompt or "",
+            {"model": MODEL_COMFYUI_QWEN_I2V},
             {"file": "mem"},
             time.time() - t0,
             user_id=current_user["id"],
@@ -480,6 +917,8 @@ def controlnet_pose_video(req: ControlnetPoseVideoRequest, request: Request, cur
 def _run_video_upscale_task(task_id: str, req_id: str, user_id: str, payload: Dict[str, Any]) -> None:
     t0 = time.time()
     segment_seconds = max(1, int(payload.get("segment_seconds") or 3))
+    output_resolution = _normalize_video_upscale_resolution(payload.get("output_resolution"))
+    workflow_batch_size = _normalize_video_upscale_batch_size(payload.get("workflow_batch_size"))
 
     def _on_progress(done: int, total: int) -> None:
         progress = float(done) / float(total) if total > 0 else 0.0
@@ -498,6 +937,8 @@ def _run_video_upscale_task(task_id: str, req_id: str, user_id: str, payload: Di
             req_id=req_id,
             video_input=str(payload.get("video") or ""),
             segment_seconds=segment_seconds,
+            output_resolution=output_resolution,
+            workflow_batch_size=workflow_batch_size,
             progress_cb=_on_progress,
         )
         if not video_bytes:
@@ -520,7 +961,12 @@ def _run_video_upscale_task(task_id: str, req_id: str, user_id: str, payload: Di
             "video_upscale",
             payload,
             "",
-            {"model": MODEL_COMFYUI_VIDEO_UPSCALE, "segment_seconds": segment_seconds},
+            {
+                "model": MODEL_COMFYUI_VIDEO_UPSCALE,
+                "segment_seconds": segment_seconds,
+                "output_resolution": output_resolution,
+                "workflow_batch_size": workflow_batch_size,
+            },
             {"file": "mem"},
             time.time() - t0,
             user_id=user_id,
@@ -541,7 +987,12 @@ def _run_video_upscale_task(task_id: str, req_id: str, user_id: str, payload: Di
             "video_upscale",
             payload,
             "",
-            {"model": MODEL_COMFYUI_VIDEO_UPSCALE, "segment_seconds": segment_seconds},
+            {
+                "model": MODEL_COMFYUI_VIDEO_UPSCALE,
+                "segment_seconds": segment_seconds,
+                "output_resolution": output_resolution,
+                "workflow_batch_size": workflow_batch_size,
+            },
             {"file": "mem"},
             time.time() - t0,
             user_id=user_id,
@@ -556,6 +1007,10 @@ def video_upscale_start(req: VideoUpscaleRequest, request: Request, current_user
     payload = req.model_dump()
     task_id = uuid.uuid4().hex
     segment_seconds = max(1, int(req.segment_seconds or 3))
+    output_resolution = _normalize_video_upscale_resolution(req.output_resolution)
+    workflow_batch_size = _normalize_video_upscale_batch_size(req.workflow_batch_size)
+    payload["output_resolution"] = output_resolution
+    payload["workflow_batch_size"] = workflow_batch_size
 
     _set_video_upscale_task(
         task_id,
@@ -565,6 +1020,8 @@ def video_upscale_start(req: VideoUpscaleRequest, request: Request, current_user
         total_chunks=0,
         progress=0.0,
         segment_seconds=segment_seconds,
+        output_resolution=output_resolution,
+        workflow_batch_size=workflow_batch_size,
         created_at=time.time(),
         updated_at=time.time(),
     )
@@ -602,12 +1059,16 @@ def video_upscale(req: VideoUpscaleRequest, request: Request, current_user=Depen
     req_id = request.state.req_id
     t0 = time.time()
     segment_seconds = max(1, int(req.segment_seconds or 3))
+    output_resolution = _normalize_video_upscale_resolution(req.output_resolution)
+    workflow_batch_size = _normalize_video_upscale_batch_size(req.workflow_batch_size)
 
     try:
         video_bytes, mime_type = run_video_upscale_workflow(
             req_id=req_id,
             video_input=req.video,
             segment_seconds=segment_seconds,
+            output_resolution=output_resolution,
+            workflow_batch_size=workflow_batch_size,
         )
         if not video_bytes:
             raise RuntimeError("No video returned")
@@ -618,7 +1079,12 @@ def video_upscale(req: VideoUpscaleRequest, request: Request, current_user=Depen
             "video_upscale",
             req.model_dump(),
             "",
-            {"model": MODEL_COMFYUI_VIDEO_UPSCALE, "segment_seconds": segment_seconds},
+            {
+                "model": MODEL_COMFYUI_VIDEO_UPSCALE,
+                "segment_seconds": segment_seconds,
+                "output_resolution": output_resolution,
+                "workflow_batch_size": workflow_batch_size,
+            },
             {"file": "mem"},
             time.time() - t0,
             user_id=current_user["id"],
@@ -635,7 +1101,12 @@ def video_upscale(req: VideoUpscaleRequest, request: Request, current_user=Depen
             "video_upscale",
             req.model_dump(),
             "",
-            {"model": MODEL_COMFYUI_VIDEO_UPSCALE, "segment_seconds": segment_seconds},
+            {
+                "model": MODEL_COMFYUI_VIDEO_UPSCALE,
+                "segment_seconds": segment_seconds,
+                "output_resolution": output_resolution,
+                "workflow_batch_size": workflow_batch_size,
+            },
             {"file": "mem"},
             time.time() - t0,
             user_id=current_user["id"],
@@ -680,6 +1151,7 @@ def edit_image(req: EditRequest, request: Request, current_user=Depends(get_curr
                 contents=contents,
                 config=types.GenerateContentConfig(temperature=temp),
                 req_id=req_id,
+                model=selected_model,
             )
             img_bytes = get_image_from_response(response)
 
@@ -806,369 +1278,1152 @@ def img_to_video(req: Img2VideoRequest, request: Request, current_user=Depends(g
 # Agent endpoints
 # =========================================================
 
-@router.post("/api/agent/plan", response_model=Dict[str, Any])
-def agent_plan(req: AgentRequest, request: Request, response: Response, current_user=Depends(get_current_user)) -> Dict[str, Any]:
-    """
-    返回结构必须是：
-    {
-      "patch": [...],
-      "summary": "...",
-      "thought": "..."
-    }
-    """
+@router.post("/api/agent/idea_script/generate_video", response_model=AgentVideoGenerationResponse)
+def agent_idea_script_generate_video(
+    req: AgentVideoGenerationRequest,
+    request: Request,
+    response: Response,
+    current_user=Depends(get_current_user),
+) -> AgentVideoGenerationResponse:
     req_id = getattr(request.state, "req_id", "noid")
     t0 = time.time()
-
-    # 多画布：优先 canvas_id，其次 thread_id，最后兜底
-    canvas_id = (getattr(req, "canvas_id", None) or "").strip()
-    thread_id = (getattr(req, "thread_id", None) or "").strip()
-    if canvas_id:
-        thread_id = canvas_id
-    elif not thread_id:
-        # 没画布概念时兜底（不建议长期用 req_id，因每次请求都不稳定）
-        thread_id = f"t_{req_id}"
-
-    # 回传给前端，方便复用
-    response.headers["X-Thread-Id"] = thread_id
+    tenant_id = str(request.headers.get("X-Tenant-Id") or current_user.get("email_domain") or "unknown")
+    user_id = str(current_user.get("id") or "")
+    active_session_id = ""
+    session_summary_present = False
+    enable_video_generation = _as_bool(os.getenv("BANANAFLOW_ENABLE_VIDEO_GENERATION"), default=False)
+    requested_session_id = (request.headers.get("X-Agent-Session-Id") or "").strip() or None
+    agent_intent = (request.headers.get("X-Agent-Intent") or "").strip() or "idea_script.generate_video"
+    agent_product = (request.headers.get("X-Agent-Product") or "").strip() or req.product
 
     try:
-        # 透传 thread_id 给 planner / langgraph
-        req.thread_id = thread_id
+        active_session_id, tenant_id, user_id, session_summary_present = _resolve_agent_session(
+            request=request,
+            response=response,
+            current_user=current_user,
+            requested_session_id=requested_session_id,
+        )
 
-        out = agent_plan_impl(req, request)
-        if out is None:
-            raise RuntimeError("agent_plan_impl returned None")
+        _append_session_event_audit(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=active_session_id,
+            event_type="INTENT_ROUTING",
+            payload={
+                "intent": agent_intent,
+                "product": agent_product,
+                "reason": "agent_idea_script_generate_video",
+                "backend_call": "agent_video_generation_pipeline",
+                "request_path": str(request.url.path),
+            },
+        )
+        _append_session_event_audit(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=active_session_id,
+            event_type="USER_MESSAGE",
+            payload={
+                "text": req.product,
+                "product": agent_product,
+            },
+        )
+        _append_session_event_audit(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=active_session_id,
+            event_type="TOOL_CALL",
+            payload={
+                "tool_name": "agent_video_generation_pipeline",
+                "args_hash": _safe_json_hash(
+                    {
+                        "product": req.product,
+                        "out_dir": req.out_dir,
+                        "image_size": [req.image_width, req.image_height],
+                        "output_size": [req.output_width, req.output_height],
+                        "fps": req.fps,
+                        "clip_length": req.clip_length,
+                        "max_shots": req.max_shots,
+                    }
+                ),
+                "feature_flag": enable_video_generation,
+            },
+        )
+
+        def _run_idea_script(product: str) -> IdeaScriptResponse:
+            return idea_script_orchestrator.run(
+                IdeaScriptRequest(product=product),
+                session_id=active_session_id,
+                session_summary_present=session_summary_present,
+                tenant_id=tenant_id,
+                user_id=user_id,
+            )
+
+        workflow_out = run_e2e_video_workflow(
+            req_id=req_id,
+            product=req.product,
+            out_dir=str(req.out_dir or "./exports/video_generation"),
+            enable_video_generation=enable_video_generation,
+            run_idea_script_fn=_run_idea_script,
+            resolution=(int(req.output_width or 720), int(req.output_height or 1280)),
+            fps=int(req.fps or 24),
+            image_size=(int(req.image_width or 1024), int(req.image_height or 1024)),
+            clip_length=int(req.clip_length or 81),
+            retries_per_step=int(req.retries_per_step or 1),
+            max_shots=int(req.max_shots or 0),
+            motion_hint=str(req.motion_hint or ""),
+            bgm_path=req.bgm_path,
+        )
+
+        idea_script_obj = workflow_out.get("idea_script")
+        if isinstance(idea_script_obj, IdeaScriptResponse):
+            idea_script_payload = idea_script_obj.model_dump(mode="json")
+        elif isinstance(idea_script_obj, dict):
+            idea_script_payload = dict(idea_script_obj)
+        else:
+            idea_script_payload = {}
+
+        artifacts = [AgentVideoShotArtifact(**item) for item in list(workflow_out.get("artifacts") or [])]
+        payload = AgentVideoGenerationResponse(
+            video_generation_enabled=bool(workflow_out.get("video_generation_enabled")),
+            fallback_mode=str(workflow_out.get("fallback_mode") or "idea_script_only"),
+            idea_script=idea_script_payload,
+            output_dir=str(workflow_out.get("output_dir") or ""),
+            output_video=workflow_out.get("output_video"),
+            error=workflow_out.get("error"),
+            shots_total=int(workflow_out.get("shots_total") or 0),
+            shots_succeeded=int(workflow_out.get("shots_succeeded") or 0),
+            shots_failed=int(workflow_out.get("shots_failed") or 0),
+            artifacts=artifacts,
+        )
+
+        _append_session_event_audit(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=active_session_id,
+            event_type="TOOL_RESULT",
+            payload={
+                "tool_name": "agent_video_generation_pipeline",
+                "result_ref": {
+                    "output_video": payload.output_video,
+                    "shots_total": payload.shots_total,
+                    "shots_succeeded": payload.shots_succeeded,
+                    "shots_failed": payload.shots_failed,
+                },
+                "isError": bool(payload.error),
+                "warnings": ([str(payload.error)] if payload.error else []),
+                "feature_flag": enable_video_generation,
+            },
+        )
+        _append_session_event_audit(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=active_session_id,
+            event_type="ARTIFACT_CREATED",
+            payload={
+                "edit_plan_ids": [],
+                "bundle_dir": payload.output_dir or None,
+                "video_path": payload.output_video,
+            },
+        )
+        _append_session_event_audit(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=active_session_id,
+            event_type="ASSISTANT_MESSAGE",
+            payload={
+                "text": (
+                    f"Video generation completed with {payload.shots_succeeded}/{payload.shots_total} shot clips."
+                    if payload.video_generation_enabled
+                    else "Video generation feature is disabled. Returned idea_script output only."
+                ),
+                "product": req.product,
+            },
+        )
         prompt_logger.log(
             req_id,
-            "agent_plan",
-            req.model_dump(),
-            req.prompt or "",
-            {"model": MODEL_AGENT, "thread_id": thread_id},
-            {"patch_len": len(out.get("patch", [])) if isinstance(out, dict) else 0},
+            "agent_idea_script_generate_video",
+            req.model_dump(mode="json"),
+            req.product,
+            {
+                "pipeline": "agent_video_generation_pipeline",
+                "feature_flag": enable_video_generation,
+            },
+            payload.model_dump(mode="json"),
             time.time() - t0,
-            user_id=current_user["id"],
-            inputs_full=req.model_dump(),
+            user_id=current_user.get("id"),
+            inputs_full=req.model_dump(mode="json"),
+            output_full=payload.model_dump(mode="json"),
         )
-        record_usage(current_user["id"], MODEL_AGENT)
-        return out
-
+        record_usage(current_user.get("id"), idea_script_orchestrator.default_llm_model)
+        return payload
+    except SessionAccessDeniedError:
+        raise HTTPException(status_code=403, detail="Session access denied")
+    except SessionNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
     except HTTPException:
         raise
     except Exception as e:
-        sys_logger.error(f"[{req_id}] /api/agent/plan error: {e}")
+        if active_session_id and tenant_id and user_id:
+            _append_session_event_audit(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=active_session_id,
+                event_type="TOOL_RESULT",
+                payload={
+                    "tool_name": "agent_video_generation_pipeline",
+                    "result_ref": {"output_video": None, "shots_total": 0, "shots_succeeded": 0, "shots_failed": 0},
+                    "isError": True,
+                    "warnings": [str(e)],
+                    "feature_flag": enable_video_generation,
+                },
+            )
+        sys_logger.error(f"[{req_id}] /api/agent/idea_script/generate_video error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/agent/idea_script", response_model=IdeaScriptResponse)
+def agent_idea_script(
+    req: IdeaScriptRequest,
+    request: Request,
+    response: Response,
+    current_user=Depends(get_current_user),
+) -> IdeaScriptResponse:
+    req_id = getattr(request.state, "req_id", "noid")
+    t0 = time.time()
+    tenant_id = str(request.headers.get("X-Tenant-Id") or current_user.get("email_domain") or "unknown")
+    user_id = str(current_user.get("id") or "")
+    agent_intent = (request.headers.get("X-Agent-Intent") or "").strip()
+    agent_product = (request.headers.get("X-Agent-Product") or "").strip() or req.product
+    requested_session_id = (request.headers.get("X-Agent-Session-Id") or "").strip() or None
+    active_session_id = ""
+    session_summary_present = False
+
+    try:
+        active_session_id, tenant_id, user_id, session_summary_present = _resolve_agent_session(
+            request=request,
+            response=response,
+            current_user=current_user,
+            requested_session_id=requested_session_id,
+        )
+        _append_session_event_audit(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=active_session_id,
+            event_type="INTENT_ROUTING",
+            payload={
+                "intent": agent_intent or "idea_script.generate",
+                "product": agent_product,
+                "reason": ("x_agent_intent_header" if agent_intent else "agent_idea_script_default"),
+                "backend_call": "idea_script_orchestrator.run",
+                "request_path": str(request.url.path),
+            },
+        )
+        user_message_event_id = _append_session_event_audit(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=active_session_id,
+            event_type="USER_MESSAGE",
+            payload={
+                "text": req.product,
+                "product": agent_product,
+            },
+        )
+        if _as_bool(os.getenv("BANANAFLOW_ENABLE_PREFERENCE_COMMANDS"), default=False):
+            parsed_pref = _parse_preference_command(req.product)
+            if parsed_pref is not None:
+                stored_pref = set_user_preference(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    key=parsed_pref["key"],
+                    value=parsed_pref["value"],
+                    confidence=0.95,
+                    provenance={
+                        "source": "explicit_user",
+                        "session_id": active_session_id,
+                        "event_id": user_message_event_id,
+                        "note": "preference_command",
+                    },
+                )
+                _append_session_event_audit(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    session_id=active_session_id,
+                    event_type="MEMORY_UPDATED",
+                    payload={
+                        "topic": "preference",
+                        "key": stored_pref.get("key"),
+                        "confidence": stored_pref.get("confidence"),
+                        "source": "explicit_user",
+                    },
+                )
+        tool_args_hash = _safe_json_hash({"product": req.product})
+        _append_session_event_audit(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=active_session_id,
+            event_type="TOOL_CALL",
+            payload={
+                "tool_name": "idea_script_orchestrator.run",
+                "args_hash": tool_args_hash,
+                "mcp_registry": False,
+                "mcp_server": None,
+                "tool_version": "idea_script_v1",
+                "tool_hash": idea_script_orchestrator.config.stable_config_hash(),
+            },
+        )
+
+        trajectory_sink: list[Dict[str, Any]] = []
+        out = idea_script_orchestrator.run(
+            req,
+            session_id=active_session_id,
+            session_summary_present=session_summary_present,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            trajectory_sink=trajectory_sink,
+        )
+        trajectory_payload = _emit_trajectory_event(
+            session_id=active_session_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            trajectory_payload=(trajectory_sink[0] if trajectory_sink else None),
+            req_id=req_id,
+        )
+        quality_metrics_payload = _emit_quality_metrics_event(
+            out=out,
+            session_id=active_session_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            latency_ms=int((time.time() - t0) * 1000),
+            req_id=req_id,
+        )
+        _cache_edit_plans(list(out.edit_plans or []))
+        edit_plan_ids = [str(getattr(plan, "plan_id", "") or "") for plan in list(out.edit_plans or []) if str(getattr(plan, "plan_id", "") or "").strip()]
+        warnings: list[str] = []
+        if out.inference_warning and out.warning_reason:
+            warnings.append(str(out.warning_reason))
+        if out.generation_warning and out.generation_warning_reason:
+            warnings.append(str(out.generation_warning_reason))
+        if out.compliance_warning and out.compliance_warning_reason:
+            warnings.append(str(out.compliance_warning_reason))
+        _append_session_event_audit(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=active_session_id,
+            event_type="TOOL_RESULT",
+            payload={
+                "tool_name": "idea_script_orchestrator.run",
+                "result_ref": {
+                    "topic_count": len(out.topics or []),
+                    "edit_plan_count": len(out.edit_plans or []),
+                },
+                "isError": False,
+                "warnings": warnings,
+                "tool_version": "idea_script_v1",
+                "tool_hash": out.config_hash,
+                "prompt_version": out.prompt_version,
+                "policy_version": out.policy_version,
+                "config_hash": out.config_hash,
+            },
+        )
+        _append_session_event_audit(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=active_session_id,
+            event_type="ARTIFACT_CREATED",
+            payload={
+                "edit_plan_ids": edit_plan_ids,
+                "bundle_dir": None,
+            },
+        )
+        _append_session_event_audit(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=active_session_id,
+            event_type="ASSISTANT_MESSAGE",
+            payload={
+                "text": f"Generated {len(out.topics or [])} topics and {len(out.edit_plans or [])} edit plans for {req.product}.",
+                "product": req.product,
+            },
+        )
+        try:
+            update_session_state(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=active_session_id,
+                patch={
+                    "last_product": req.product,
+                    "last_edit_plan_ids": edit_plan_ids[:10],
+                    "prompt_version": out.prompt_version,
+                    "policy_version": out.policy_version,
+                    "config_hash": out.config_hash,
+                },
+            )
+        except Exception as e:
+            sys_logger.warning(f"session state update skipped: session_id={active_session_id} err={e}")
+
+        sys_logger.info(
+            json.dumps(
+                {
+                    "event": "idea_script",
+                    "req_id": req_id,
+                    "tenant_id": str(tenant_id),
+                    "user_id": user_id,
+                    "session_id": active_session_id,
+                    "product": req.product,
+                    "persona": out.audience_context.persona,
+                    "confidence": out.audience_context.confidence,
+                    "unsafe_claim_risk": out.audience_context.unsafe_claim_risk,
+                    "retry_count": out.retry_count,
+                    "inference_warning": out.inference_warning,
+                    "generation_retry_count": out.generation_retry_count,
+                    "generation_warning": out.generation_warning,
+                    "generation_warning_reason": out.generation_warning_reason,
+                    "blocking_issues": out.blocking_issues,
+                    "non_blocking_issues": out.non_blocking_issues,
+                    "failure_tags": out.failure_tags,
+                    "topic_count": len(out.topics),
+                    "prompt_version": out.prompt_version,
+                    "policy_version": out.policy_version,
+                    "config_hash": out.config_hash,
+                    "budget_exhausted": out.budget_exhausted,
+                    "budget_exhausted_reason": out.budget_exhausted_reason,
+                    "total_llm_calls": out.total_llm_calls,
+                    "quality_metrics": quality_metrics_payload,
+                    "trajectory_score": (
+                        float((trajectory_payload or {}).get("evaluation_score") or 0.0)
+                        if trajectory_payload
+                        else None
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        )
+
         prompt_logger.log(
             req_id,
-            "agent_plan",
+            "agent_idea_script",
             req.model_dump(),
-            req.prompt or "",
-            {"model": MODEL_AGENT, "thread_id": thread_id},
-            {"patch_len": 0},
+            "",
+            {"pipeline": "idea_script_v1"},
+            {
+                "topics_count": len(out.topics),
+                "retry_count": out.retry_count,
+                "warning": out.inference_warning,
+                "confidence": out.audience_context.confidence,
+                "generation_retry_count": out.generation_retry_count,
+                "generation_warning": out.generation_warning,
+                "generation_warning_reason": out.generation_warning_reason,
+                "blocking_issues": out.blocking_issues,
+                "non_blocking_issues": out.non_blocking_issues,
+                "failure_tags": out.failure_tags,
+                "topic_count": len(out.topics),
+                "prompt_version": out.prompt_version,
+                "policy_version": out.policy_version,
+                "config_hash": out.config_hash,
+                "budget_exhausted": out.budget_exhausted,
+                "budget_exhausted_reason": out.budget_exhausted_reason,
+                "total_llm_calls": out.total_llm_calls,
+                "quality_metrics": quality_metrics_payload,
+                "trajectory_score": (
+                    float((trajectory_payload or {}).get("evaluation_score") or 0.0)
+                    if trajectory_payload
+                    else None
+                ),
+            },
             time.time() - t0,
-            user_id=current_user["id"],
+            user_id=current_user.get("id"),
+            inputs_full=req.model_dump(),
+            output_full=out.model_dump(),
+        )
+        record_usage(current_user.get("id"), idea_script_orchestrator.default_llm_model)
+        return out
+
+    except SessionAccessDeniedError:
+        raise HTTPException(status_code=403, detail="Session access denied")
+    except SessionNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        if active_session_id and tenant_id and user_id:
+            _append_session_event_audit(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=active_session_id,
+                event_type="TOOL_RESULT",
+                payload={
+                    "tool_name": "idea_script_orchestrator.run",
+                    "result_ref": {"topic_count": 0, "edit_plan_count": 0},
+                    "isError": True,
+                    "warnings": [str(e)],
+                    "tool_version": "idea_script_v1",
+                    "tool_hash": idea_script_orchestrator.config.stable_config_hash(),
+                },
+            )
+        sys_logger.error(f"[{req_id}] /api/agent/idea_script error: {e}")
+        prompt_logger.log(
+            req_id,
+            "agent_idea_script",
+            req.model_dump(),
+            "",
+            {"pipeline": "idea_script_v1"},
+            {"topics_count": 0},
+            time.time() - t0,
+            user_id=current_user.get("id"),
             inputs_full=req.model_dump(),
             error=str(e),
         )
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# -----------------------------
-# Threads / Time-travel list
-# -----------------------------
+class IdeaScriptExportFfmpegRequest(BaseModel):
+    plan_id: Optional[str] = Field(default=None, description="优先使用已缓存的 plan_id")
+    plan: Optional[EditPlan] = Field(default=None, description="未命中 plan_id 时可直接传 EditPlan")
+    out_dir: str = Field(default="./exports/ffmpeg")
+    w: int = Field(default=720, ge=64)
+    h: int = Field(default=1280, ge=64)
+    fps: int = Field(default=30, ge=1, le=120)
 
-def _ensure_graph_ready():
+
+class SessionCreateRequest(BaseModel):
+    session_id: Optional[str] = Field(default=None)
+
+
+class SessionAppendEventRequest(BaseModel):
+    type: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: Optional[str] = Field(default=None)
+
+
+class SessionSummarizeRequest(BaseModel):
+    upto_event_id: Optional[int] = Field(default=None, ge=1)
+    max_events: Optional[int] = Field(default=None, ge=1, le=2000)
+    max_chars: Optional[int] = Field(default=None, ge=200, le=8000)
+
+
+class MemoryPreferenceSetRequest(BaseModel):
+    key: str
+    value: Any
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    ttl_days: Optional[int] = Field(default=None, ge=1, le=3650)
+
+
+class MemoryPreferenceDeactivateRequest(BaseModel):
+    key: str
+
+
+class QualityHarvestEvalCaseRequest(BaseModel):
+    session_id: str
+    reason: Optional[str] = Field(default=None)
+    include_trajectory: Optional[bool] = Field(default=True)
+
+
+@router.post("/api/agent/idea_script/export_ffmpeg", response_model=Dict[str, Any])
+def agent_idea_script_export_ffmpeg(
+    req: IdeaScriptExportFfmpegRequest,
+    request: Request,
+    response: Response,
+    current_user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    req_id = getattr(request.state, "req_id", "noid")
+    t0 = time.time()
+    tenant_id = str(request.headers.get("X-Tenant-Id") or current_user.get("email_domain") or "unknown")
+    user_id = str(current_user.get("id") or "")
+    active_session_id = ""
+    resolved_tool_version = EXPORT_FFMPEG_TOOL_VERSION
+    resolved_tool_hash = EXPORT_FFMPEG_TOOL_HASH
+    resolved_mcp_server: Optional[str] = None
     try:
-        from agent.graph import get_graph, get_checkpointer  # 你必须在 graph.py 里提供这俩
-        g = get_graph()
-        cp = get_checkpointer()
-        return g, cp
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"agent.graph.get_graph/get_checkpointer not available: {e}",
+        mcp_use_registry = _as_bool(os.getenv("BANANAFLOW_MCP_USE_REGISTRY"), default=False)
+        agent_intent = (request.headers.get("X-Agent-Intent") or "").strip()
+        agent_product = (request.headers.get("X-Agent-Product") or "").strip() or str(getattr(req.plan, "product", "") or "").strip()
+        requested_session_id = (request.headers.get("X-Agent-Session-Id") or "").strip() or None
+        active_session_id, tenant_id, user_id, _ = _resolve_agent_session(
+            request=request,
+            response=response,
+            current_user=current_user,
+            requested_session_id=requested_session_id,
+        )
+        if agent_intent or agent_product or active_session_id:
+            sys_logger.info(
+                json.dumps(
+                    {
+                        "event": "idea_script_export_ffmpeg_headers",
+                        "req_id": req_id,
+                        "x_agent_intent": agent_intent,
+                        "x_agent_product": agent_product,
+                        "x_agent_session_id": active_session_id,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        _append_session_event_audit(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=active_session_id,
+            event_type="INTENT_ROUTING",
+            payload={
+                "intent": agent_intent or "idea_script.export_ffmpeg",
+                "product": agent_product,
+                "reason": ("x_agent_intent_header" if agent_intent else "agent_idea_script_export_default"),
+                "backend_call": EXPORT_FFMPEG_TOOL_NAME,
+                "request_path": str(request.url.path),
+            },
         )
 
-
-def _extract_checkpoint_id(item: Any) -> Optional[str]:
-    """
-    兼容：CheckpointTuple / dict / tuple
-    """
-    # CheckpointTuple-like
-    if hasattr(item, "checkpoint"):
-        ck = getattr(item, "checkpoint") or {}
-        if isinstance(ck, dict):
-            return str(ck.get("id") or ck.get("checkpoint_id") or ck.get("uuid") or "") or None
-
-    # dict-like
-    if isinstance(item, dict):
-        if item.get("checkpoint_id") or item.get("id"):
-            return str(item.get("checkpoint_id") or item.get("id"))
-        ck = item.get("checkpoint") or {}
-        if isinstance(ck, dict):
-            return str(ck.get("id") or ck.get("checkpoint_id") or "") or None
-
-    # tuple/list-like
-    if isinstance(item, (list, tuple)):
-        for x in item:
-            if isinstance(x, dict) and (x.get("id") or x.get("checkpoint_id")):
-                return str(x.get("id") or x.get("checkpoint_id"))
-            if isinstance(x, dict) and ("checkpoint" in x):
-                ck = x.get("checkpoint") or {}
-                if isinstance(ck, dict) and (ck.get("id") or ck.get("checkpoint_id")):
-                    return str(ck.get("id") or ck.get("checkpoint_id"))
-    return None
-
-
-def _extract_metadata(item: Any) -> Dict[str, Any]:
-    if hasattr(item, "metadata"):
-        md = getattr(item, "metadata") or {}
-        return md if isinstance(md, dict) else {}
-    if isinstance(item, dict):
-        md = item.get("metadata") or {}
-        return md if isinstance(md, dict) else {}
-    if isinstance(item, (list, tuple)):
-        for x in item:
-            if isinstance(x, dict) and "metadata" in x and isinstance(x["metadata"], dict):
-                return x["metadata"]
-    return {}
-
-
-def _extract_values_dict_from_item(item: Any) -> Dict[str, Any]:
-    """
-    LangGraph saver 常见把状态放在：
-      checkpoint["channel_values"] 或 checkpoint["values"] 或 checkpoint["state"]
-    """
-    ck = None
-    if hasattr(item, "checkpoint"):
-        ck = getattr(item, "checkpoint")
-    elif isinstance(item, dict):
-        ck = item.get("checkpoint") or item
-    elif isinstance(item, (list, tuple)):
-        # tuple 常见：(config, checkpoint, metadata) 或 (checkpoint, metadata)
-        for x in item:
-            if isinstance(x, dict) and ("channel_values" in x or "values" in x or "state" in x):
-                ck = x
-                break
-
-    if not isinstance(ck, dict):
-        return {}
-
-    for k in ("channel_values", "values", "state"):
-        v = ck.get(k)
-        if isinstance(v, dict):
-            return v
-
-    # 有的 saver 直接把 values 平铺在 checkpoint dict
-    return {k: v for k, v in ck.items() if k not in ("id", "checkpoint_id", "metadata")}
-
-
-def _extract_state_keys(item: Any) -> List[str]:
-    values = _extract_values_dict_from_item(item)
-    return sorted(list(values.keys())) if isinstance(values, dict) else []
-
-
-def _extract_errors_tail(item: Any) -> List[str]:
-    values = _extract_values_dict_from_item(item)
-    if not isinstance(values, dict):
-        return []
-    errs = values.get("errors") or []
-    if isinstance(errs, list):
-        return [str(x) for x in errs[-2:]]
-    return []
-
-def _extract_step(item: Any) -> str:
-    ck = None
-    if hasattr(item, "checkpoint"):
-        ck = getattr(item, "checkpoint")
-    elif isinstance(item, dict):
-        ck = item.get("checkpoint") or item
-    if not isinstance(ck, dict):
-        return ""
-
-    values = ck.get("channel_values") or ck.get("values") or ck.get("state") or {}
-    if isinstance(values, dict):
-        s = values.get("step")
-        if s:
-            return str(s)
-
-    # fallback：老数据没有 step 时，用 state_keys 推断
-    keys = _extract_state_keys(item)
-
-    # conditional 分支痕迹（你现在 state_keys 里已经有 branch:to:xxx）
-    for k in keys:
-        if isinstance(k, str) and k.startswith("branch:to:"):
-            return k.split("branch:to:", 1)[1]  # normalize/validate/gen...
-
-    # 更粗的推断
-    if "raw_text" in keys and "raw_json" not in keys and "parsed_out" not in keys:
-        return "gen"
-    if "refined_prompt" in keys and "raw_text" not in keys:
-        return "refine"
-    if "compact_nodes" in keys and "refined_prompt" not in keys:
-        return "context"
-    if "parsed_out" in keys:
-        return "normalize"
-
-    return ""
-
-@router.get("/api/agent/threads/{thread_id}", response_model=Dict[str, Any])
-def list_agent_thread(thread_id: str) -> Dict[str, Any]:
-    """
-    返回该 thread 的 checkpoint 列表（用于“回放/时间旅行”的时间线）。
-    """
-    _, cp = _ensure_graph_ready()
-    if cp is None:
-        raise HTTPException(status_code=400, detail="Checkpointer not initialized")
-
-    cfg = {"configurable": {"thread_id": thread_id}}
-
-    if not hasattr(cp, "list"):
-        raise HTTPException(status_code=400, detail="Checkpointer does not support list()")
-
-    # 兼容不同 saver.list 的签名
-    items = []
-    try:
-        items = list(cp.list(cfg, limit=50))
-    except TypeError:
-        items = list(cp.list(cfg))
-
-    out = {"thread_id": thread_id, "checkpoints": []}
-
-    for it in items:
-        out["checkpoints"].append({
-            "thread_id": thread_id,
-            "checkpoint_id": _extract_checkpoint_id(it),
-            "metadata": _extract_metadata(it),
-            "step": _extract_step(it), 
-            "state_keys": _extract_state_keys(it),
-            "errors_tail": _extract_errors_tail(it),
-        })
-
-    return out
-
-
-# -----------------------------
-# Replay from checkpoint
-# -----------------------------
-
-class AgentReplayRequest(BaseModel):
-    checkpoint_id: Optional[str] = None
-    prompt: Optional[str] = None
-    current_nodes: Optional[List[Dict[str, Any]]] = None
-    current_connections: Optional[List[Dict[str, Any]]] = None
-    selected_artifact: Optional[Dict[str, Any]] = None
-
-
-def _get_checkpoint_state(cp: Any, thread_id: str, checkpoint_id: str) -> Optional[Dict[str, Any]]:
-    cfg = {"configurable": {"thread_id": thread_id}}
-
-    ck = None
-    if hasattr(cp, "get"):
-        ck = cp.get(cfg, checkpoint_id)
-    elif hasattr(cp, "get_tuple"):
-        ck = cp.get_tuple(cfg, checkpoint_id)
-    else:
-        return None
-
-    # dict-like
-    if isinstance(ck, dict):
-        checkpoint = ck.get("checkpoint") or ck
-        if isinstance(checkpoint, dict):
-            v = checkpoint.get("channel_values") or checkpoint.get("values") or checkpoint.get("state")
-            if isinstance(v, dict):
-                return v
-            # fallback：有些 saver 直接把 values 平铺
-            return checkpoint
-
-    # tuple-like
-    if isinstance(ck, (tuple, list)):
-        for x in ck:
-            if isinstance(x, dict):
-                v = x.get("channel_values") or x.get("values") or x.get("state")
-                if isinstance(v, dict):
-                    return v
-        # 兜底
-        for x in ck:
-            if isinstance(x, dict):
-                return x
-
-    return None
-
-
-@router.post("/api/agent/replay/{thread_id}", response_model=Dict[str, Any])
-def replay_agent_thread(thread_id: str, req: AgentReplayRequest, request: Request) -> Dict[str, Any]:
-    """
-    从某个 checkpoint 继续跑（可覆盖 prompt/nodes/conns/selected_artifact）。
-    - 若当前 LangGraph 版本不支持 resume，会降级为普通 invoke（仍可演示“回放/重跑”）
-    """
-    g, cp = _ensure_graph_ready()
-    if g is None or cp is None:
-        raise HTTPException(status_code=400, detail="Graph/checkpointer not initialized")
-
-    # 1) 基于 checkpoint state 初始化（如提供）
-    init_state: Dict[str, Any]
-    if req.checkpoint_id:
-        base = _get_checkpoint_state(cp, thread_id, req.checkpoint_id)
-        if isinstance(base, dict):
-            init_state = dict(base)
+        plan_data: Optional[Dict[str, Any]] = None
+        if (req.plan_id or "").strip():
+            plan_data = _get_cached_edit_plan(req.plan_id or "")
+            if plan_data is None:
+                raise HTTPException(status_code=404, detail=f"plan_id not found: {req.plan_id}")
+        elif req.plan is not None:
+            plan_data = req.plan.model_dump(mode="json")
         else:
-            init_state = {}
-    else:
-        init_state = {}
+            raise HTTPException(status_code=400, detail="plan_id or plan is required")
+        plan_id = str(req.plan_id or (plan_data or {}).get("plan_id") or "").strip()
+        _append_session_event_audit(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=active_session_id,
+            event_type="USER_MESSAGE",
+            payload={
+                "text": (f"export plan {plan_id}" if plan_id else "export ffmpeg bundle"),
+                "product": agent_product,
+            },
+        )
 
-    # 2) 如果 checkpoint 读不到，就从“最小 state”起
-    if not init_state:
-        init_state = {
-            "req_id": getattr(request.state, "req_id", "noid"),
-            "user_prompt": "",
-            "selected_artifact": None,
-            "nodes": [],
-            "conns": [],
-            "errors": [],
-            "tried_repair": False,
-            "used_fallback": False,
+        if mcp_use_registry:
+            info = get_global_registry().get_tool_info(EXPORT_FFMPEG_TOOL_NAME) or {}
+            resolved_tool_version = str(info.get("tool_version") or resolved_tool_version)
+            resolved_tool_hash = str(info.get("tool_hash") or resolved_tool_hash)
+            resolved_mcp_server = str(info.get("server_name") or "").strip() or None
+
+        with _span(
+            "idea_script.export_ffmpeg",
+            {
+                "mcp": True,
+                "mcp_registry": mcp_use_registry,
+                "mcp_server": resolved_mcp_server,
+                "tool_version": resolved_tool_version,
+                "tool_hash": resolved_tool_hash,
+                "plan_id": plan_id,
+                "out_dir": req.out_dir,
+                "resolution": f"{req.w}x{req.h}",
+                "fps": req.fps,
+                "session_id": active_session_id,
+            },
+        ) as span:
+            tool_args = {
+                "plan_id": plan_id,
+                "plan": plan_data,
+                "out_dir": req.out_dir,
+                "resolution": {"w": req.w, "h": req.h},
+                "fps": req.fps,
+            }
+            _append_session_event_audit(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=active_session_id,
+                event_type="TOOL_CALL",
+                payload={
+                    "tool_name": EXPORT_FFMPEG_TOOL_NAME,
+                    "args_hash": _safe_json_hash(
+                        {
+                            "plan_id": tool_args.get("plan_id"),
+                            "out_dir": tool_args.get("out_dir"),
+                            "resolution": tool_args.get("resolution"),
+                            "fps": tool_args.get("fps"),
+                            "plan_track_count": len(list((plan_data or {}).get("tracks") or [])),
+                        }
+                    ),
+                    "mcp_registry": mcp_use_registry,
+                    "mcp_server": resolved_mcp_server,
+                    "tool_version": resolved_tool_version,
+                    "tool_hash": resolved_tool_hash,
+                },
+            )
+            if mcp_use_registry:
+                registry = get_global_registry()
+                result = registry.call_tool(EXPORT_FFMPEG_TOOL_NAME, tool_args)
+                meta = registry.get_last_call_meta()
+                resolved_tool_version = str(meta.get("tool_version") or resolved_tool_version)
+                resolved_tool_hash = str(meta.get("tool_hash") or resolved_tool_hash)
+                resolved_mcp_server = str(meta.get("server_name") or resolved_mcp_server or "").strip() or None
+            else:
+                with MCPStdioClient() as mcp_client:
+                    result = mcp_client.call_export_ffmpeg_render_bundle(tool_args)
+            try:
+                span.set_attribute("missing_primary_asset_count", int(result.get("missing_primary_asset_count") or 0))
+                span.set_attribute("tool_version", resolved_tool_version)
+                span.set_attribute("tool_hash", resolved_tool_hash)
+                span.set_attribute("mcp_server", resolved_mcp_server)
+            except Exception:
+                pass
+        _append_session_event_audit(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=active_session_id,
+            event_type="TOOL_RESULT",
+            payload={
+                "tool_name": EXPORT_FFMPEG_TOOL_NAME,
+                "result_ref": {
+                    "bundle_dir": result.get("bundle_dir"),
+                    "clip_count": result.get("clip_count"),
+                    "files_count": len(list(result.get("files") or [])),
+                },
+                "isError": False,
+                "warnings": [str(result.get("warning"))] if result.get("warning") else [],
+                "mcp_server": resolved_mcp_server,
+                "tool_version": resolved_tool_version,
+                "tool_hash": resolved_tool_hash,
+            },
+        )
+
+        files = list(result.get("files") or [])
+        payload = {
+            "plan_id": result.get("plan_id"),
+            "bundle_dir": result.get("bundle_dir"),
+            "render_script_path": result.get("render_script_path"),
+            "files": files,
+            "clip_count": result.get("clip_count"),
+            "missing_primary_asset_count": result.get("missing_primary_asset_count"),
+            "warning": result.get("warning"),
+            "warning_reason": result.get("warning_reason"),
+            "resolution": result.get("resolution"),
+            "fps": result.get("fps"),
         }
-
-    # 3) 覆盖字段（人类介入后重跑）
-    if req.prompt is not None:
-        init_state["user_prompt"] = (req.prompt or "").strip()
-    if req.selected_artifact is not None:
-        init_state["selected_artifact"] = req.selected_artifact
-    if req.current_nodes is not None:
-        init_state["nodes"] = req.current_nodes
-    if req.current_connections is not None:
-        init_state["conns"] = req.current_connections
-
-    # 4) invoke：尝试 resume（不支持则降级）
-    resume_used = False
-    cfg = {"configurable": {"thread_id": thread_id}}
-    if req.checkpoint_id:
-        cfg["configurable"]["checkpoint_id"] = req.checkpoint_id
-
-    try:
-        final = g.invoke(init_state, config=cfg)
-        resume_used = bool(req.checkpoint_id)
+        _append_session_event_audit(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=active_session_id,
+            event_type="ARTIFACT_CREATED",
+            payload={
+                "edit_plan_ids": [str(payload.get("plan_id") or "")] if str(payload.get("plan_id") or "").strip() else [],
+                "bundle_dir": payload.get("bundle_dir"),
+            },
+        )
+        _append_session_event_audit(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=active_session_id,
+            event_type="ASSISTANT_MESSAGE",
+            payload={
+                "text": (
+                    f"Export ready for plan {payload.get('plan_id') or '-'} "
+                    f"with {int(payload.get('clip_count') or 0)} clips at {payload.get('bundle_dir') or '-'}."
+                ),
+                "product": agent_product,
+            },
+        )
+        try:
+            update_session_state(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=active_session_id,
+                patch={
+                    "last_product": agent_product,
+                    "last_bundle_dir": payload.get("bundle_dir"),
+                    "last_bundle_dirs": [payload.get("bundle_dir")] if payload.get("bundle_dir") else [],
+                    "last_export_plan_id": payload.get("plan_id"),
+                },
+            )
+        except Exception as e:
+            sys_logger.warning(f"session state update skipped: session_id={active_session_id} err={e}")
+        prompt_logger.log(
+            req_id,
+            "agent_idea_script_export_ffmpeg",
+            req.model_dump(mode="json"),
+            "",
+            {"pipeline": "idea_script_export_ffmpeg"},
+            payload,
+            time.time() - t0,
+            user_id=current_user.get("id"),
+            inputs_full=req.model_dump(mode="json"),
+            output_full=payload,
+        )
+        return payload
+    except SessionAccessDeniedError:
+        raise HTTPException(status_code=403, detail="Session access denied")
+    except SessionNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    except HTTPException:
+        raise
+    except (MCPClientError, MCPRegistryError, MCPToolInvocationError) as e:
+        if active_session_id and tenant_id and user_id:
+            _append_session_event_audit(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=active_session_id,
+                event_type="TOOL_RESULT",
+                payload={
+                    "tool_name": EXPORT_FFMPEG_TOOL_NAME,
+                    "result_ref": {"bundle_dir": None, "clip_count": 0, "files_count": 0},
+                    "isError": True,
+                    "warnings": [str(e)],
+                    "mcp_server": resolved_mcp_server,
+                    "tool_version": resolved_tool_version,
+                    "tool_hash": resolved_tool_hash,
+                },
+            )
+        sys_logger.error(f"[{req_id}] /api/agent/idea_script/export_ffmpeg MCP error: {e}")
+        prompt_logger.log(
+            req_id,
+            "agent_idea_script_export_ffmpeg",
+            req.model_dump(mode="json"),
+            "",
+            {"pipeline": "idea_script_export_ffmpeg", "mcp": True},
+            {"ok": False},
+            time.time() - t0,
+            user_id=current_user.get("id"),
+            inputs_full=req.model_dump(mode="json"),
+            error=str(e),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"MCP export tool failed. Recovery: verify plan payload and retry. ({e})",
+        )
     except Exception as e:
-        sys_logger.warning(f"[replay] resume not supported or failed, fallback invoke: {e}")
-        final = g.invoke(init_state, config={"configurable": {"thread_id": thread_id}})
-        resume_used = False
+        if active_session_id and tenant_id and user_id:
+            _append_session_event_audit(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=active_session_id,
+                event_type="TOOL_RESULT",
+                payload={
+                    "tool_name": EXPORT_FFMPEG_TOOL_NAME,
+                    "result_ref": {"bundle_dir": None, "clip_count": 0, "files_count": 0},
+                    "isError": True,
+                    "warnings": [str(e)],
+                    "mcp_server": resolved_mcp_server,
+                    "tool_version": resolved_tool_version,
+                    "tool_hash": resolved_tool_hash,
+                },
+            )
+        sys_logger.error(f"[{req_id}] /api/agent/idea_script/export_ffmpeg error: {e}")
+        prompt_logger.log(
+            req_id,
+            "agent_idea_script_export_ffmpeg",
+            req.model_dump(mode="json"),
+            "",
+            {"pipeline": "idea_script_export_ffmpeg"},
+            {"ok": False},
+            time.time() - t0,
+            user_id=current_user.get("id"),
+            inputs_full=req.model_dump(mode="json"),
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=str(e))
 
-    out = final.get("parsed_out") if isinstance(final, dict) else None
-    if not isinstance(out, dict):
-        out = {"patch": [], "summary": "", "thought": ""}
 
-    errors_tail = []
-    if isinstance(final, dict):
-        errs = final.get("errors")
-        if isinstance(errs, list):
-            errors_tail = [str(x) for x in errs[-2:]]
+@router.post("/api/sessions/create", response_model=Dict[str, Any])
+def create_session_api(
+    req: SessionCreateRequest,
+    request: Request,
+    current_user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    tenant_id, user_id = _tenant_user_from_request(request, current_user)
+    try:
+        session = create_or_get_session(tenant_id=tenant_id, user_id=user_id, session_id=req.session_id)
+        return {"session_id": session.get("session_id")}
+    except SessionAccessDeniedError:
+        raise HTTPException(status_code=403, detail="Session access denied")
 
+
+@router.get("/api/sessions/{session_id}", response_model=Dict[str, Any])
+def get_session_api(
+    session_id: str,
+    request: Request,
+    current_user=Depends(get_current_user),
+    include_events: bool = Query(default=True),
+    limit_events: int = Query(default=200, ge=1, le=2000),
+) -> Dict[str, Any]:
+    tenant_id, user_id = _tenant_user_from_request(request, current_user)
+    try:
+        return get_session_detail(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            include_events=bool(include_events),
+            limit_events=int(limit_events),
+        )
+    except SessionNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    except SessionAccessDeniedError:
+        raise HTTPException(status_code=403, detail="Session access denied")
+
+
+@router.get("/api/sessions", response_model=Dict[str, Any])
+def list_sessions_api(
+    request: Request,
+    current_user=Depends(get_current_user),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> Dict[str, Any]:
+    tenant_id, user_id = _tenant_user_from_request(request, current_user)
+    return {"sessions": list_session_items(tenant_id=tenant_id, user_id=user_id, limit=int(limit))}
+
+
+@router.post("/api/sessions/{session_id}/events", response_model=Dict[str, Any])
+def append_session_event_api(
+    session_id: str,
+    req: SessionAppendEventRequest,
+    request: Request,
+    current_user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    tenant_id, user_id = _tenant_user_from_request(request, current_user)
+    try:
+        event_id = append_session_event(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            type=req.type,
+            payload=req.payload,
+            idempotency_key=req.idempotency_key,
+        )
+        return {"event_id": int(event_id)}
+    except SessionNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    except SessionAccessDeniedError:
+        raise HTTPException(status_code=403, detail="Session access denied")
+
+
+@router.post("/api/sessions/{session_id}/summarize", response_model=Dict[str, Any])
+def summarize_session_api(
+    session_id: str,
+    request: Request,
+    current_user=Depends(get_current_user),
+    req: Optional[SessionSummarizeRequest] = None,
+) -> Dict[str, Any]:
+    tenant_id, user_id = _tenant_user_from_request(request, current_user)
+    body = req or SessionSummarizeRequest()
+    try:
+        return summarize_session_item(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            upto_event_id=body.upto_event_id,
+            max_events=(body.max_events or 400),
+            max_chars=(body.max_chars or 2000),
+        )
+    except SessionNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    except SessionAccessDeniedError:
+        raise HTTPException(status_code=403, detail="Session access denied")
+
+
+@router.get("/api/sessions/{session_id}/summary", response_model=Dict[str, Any])
+def get_session_summary_api(
+    session_id: str,
+    request: Request,
+    current_user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    tenant_id, user_id = _tenant_user_from_request(request, current_user)
+    try:
+        data = get_session_detail(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            include_events=False,
+        )
+        session = data.get("session") or {}
+        return {
+            "session_id": session.get("session_id"),
+            "summary_text": session.get("summary_text") or "",
+            "summary_updated_at": session.get("summary_updated_at"),
+            "summary_version": session.get("summary_version"),
+            "summary_event_id_upto": session.get("summary_event_id_upto"),
+        }
+    except SessionNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    except SessionAccessDeniedError:
+        raise HTTPException(status_code=403, detail="Session access denied")
+
+
+@router.post("/api/memory/preferences/set", response_model=Dict[str, Any])
+def set_memory_preference_api(
+    req: MemoryPreferenceSetRequest,
+    request: Request,
+    current_user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    tenant_id, user_id = _tenant_user_from_request(request, current_user)
+    try:
+        memory = set_user_preference(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            key=req.key,
+            value=req.value,
+            confidence=(0.9 if req.confidence is None else float(req.confidence)),
+            ttl_days=req.ttl_days,
+            provenance={"source": "explicit_user", "note": "api.memory.preferences.set"},
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {
-        "thread_id": thread_id,
-        "checkpoint_id": req.checkpoint_id,
-        "resume_used": resume_used,
-        "result": out,
-        "errors_tail": errors_tail,
+        "memory": {
+            "memory_id": memory.get("memory_id"),
+            "key": memory.get("key"),
+            "value": memory.get("value"),
+            "confidence": memory.get("confidence"),
+            "updated_at": memory.get("updated_at"),
+            "ttl_at": memory.get("ttl_at"),
+            "is_active": memory.get("is_active"),
+            "last_confirmed_at": memory.get("last_confirmed_at"),
+            "update_count": memory.get("update_count"),
+        }
     }
+
+
+@router.get("/api/memory/preferences", response_model=Dict[str, Any])
+def list_memory_preferences_api(
+    request: Request,
+    current_user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    tenant_id, user_id = _tenant_user_from_request(request, current_user)
+    preferences = list_user_preferences(tenant_id=tenant_id, user_id=user_id)
+    return {
+        "preferences": [
+            {
+                "memory_id": item.get("memory_id"),
+                "key": item.get("key"),
+                "value": item.get("value"),
+                "confidence": item.get("confidence"),
+                "is_active": item.get("is_active"),
+                "last_confirmed_at": item.get("last_confirmed_at"),
+                "update_count": item.get("update_count"),
+                "deactivated_reason": item.get("deactivated_reason"),
+                "value_history_json": item.get("value_history_json"),
+                "updated_at": item.get("updated_at"),
+                "ttl_at": item.get("ttl_at"),
+            }
+            for item in preferences
+        ]
+    }
+
+
+@router.post("/api/memory/preferences/deactivate", response_model=Dict[str, Any])
+def deactivate_memory_preference_api(
+    req: MemoryPreferenceDeactivateRequest,
+    request: Request,
+    current_user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    tenant_id, user_id = _tenant_user_from_request(request, current_user)
+    try:
+        deactivate_user_preference(tenant_id=tenant_id, user_id=user_id, key=req.key)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True}
+
+
+@router.post("/api/memory/preferences/expire", response_model=Dict[str, Any])
+def expire_memory_preferences_api(
+    request: Request,
+    current_user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    tenant_id, user_id = _tenant_user_from_request(request, current_user)
+    expired_count = expire_user_preferences(tenant_id=tenant_id, user_id=user_id)
+    return {"expired_count": int(expired_count)}
+
+
+@router.post("/api/quality/harvest_eval_case", response_model=Dict[str, Any])
+def harvest_eval_case_api(
+    req: QualityHarvestEvalCaseRequest,
+    request: Request,
+    current_user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    if not _as_bool(os.getenv("BANANAFLOW_ENABLE_EVAL_HARVEST_API"), default=False):
+        raise HTTPException(status_code=404, detail="Not found")
+    tenant_id, user_id = _tenant_user_from_request(request, current_user)
+    include_trajectory = bool(req.include_trajectory if req.include_trajectory is not None else True)
+    reason = str(req.reason or "api_manual_harvest")
+    req_id = getattr(request.state, "req_id", "noid")
+    x_agent_intent = _decode_agent_header(request.headers.get("X-Agent-Intent"))
+    x_agent_product = _decode_agent_header(request.headers.get("X-Agent-Product"))
+    x_agent_session_id = _decode_agent_header(request.headers.get("X-Agent-Session-Id"))
+    with _span(
+        "quality.feedback",
+        {
+            "quality_feedback": True,
+            "feedback_reason": reason,
+            "session_id": req.session_id,
+            "x_agent_session_id": x_agent_session_id,
+            "x_agent_intent": x_agent_intent,
+            "x_agent_product": x_agent_product,
+            "include_trajectory": include_trajectory,
+        },
+    ) as span:
+        feedback_status = "flagged"
+        feedback_event_id: Optional[int] = None
+        result_case_id: Optional[str] = None
+        result_output_path: Optional[str] = None
+        try:
+            result = harvest_eval_case(
+                session_id=req.session_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                out_dir=(os.getenv("BANANAFLOW_EVAL_CASES_PATH") or ""),
+                reason=reason,
+                include_trajectory=include_trajectory,
+                provenance={
+                    "source": "api",
+                    "tenant_scope": tenant_id,
+                    "user_scope": user_id,
+                },
+            )
+            feedback_status = "harvested" if bool(result.written) else "flagged"
+            result_case_id = str(result.case_id or "")
+            result_output_path = str(result.output_path or "")
+            feedback_event_id = _append_session_event_audit(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=req.session_id,
+                event_type="HITL_FEEDBACK",
+                payload={
+                    "feedback_status": feedback_status,
+                    "feedback_reason": reason,
+                    "case_id": result_case_id,
+                    "output_path": result_output_path,
+                    "session_id": req.session_id,
+                    "x_agent_session_id": x_agent_session_id or req.session_id,
+                    "x_agent_intent": x_agent_intent,
+                    "x_agent_product": x_agent_product,
+                    "req_id": req_id,
+                    "timestamp": time.time(),
+                },
+                idempotency_key=f"hitl_feedback:{req_id}:{req.session_id}",
+            )
+            try:
+                span.set_attribute("feedback_status", feedback_status)
+                span.set_attribute("case_id", result_case_id)
+                span.set_attribute("bytes_written", int(result.bytes_written or 0))
+                span.set_attribute("hitl_feedback_event_id", int(feedback_event_id or 0))
+            except Exception:
+                pass
+            sys_logger.info(
+                json.dumps(
+                    {
+                        "event": "quality_hitl_feedback",
+                        "tenant_id": tenant_id,
+                        "user_id": user_id,
+                        "session_id": req.session_id,
+                        "reason": reason,
+                        "feedback_status": feedback_status,
+                        "case_id": result_case_id,
+                        "output_path": result_output_path,
+                        "x_agent_session_id": x_agent_session_id or req.session_id,
+                        "x_agent_intent": x_agent_intent,
+                        "x_agent_product": x_agent_product,
+                        "req_id": req_id,
+                        "event_id": feedback_event_id,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return {"case_id": result.case_id, "output_path": result.output_path}
+        except SessionNotFoundError:
+            raise HTTPException(status_code=404, detail="Session not found")
+        except SessionAccessDeniedError:
+            raise HTTPException(status_code=403, detail="Session access denied")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
 
 # =========================================================

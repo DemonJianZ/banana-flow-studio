@@ -42,7 +42,7 @@ export default function App() {
         <GlobalToast />
         <Routes>
           <Route path="/login" element={<AuthPage mode="login" />} />
-          <Route path="/register" element={<AuthPage mode="register" />} />
+          <Route path="/register" element={<Navigate to="/login" replace />} />
           <Route
             path="/app"
             element={

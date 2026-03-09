@@ -101,6 +101,8 @@ class MultiAngleShotsResponse(BaseModel):
 class VideoUpscaleRequest(BaseModel):
     video: str
     segment_seconds: Optional[int] = 3
+    output_resolution: Optional[int] = Field(default=1440)
+    workflow_batch_size: Optional[int] = Field(default=1)
 
 class VideoUpscaleResponse(BaseModel):
     video: str
@@ -119,6 +121,43 @@ class ControlnetPoseVideoRequest(BaseModel):
 
 class ControlnetPoseVideoResponse(BaseModel):
     video: str
+
+
+class AgentVideoGenerationRequest(BaseModel):
+    product: str
+    out_dir: Optional[str] = "./exports/video_generation"
+    image_width: Optional[int] = Field(default=1024, ge=64, le=4096)
+    image_height: Optional[int] = Field(default=1024, ge=64, le=4096)
+    output_width: Optional[int] = Field(default=720, ge=64, le=4096)
+    output_height: Optional[int] = Field(default=1280, ge=64, le=4096)
+    fps: Optional[int] = Field(default=24, ge=1, le=120)
+    clip_length: Optional[int] = Field(default=81, ge=1, le=512)
+    retries_per_step: Optional[int] = Field(default=1, ge=0, le=5)
+    max_shots: Optional[int] = Field(default=0, ge=0, le=200)
+    motion_hint: Optional[str] = ""
+    bgm_path: Optional[str] = None
+
+
+class AgentVideoShotArtifact(BaseModel):
+    shot_id: str
+    segment: str = ""
+    image_path: str = ""
+    clip_path: str = ""
+    status: str = "pending"
+    error: str = ""
+
+
+class AgentVideoGenerationResponse(BaseModel):
+    video_generation_enabled: bool
+    fallback_mode: str
+    idea_script: Dict[str, Any]
+    output_dir: str = ""
+    output_video: Optional[str] = None
+    error: Optional[str] = None
+    shots_total: int = 0
+    shots_succeeded: int = 0
+    shots_failed: int = 0
+    artifacts: List[AgentVideoShotArtifact] = Field(default_factory=list)
 
 class VideoUpscaleTaskStartResponse(BaseModel):
     task_id: str
