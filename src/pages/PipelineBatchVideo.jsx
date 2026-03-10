@@ -70,15 +70,20 @@ const DEFAULT_VIDEO_MODEL = "Doubao-Seedance-1.0-pro";
 const DEFAULT_VIDEO_SEED = 21;
 const MAX_CONCURRENT = 2;
 
-const DEFAULT_COPY_TEXT = "YSL!!!\n你真的让我感觉陌生\n900多到手\n3个气垫3支口红\n错过真没有了";
+const DEFAULT_COPY_TEXT = "";
 const DEFAULT_FONT_NAME = "DouyinSansBold.ttf";
-const DEFAULT_FONT_SIZE = 50;
+const FONT_NAME_OPTIONS = [
+  { label: "DouyinSansBold", value: "DouyinSansBold.ttf" },
+  { label: "SourceHanSansCNBold", value: "SourceHanSansCNBold.ttf" },
+  { label: "SanJiHuoLiHeiJianTi-Cu-2", value: "SanJiHuoLiHeiJianTi-Cu-2.ttf" },
+];
+const DEFAULT_FONT_SIZE = 45;
 const DEFAULT_BOLD_STRENGTH = 2;
-const DEFAULT_BOLD_TEXTS = ["YSL!!!", "你真的让我感觉陌生", "", "", ""];
+const DEFAULT_BOLD_TEXTS = [""];
 const DEFAULT_TEXT_BG_OPACITY = 1;
 const DEFAULT_TEXT_BG_PADDING = 10;
 const DEFAULT_RATIO_ADAPT_3_4 = false;
-const DEFAULT_HIGHLIGHT_TEXTS = ["YSL!!!", "", "", "", ""];
+const DEFAULT_HIGHLIGHT_TEXTS = [""];
 const DEFAULT_HIGHLIGHT_OPACITY = 1;
 const DEFAULT_HIGHLIGHT_PADDING = 1;
 const DEFAULT_COLOR_MODE = "custom";
@@ -92,7 +97,8 @@ const DEFAULT_ROTATION_ANGLE = 0;
 const DEFAULT_ROTATION_OPTIONS = "text center";
 const DEFAULT_FONT_COLOR_HEX = "#000000";
 const DEFAULT_TEXT_BG_COLOR_HEX = "#FFFFFF";
-const DEFAULT_HIGHLIGHT_COLOR_HEXES = ["#FFFF00", "#FFFF00", "#FFFF00", "#FFFF00", "#FFFF00"];
+const DEFAULT_HIGHLIGHT_COLOR_HEXES = ["#FF0000", "#FF0000", "#FF0000", "#FF0000", "#FF0000"];
+const MAX_TEXT_FIELDS = 5;
 
 const COMPACT_INPUT_CLASS =
   "w-full rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-200 px-2.5 py-1.5 focus:outline-none focus:border-purple-500";
@@ -212,10 +218,8 @@ const PipelineBatchVideo = () => {
 
   const hasReadyInputs = mainImages.length > 0;
 
-  const effectiveCopy = useMemo(() => {
-    if (copyText && copyText.trim()) return copyText;
-    return DEFAULT_COPY_TEXT;
-  }, [copyText]);
+  const overlayText = copyText || "";
+  const shouldApplyOverlay = Boolean(overlayText.trim());
 
   const normalizedFontColorHex = useMemo(
     () => normalizeHexColor(fontColorHex, DEFAULT_FONT_COLOR_HEX),
@@ -290,16 +294,23 @@ const PipelineBatchVideo = () => {
   const updateBoldText = useCallback((index, value) => {
     setBoldTexts((prev) => {
       const next = [...prev];
-      while (next.length < 5) next.push("");
+      while (next.length <= index && next.length < MAX_TEXT_FIELDS) next.push("");
       next[index] = value;
       return next;
+    });
+  }, []);
+
+  const addBoldTextField = useCallback(() => {
+    setBoldTexts((prev) => {
+      if (prev.length >= MAX_TEXT_FIELDS) return prev;
+      return [...prev, ""];
     });
   }, []);
 
   const updateHighlightText = useCallback((index, value) => {
     setHighlightTexts((prev) => {
       const next = [...prev];
-      while (next.length < 5) next.push("");
+      while (next.length <= index && next.length < MAX_TEXT_FIELDS) next.push("");
       next[index] = value;
       return next;
     });
@@ -308,9 +319,21 @@ const PipelineBatchVideo = () => {
   const updateHighlightColorHex = useCallback((index, value) => {
     setHighlightColorHexes((prev) => {
       const next = [...prev];
-      while (next.length < 5) next.push("");
+      while (next.length <= index && next.length < MAX_TEXT_FIELDS) next.push("");
       next[index] = value;
       return next;
+    });
+  }, []);
+
+  const addHighlightTextField = useCallback(() => {
+    setHighlightTexts((prev) => {
+      if (prev.length >= MAX_TEXT_FIELDS) return prev;
+      return [...prev, ""];
+    });
+    setHighlightColorHexes((prev) => {
+      if (prev.length >= MAX_TEXT_FIELDS) return prev;
+      const fallback = DEFAULT_HIGHLIGHT_COLOR_HEXES[prev.length] || DEFAULT_HIGHLIGHT_COLOR_HEXES[0];
+      return [...prev, fallback];
     });
   }, []);
 
@@ -391,6 +414,8 @@ const PipelineBatchVideo = () => {
 
   const applyOverlayText = useCallback(
     async (imageDataUrl, signal) => {
+      if (!shouldApplyOverlay) return imageDataUrl;
+
       const boldTextValues = boldTexts.map((val) => (val || "").trim());
       const highlightTextValues = highlightTexts.map((val) => (val || "").trim());
 
@@ -400,7 +425,7 @@ const PipelineBatchVideo = () => {
         signal,
         body: JSON.stringify({
           image: imageDataUrl,
-          text: effectiveCopy,
+          text: overlayText,
           font_name: fontName,
           font_size: fontSize,
           bold_strength: boldStrength,
@@ -456,7 +481,8 @@ const PipelineBatchVideo = () => {
       align,
       boldStrength,
       boldTexts,
-      effectiveCopy,
+      overlayText,
+      shouldApplyOverlay,
       fontName,
       fontSize,
       highlightOpacity,
@@ -997,7 +1023,7 @@ const PipelineBatchVideo = () => {
           <div className="flex items-center justify-between gap-4 flex-wrap">
             <div>
               <h2 className="text-sm font-semibold">视频配置区域</h2>
-              <p className="text-xs text-slate-500">功能类型、视频参数与文案配置</p>
+              <p className="text-xs text-slate-500">功能类型与视频参数</p>
             </div>
             <div className="text-xs text-slate-500">已完成 {totalSuccess}/{results.length || 0}</div>
           </div>
@@ -1057,154 +1083,185 @@ const PipelineBatchVideo = () => {
           </div>
 
           <div className="pt-1">
-            <div className="flex items-center justify-between gap-4 flex-wrap">
-              <h3 className="text-sm font-semibold">文案配置</h3>
-              <div className="text-xs text-slate-500">与批量花字页面保持一致</div>
-            </div>
-
-            <div className="mt-3 grid grid-cols-1 xl:grid-cols-3 gap-3">
-              <div className="space-y-3">
-                <label className="text-xs text-slate-400 space-y-2">
-                  <span className="block">文案内容（可编辑）</span>
+            <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/30">
+              <div className="px-3 py-3 space-y-3">
+                <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
+                  <label className="text-xs text-slate-400 space-y-2">
+                    <span className="block">文案内容</span>
                   <textarea
                     value={copyText}
                     onChange={(e) => setCopyText(e.target.value)}
                     rows={4}
                     className={COMPACT_INPUT_CLASS}
                   />
-                  <div className="text-[11px] text-slate-500">留空将自动使用默认文案。</div>
                 </label>
 
-                <div className="text-xs text-slate-400 space-y-2">
-                  <span className="block">加粗内容（bold_text_1 ~ 5）</span>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2 gap-2">
-                    {Array.from({ length: 5 }).map((_, idx) => (
-                      <input
-                        key={`bold-text-${idx}`}
-                        value={boldTexts[idx] || ""}
-                        onChange={(e) => updateBoldText(idx, e.target.value)}
-                        placeholder={`加粗内容 ${idx + 1}`}
-                        className={COMPACT_INPUT_CLASS}
-                      />
+                  <div className="text-xs text-slate-400 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="block">加粗内容</span>
+                      <button
+                        type="button"
+                        onClick={addBoldTextField}
+                        disabled={boldTexts.length >= MAX_TEXT_FIELDS}
+                        className={`text-[11px] px-2 py-1 rounded border transition-colors ${
+                          boldTexts.length < MAX_TEXT_FIELDS
+                            ? "bg-slate-800 border-slate-700 hover:border-purple-500 hover:text-white"
+                            : "bg-slate-900 border-slate-800 text-slate-600 cursor-not-allowed"
+                        }`}
+                      >
+                        添加文本框
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2 gap-2">
+                      {boldTexts.map((_, idx) => (
+                        <input
+                          key={`bold-text-${idx}`}
+                          value={boldTexts[idx] || ""}
+                          onChange={(e) => updateBoldText(idx, e.target.value)}
+                          placeholder={`加粗内容 ${idx + 1}`}
+                          className={COMPACT_INPUT_CLASS}
+                        />
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="text-xs text-slate-400 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="block">高亮设置</span>
+                      <button
+                        type="button"
+                        onClick={addHighlightTextField}
+                        disabled={highlightTexts.length >= MAX_TEXT_FIELDS}
+                        className={`text-[11px] px-2 py-1 rounded border transition-colors ${
+                          highlightTexts.length < MAX_TEXT_FIELDS
+                            ? "bg-slate-800 border-slate-700 hover:border-purple-500 hover:text-white"
+                            : "bg-slate-900 border-slate-800 text-slate-600 cursor-not-allowed"
+                        }`}
+                      >
+                        添加文本框
+                      </button>
+                    </div>
+                    {highlightTexts.map((_, idx) => (
+                      <div key={`highlight-${idx}`} className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr),44px,112px] gap-2 items-center">
+                        <input
+                          value={highlightTexts[idx] || ""}
+                          onChange={(e) => updateHighlightText(idx, e.target.value)}
+                          placeholder={`高亮内容 ${idx + 1}`}
+                          className={COMPACT_INPUT_CLASS}
+                        />
+                        <input
+                          type="color"
+                          value={normalizedHighlightColorHexes[idx] || DEFAULT_HIGHLIGHT_COLOR_HEXES[idx]}
+                          onChange={(e) => updateHighlightColorHex(idx, e.target.value)}
+                          className={COMPACT_COLOR_INPUT_CLASS}
+                        />
+                        <input
+                          value={highlightColorHexes[idx] || ""}
+                          onChange={(e) => updateHighlightColorHex(idx, e.target.value)}
+                          placeholder={DEFAULT_HIGHLIGHT_COLOR_HEXES[idx]}
+                          className={COMPACT_INPUT_CLASS}
+                        />
+                      </div>
                     ))}
                   </div>
                 </div>
-              </div>
 
-              <div className="text-xs text-slate-400 space-y-2">
-                <span className="block">高亮设置（highlight_text / color_hex）</span>
-                {Array.from({ length: 5 }).map((_, idx) => (
-                  <div key={`highlight-${idx}`} className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr),44px,112px] gap-2 items-center">
-                    <input
-                      value={highlightTexts[idx] || ""}
-                      onChange={(e) => updateHighlightText(idx, e.target.value)}
-                      placeholder={`高亮内容 ${idx + 1}`}
-                      className={COMPACT_INPUT_CLASS}
-                    />
-                    <input
-                      type="color"
-                      value={normalizedHighlightColorHexes[idx] || DEFAULT_HIGHLIGHT_COLOR_HEXES[idx]}
-                      onChange={(e) => updateHighlightColorHex(idx, e.target.value)}
-                      className={COMPACT_COLOR_INPUT_CLASS}
-                    />
-                    <input
-                      value={highlightColorHexes[idx] || ""}
-                      onChange={(e) => updateHighlightColorHex(idx, e.target.value)}
-                      placeholder={DEFAULT_HIGHLIGHT_COLOR_HEXES[idx]}
-                      className={COMPACT_INPUT_CLASS}
-                    />
-                  </div>
-                ))}
-              </div>
-
-              <div className="space-y-2">
-                <div className="text-xs text-slate-400 space-y-2">
-                  <span className="block">字体设置</span>
-                  <label className="space-y-2">
-                    <span className="block">字体文件名（font_name）</span>
-                    <input
-                      value={fontName}
-                      onChange={(e) => setFontName(e.target.value)}
-                      placeholder={DEFAULT_FONT_NAME}
-                      className={COMPACT_INPUT_CLASS}
-                    />
-                  </label>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                <details className="text-xs text-slate-400 rounded-lg border border-slate-800 bg-slate-950/40">
+                  <summary className="cursor-pointer px-3 py-2 text-sm text-slate-300 hover:text-white">
+                    字体设置
+                  </summary>
+                  <div className="px-3 pb-3 pt-1 space-y-2">
                     <label className="space-y-2">
-                      <span className="block">字号（font_size）</span>
-                      <input
-                        type="number"
-                        step={1}
-                        value={fontSize}
-                        onChange={(e) => {
-                          const next = Number(e.target.value);
-                          setFontSize(Number.isNaN(next) ? DEFAULT_FONT_SIZE : next);
-                        }}
+                      <span className="block">字体文件名</span>
+                      <select
+                        value={fontName}
+                        onChange={(e) => setFontName(e.target.value)}
                         className={COMPACT_INPUT_CLASS}
-                      />
+                      >
+                        {FONT_NAME_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value} className="bg-slate-900">
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
                     </label>
-                    <label className="space-y-2">
-                      <span className="block">加粗强度（bold_strength）</span>
-                      <input
-                        type="number"
-                        step={1}
-                        value={boldStrength}
-                        onChange={(e) => {
-                          const next = Number(e.target.value);
-                          setBoldStrength(Number.isNaN(next) ? DEFAULT_BOLD_STRENGTH : next);
-                        }}
-                        className={COMPACT_INPUT_CLASS}
-                      />
-                    </label>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <label className="space-y-2">
+                        <span className="block">字号</span>
+                        <input
+                          type="number"
+                          step={1}
+                          value={fontSize}
+                          onChange={(e) => {
+                            const next = Number(e.target.value);
+                            setFontSize(Number.isNaN(next) ? DEFAULT_FONT_SIZE : next);
+                          }}
+                          className={COMPACT_INPUT_CLASS}
+                        />
+                      </label>
+                      <label className="space-y-2">
+                        <span className="block">加粗强度</span>
+                        <input
+                          type="number"
+                          step={1}
+                          value={boldStrength}
+                          onChange={(e) => {
+                            const next = Number(e.target.value);
+                            setBoldStrength(Number.isNaN(next) ? DEFAULT_BOLD_STRENGTH : next);
+                          }}
+                          className={COMPACT_INPUT_CLASS}
+                        />
+                      </label>
+                    </div>
+                    <div className="text-xs text-slate-400 space-y-2">
+                      <span className="block">颜色与底色</span>
+                      <label className="space-y-2">
+                        <span className="block">文字颜色</span>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="color"
+                            value={normalizedFontColorHex}
+                            onChange={(e) => setFontColorHex(e.target.value)}
+                            className={COMPACT_COLOR_INPUT_CLASS}
+                          />
+                          <input
+                            value={fontColorHex}
+                            onChange={(e) => setFontColorHex(e.target.value)}
+                            placeholder={DEFAULT_FONT_COLOR_HEX}
+                            className={COMPACT_INPUT_CLASS}
+                          />
+                        </div>
+                      </label>
+                      <label className="space-y-2">
+                        <span className="block">底色颜色</span>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="color"
+                            value={normalizedTextBgColorHex}
+                            onChange={(e) => setTextBgColorHex(e.target.value)}
+                            className={COMPACT_COLOR_INPUT_CLASS}
+                          />
+                          <input
+                            value={textBgColorHex}
+                            onChange={(e) => setTextBgColorHex(e.target.value)}
+                            placeholder={DEFAULT_TEXT_BG_COLOR_HEX}
+                            className={COMPACT_INPUT_CLASS}
+                          />
+                        </div>
+                      </label>
+                    </div>
                   </div>
-                </div>
-
-                <div className="text-xs text-slate-400 space-y-2">
-                  <span className="block">颜色与底色</span>
-                  <label className="space-y-2">
-                    <span className="block">文字颜色（font_color_hex）</span>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="color"
-                        value={normalizedFontColorHex}
-                        onChange={(e) => setFontColorHex(e.target.value)}
-                        className={COMPACT_COLOR_INPUT_CLASS}
-                      />
-                      <input
-                        value={fontColorHex}
-                        onChange={(e) => setFontColorHex(e.target.value)}
-                        placeholder={DEFAULT_FONT_COLOR_HEX}
-                        className={COMPACT_INPUT_CLASS}
-                      />
-                    </div>
-                  </label>
-                  <label className="space-y-2">
-                    <span className="block">底色颜色（text_bg_color_hex）</span>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="color"
-                        value={normalizedTextBgColorHex}
-                        onChange={(e) => setTextBgColorHex(e.target.value)}
-                        className={COMPACT_COLOR_INPUT_CLASS}
-                      />
-                      <input
-                        value={textBgColorHex}
-                        onChange={(e) => setTextBgColorHex(e.target.value)}
-                        placeholder={DEFAULT_TEXT_BG_COLOR_HEX}
-                        className={COMPACT_INPUT_CLASS}
-                      />
-                    </div>
-                  </label>
-                </div>
+                </details>
 
                 <details className="text-xs text-slate-400 rounded-lg border border-slate-800 bg-slate-950/40">
                   <summary className="cursor-pointer px-3 py-2 text-sm text-slate-300 hover:text-white">
-                    高级参数（透明度 / 内边距 / 排版与位置）
+                    高级参数
                   </summary>
                   <div className="px-3 pb-3 pt-1">
                     <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
                       <label className="space-y-1.5">
-                        <span className="block">底色透明度（text_bg_opacity）</span>
+                        <span className="block">底色透明度</span>
                         <input
                           type="number"
                           step={0.1}
@@ -1217,7 +1274,7 @@ const PipelineBatchVideo = () => {
                         />
                       </label>
                       <label className="space-y-1.5">
-                        <span className="block">底色内边距（text_bg_padding）</span>
+                        <span className="block">底色内边距</span>
                         <input
                           type="number"
                           step={1}
@@ -1230,7 +1287,7 @@ const PipelineBatchVideo = () => {
                         />
                       </label>
                       <label className="space-y-1.5">
-                        <span className="block">高亮透明度（highlight_opacity）</span>
+                        <span className="block">高亮透明度</span>
                         <input
                           type="number"
                           step={0.1}
@@ -1243,7 +1300,7 @@ const PipelineBatchVideo = () => {
                         />
                       </label>
                       <label className="space-y-1.5">
-                        <span className="block">高亮内边距（highlight_padding）</span>
+                        <span className="block">高亮内边距</span>
                         <input
                           type="number"
                           step={1}
@@ -1256,7 +1313,7 @@ const PipelineBatchVideo = () => {
                         />
                       </label>
                       <div className="space-y-1.5 sm:col-span-2 xl:col-span-3">
-                        <span className="block">比例适配（3:4）</span>
+                        <span className="block">比例适配</span>
                         <label className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2 cursor-pointer">
                           <input
                             type="checkbox"
@@ -1267,7 +1324,7 @@ const PipelineBatchVideo = () => {
                         </label>
                       </div>
                       <label className="space-y-1.5">
-                        <span className="block">对齐（align）</span>
+                        <span className="block">对齐</span>
                         <input
                           value={align}
                           onChange={(e) => setAlign(e.target.value)}
@@ -1276,7 +1333,7 @@ const PipelineBatchVideo = () => {
                         />
                       </label>
                       <label className="space-y-1.5">
-                        <span className="block">对齐方式（justify）</span>
+                        <span className="block">对齐方式</span>
                         <input
                           value={justify}
                           onChange={(e) => setJustify(e.target.value)}
@@ -1285,7 +1342,7 @@ const PipelineBatchVideo = () => {
                         />
                       </label>
                       <label className="space-y-1.5">
-                        <span className="block">边距（margins）</span>
+                        <span className="block">边距</span>
                         <input
                           type="number"
                           step={1}
@@ -1298,7 +1355,7 @@ const PipelineBatchVideo = () => {
                         />
                       </label>
                       <label className="space-y-1.5">
-                        <span className="block">行距（line_spacing）</span>
+                        <span className="block">行距</span>
                         <input
                           type="number"
                           step={1}
@@ -1311,7 +1368,7 @@ const PipelineBatchVideo = () => {
                         />
                       </label>
                       <label className="space-y-1.5">
-                        <span className="block">位置 X（position_x）</span>
+                        <span className="block">位置 X</span>
                         <input
                           type="number"
                           step={1}
@@ -1324,7 +1381,7 @@ const PipelineBatchVideo = () => {
                         />
                       </label>
                       <label className="space-y-1.5">
-                        <span className="block">位置 Y（position_y）</span>
+                        <span className="block">位置 Y</span>
                         <input
                           type="number"
                           step={1}
@@ -1337,7 +1394,7 @@ const PipelineBatchVideo = () => {
                         />
                       </label>
                       <label className="space-y-1.5">
-                        <span className="block">旋转角度（rotation_angle）</span>
+                        <span className="block">旋转角度</span>
                         <input
                           type="number"
                           step={1}
@@ -1350,7 +1407,7 @@ const PipelineBatchVideo = () => {
                         />
                       </label>
                       <label className="space-y-1.5 sm:col-span-2 xl:col-span-3">
-                        <span className="block">旋转参考（rotation_options）</span>
+                        <span className="block">旋转参考</span>
                         <input
                           value={rotationOptions}
                           onChange={(e) => setRotationOptions(e.target.value)}
@@ -1361,6 +1418,7 @@ const PipelineBatchVideo = () => {
                     </div>
                   </div>
                 </details>
+                </div>
               </div>
             </div>
           </div>

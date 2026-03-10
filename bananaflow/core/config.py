@@ -32,7 +32,9 @@ ARK_VIDEO_MODEL_ID_NEW = "ep-20251225103241-gkccd"
 VIDEO_MODEL_1_0 = "Doubao-Seedance-1.0-pro"
 VIDEO_MODEL_1_5 = "Doubao-Seedance-1.5-pro"
 
-BASE_DIR = os.getcwd()
+CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
+PACKAGE_DIR = os.path.dirname(CONFIG_DIR)
+BASE_DIR = os.path.dirname(PACKAGE_DIR)
 COMFYUI_URL = os.getenv("COMFYUI_URL", "http://192.168.20.30:8188").rstrip("/")
 _default_overlaytext = os.path.join(BASE_DIR, "workflows", "textoverlay.json")
 if not os.path.exists(_default_overlaytext):

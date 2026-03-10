@@ -365,11 +365,11 @@ def _parse_local_i2v_dimensions(resolution: Optional[str], ratio: Optional[str])
     text = str(resolution or "").strip().lower()
     direct = re.match(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$", text)
     if direct:
-        return max(64, int(direct.group(1))), max(64, int(direct.group(2)))
+        return min(1280, max(64, int(direct.group(1)))), min(1280, max(64, int(direct.group(2))))
 
     p_match = re.match(r"^\s*(\d+)\s*p\s*$", text)
     base = int(p_match.group(1)) if p_match else 640
-    base = max(64, base)
+    base = min(720, max(64, base))
 
     ratio_text = str(ratio or "").strip().lower()
     ratio_match = re.match(r"^\s*(\d+)\s*:\s*(\d+)\s*$", ratio_text)
@@ -562,6 +562,8 @@ def local_text_to_image(req: Text2ImgRequest, request: Request, current_user=Dep
     t0 = time.time()
     try:
         width, height = _parse_size_to_dimensions(req.size, req.aspect_ratio, default=(1024, 1024))
+        if width > 2048 or height > 2048:
+            raise HTTPException(status_code=400, detail="本地文生图暂不支持 4K，仅支持 1K / 2K")
         img_bytes = run_image_z_image_turbo_workflow(
             req_id=req_id,
             prompt=req.prompt,
@@ -609,6 +611,8 @@ def local_img_to_video(req: Img2VideoRequest, request: Request, current_user=Dep
     req_id = request.state.req_id
     t0 = time.time()
     try:
+        if str(req.resolution or "").strip().lower() == "1080p":
+            raise HTTPException(status_code=400, detail="本地图生视频暂不支持 1080P，仅支持 480P / 720P")
         _, image_bytes = parse_data_url(req.image)
         fps = max(1, int(req.fps or 16))
         duration = max(1, int(req.duration or 5))

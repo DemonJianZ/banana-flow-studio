@@ -249,19 +249,14 @@ const NODE_TYPES = {
   OUTPUT: "output",
 };
 
-const LOCAL_TEXT2IMG_MODEL = "comfyui-image-z-image-turbo";
-const LOCAL_IMG2VIDEO_MODEL = "comfyui-qwen-i2v";
-
 const AI_MODELS = [
   { id: "gemini-3-pro-image-preview", name: "Gemini 3 Pro", vendor: "Google", icon: Sparkles },
   { id: "doubao-seedream-4.5", name: "Doubao 4.5", vendor: "ByteDance", icon: Zap },
-  { id: LOCAL_TEXT2IMG_MODEL, name: "ComfyUI Local", vendor: "Local", icon: Cpu },
 ];
 
 const VIDEO_MODELS = [
   { id: "Doubao-Seedance-1.0-pro", name: "Doubao Seedance 1.0 Pro", vendor: "ByteDance" },
   { id: "Doubao-Seedance-1.5-pro", name: "Doubao Seedance 1.5 Pro", vendor: "ByteDance" },
-  { id: LOCAL_IMG2VIDEO_MODEL, name: "ComfyUI Local", vendor: "Local" },
 ];
 
 const VIDEO_MODEL_1_0 = "Doubao-Seedance-1.0-pro";
@@ -308,6 +303,16 @@ const TOOL_CARDS = {
     icon: Wand2,
     desc: "从零生成营销素材",
     scenario: "灵感构思",
+    category: "generate",
+    refRequired: false,
+  },
+  local_text2img: {
+    id: "local_text2img",
+    name: "本地文生图",
+    short: "本地文生图",
+    icon: Server,
+    desc: "调用 ComfyUI image_z_image_turbo 工作流",
+    scenario: "本地推理 / 低延迟",
     category: "generate",
     refRequired: false,
   },
@@ -393,6 +398,17 @@ const TOOL_CARDS = {
     category: "video",
     refRequired: false,
   },
+  local_img2video: {
+    id: "local_img2video",
+    name: "本地图生视频",
+    short: "本地图生视频",
+    icon: Server,
+    desc: "调用 ComfyUI Qwen_i2v 工作流",
+    scenario: "本地视频生成",
+    refLabel: "输入图像",
+    category: "video",
+    refRequired: false,
+  },
 };
 
 const FEATURE_EXTRACT_PRESET_PROMPTS = {
@@ -416,6 +432,9 @@ const getProcessorModeDefaults = (mode) => {
   if (mode === "text2img") {
     return { mode, prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1" } };
   }
+  if (mode === "local_text2img") {
+    return { mode, prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1" }, model: "comfyui-image-z-image-turbo" };
+  }
   if (mode === "multi_image_generate") {
     return { mode, prompt: "", templates: { size: "1024x1024", note: "" } };
   }
@@ -433,7 +452,7 @@ const getProcessorModeDefaults = (mode) => {
     return { mode, prompt: "", templates: {} };
   }
   if (mode === "video_upscale") {
-    return { mode, prompt: "", templates: { segment_seconds: 1, output_resolution: 1440, workflow_batch_size: 33 } };
+    return { mode, prompt: "", templates: { segment_seconds: 3, output_resolution: 1440, workflow_batch_size: 1 } };
   }
   return { mode, prompt: "", templates: {} };
 };
@@ -461,6 +480,11 @@ const PROMPT_TEMPLATES = {
   img2video: {
     categories: [
       { name: "画幅比例", key: "ratio", options: ["16:9", "9:16", "3:4", "21:9", "adaptive"] },
+    ],
+  },
+  local_img2video: {
+    categories: [
+      { name: "画幅比例", key: "ratio", options: ["1:1", "16:9", "9:16", "4:3", "3:4"] },
     ],
   },
 };
@@ -528,9 +552,9 @@ const checkNodeReady = (node, nodes, connections) => {
   const hasLocalImages = (node.data.uploadedImages?.length || 0) > 0;
   const hasInternalPrompt = node.data.prompt && node.data.prompt.length > 0;
 
-  if (node.data.mode === "text2img") return hasUpstreamText || hasInternalPrompt;
+  if (node.data.mode === "text2img" || node.data.mode === "local_text2img") return hasUpstreamText || hasInternalPrompt;
   if (node.data.mode === "multi_image_generate") return hasUpstreamImages || hasLocalImages;
-  if (node.data.mode === "img2video") return hasUpstreamImages;
+  if (node.data.mode === "img2video" || node.data.mode === "local_img2video") return hasUpstreamImages;
   return hasUpstreamImages;
 };
 
@@ -613,7 +637,7 @@ const SidebarBtn = ({ icon, label, desc, onClick, color, bg, active = false, com
         <>
           <div className="min-w-0 flex-1 overflow-hidden">
             <div className={`font-medium text-xs truncate ${active ? "text-slate-100" : "text-slate-200 group-hover:text-slate-100"}`}>{label}</div>
-            {desc ? <div className="text-[10px] text-slate-500 truncate">{desc}</div> : null}
+            <div className="text-[10px] text-slate-500 truncate">{desc}</div>
           </div>
           <Plus className={`w-3 h-3 shrink-0 transition-all ${active ? "text-yellow-300 opacity-90" : "text-slate-600 opacity-0 group-hover:opacity-100 group-hover:text-yellow-300"}`} />
         </>
@@ -797,9 +821,11 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
     return false;
   });
 
-  const promptModes = ["text2img", "multi_image_generate", "feature_extract"];
+  const promptModes = ["text2img", "local_text2img", "multi_image_generate", "feature_extract", "local_img2video"];
   const isSkillProcessor = isProcessor && currentMode.category === "skill";
   const isMultiAnglesSkill = node.data.mode === "multi_angleshots";
+  const isLocalText2Img = node.data.mode === "local_text2img";
+  const isLocalImg2Video = node.data.mode === "local_img2video";
 
   const handleRefUpload = (e) => {
     const file = e.target.files?.[0];
@@ -917,7 +943,7 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
           </div>
         )}
 
-{isVideoGen && (
+{isVideoGen && !isLocalImg2Video && (
   <div className="space-y-1">
     <div className="flex justify-between items-center">
       <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">尾帧参考图</div>
@@ -1009,7 +1035,7 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
 
           {showAdvanced && (
             <div className="space-y-4 animate-in slide-in-from-top-2 duration-200">
-              {((isProcessor && !isSkillProcessor) || isPostProcessor) && (
+              {((isProcessor && !isSkillProcessor && !isLocalText2Img) || isPostProcessor) && (
             <div className="space-y-2">
               <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center justify-between">
                 <span className="flex items-center gap-1">
@@ -1021,17 +1047,7 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
                 {AI_MODELS.map((m) => (
                   <button
                     key={m.id}
-                    onClick={() => {
-                      const prevTemplates = node.data.templates || {};
-                      const nextPayload = { model: m.id };
-                      if (node.data.mode === "text2img" && m.id === LOCAL_TEXT2IMG_MODEL) {
-                        const curSize = String(prevTemplates.size || "").toLowerCase();
-                        if (curSize === "4k") {
-                          nextPayload.templates = { ...prevTemplates, size: "2k" };
-                        }
-                      }
-                      updateData(node.id, nextPayload);
-                    }}
+                    onClick={() => updateData(node.id, { model: m.id })}
                     className={`flex items-center gap-2 p-2 rounded-lg border text-xs transition-all text-left ${
                       node.data.model === m.id
                         ? "bg-indigo-600/20 border-indigo-500 text-indigo-300"
@@ -1050,7 +1066,7 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
             </div>
           )}
 
-          {isVideoGen && (
+          {isVideoGen && !isLocalImg2Video && (
             <div className="space-y-2">
               <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center justify-between">
                 <span className="flex items-center gap-1">
@@ -1066,8 +1082,8 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
                       const nextModel = m.id;
                       const prevT = node.data.templates || {};
 
-                      // ✅ 切到 1.5 / Qwen 本地：时长 4~12；分辨率仅 480/720
-                      if (nextModel === VIDEO_MODEL_1_5 || nextModel === LOCAL_IMG2VIDEO_MODEL) {
+                      // ✅ 切到 1.5：时长 4~12；分辨率仅 480/720；默认开声音
+                      if (nextModel === VIDEO_MODEL_1_5) {
                         const prevRes = (prevT.resolution || "").toLowerCase();
                         const nextResolution = ["480p", "720p"].includes(prevRes) ? prevRes : "720p";
 
@@ -1080,10 +1096,7 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
                             ...prevT,
                             resolution: nextResolution,
                             duration: nextDuration,
-                            generate_audio_new:
-                              nextModel === LOCAL_IMG2VIDEO_MODEL
-                                ? false
-                                : (prevT.generate_audio_new ?? true),
+                            generate_audio_new: prevT.generate_audio_new ?? true,
                           },
                         });
                         return;
@@ -1126,7 +1139,21 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
   <div className="space-y-2">
     <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">视频时长 (秒)</div>
 
-    {node.data.model === VIDEO_MODEL_1_5 ? (
+    {isLocalImg2Video ? (
+      <input
+        type="number"
+        min={1}
+        max={20}
+        step={1}
+        value={parseInt(String(node.data.templates?.duration ?? 5), 10)}
+        onChange={(e) => {
+          const v = parseInt(e.target.value, 10);
+          const clamped = Math.min(20, Math.max(1, isNaN(v) ? 5 : v));
+          updateData(node.id, { templates: { ...(node.data.templates || {}), duration: clamped } });
+        }}
+        className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-200 outline-none"
+      />
+    ) : node.data.model === VIDEO_MODEL_1_5 ? (
       <input
         type="number"
         min={4}
@@ -1162,14 +1189,14 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
     )}
   </div>
 )}
-{isVideoGen && (
+          {isVideoGen && (
   <div className="space-y-2">
     <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">分辨率</div>
 
     <div className="grid grid-cols-3 gap-2">
-      {((node.data.model === VIDEO_MODEL_1_5 || node.data.model === LOCAL_IMG2VIDEO_MODEL) ? ["480p", "720p"] : ["480p", "720p", "1080p"]).map((r) => {
-        const defaultResolution = (node.data.model === VIDEO_MODEL_1_5 || node.data.model === LOCAL_IMG2VIDEO_MODEL) ? "720p" : "1080p";
-        const isSel = (node.data.templates?.resolution || defaultResolution) === r;
+      {(isLocalImg2Video ? ["480p", "720p"] : node.data.model === VIDEO_MODEL_1_5 ? ["480p", "720p"] : ["480p", "720p", "1080p"]).map((r) => {
+        const fallbackResolution = isLocalImg2Video ? "480p" : "1080p";
+        const isSel = (node.data.templates?.resolution || fallbackResolution) === r;
         const label = r.toUpperCase(); // 480P/720P/1080P
         return (
           <button
@@ -1199,23 +1226,7 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
                       <button
                         key={item.value}
                         type="button"
-                        onClick={() => {
-                          const prevTemplates = node.data.templates || {};
-                          const parsedBatch = parseInt(String(prevTemplates.workflow_batch_size ?? 33), 10);
-                          let nextBatch = Math.max(1, isNaN(parsedBatch) ? 33 : parsedBatch);
-                          if (item.value === 2160) {
-                            nextBatch = 29;
-                          } else if (nextBatch === 29) {
-                            nextBatch = 33;
-                          }
-                          updateData(node.id, {
-                            templates: {
-                              ...prevTemplates,
-                              output_resolution: item.value,
-                              workflow_batch_size: nextBatch,
-                            },
-                          });
-                        }}
+                        onClick={() => updateData(node.id, { templates: { ...(node.data.templates || {}), output_resolution: item.value } })}
                         className={`px-2 py-1.5 rounded-md text-[10px] border transition-all ${
                           isSel
                             ? "bg-rose-600 border-rose-500 text-white"
@@ -1235,10 +1246,10 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
                   min={1}
                   max={10}
                   step={1}
-                  value={parseInt(String(node.data.templates?.segment_seconds ?? 1), 10)}
+                  value={parseInt(String(node.data.templates?.segment_seconds ?? 3), 10)}
                   onChange={(e) => {
                     const v = parseInt(e.target.value, 10);
-                    const next = Math.min(10, Math.max(1, isNaN(v) ? 1 : v));
+                    const next = Math.min(10, Math.max(1, isNaN(v) ? 3 : v));
                     updateData(node.id, { templates: { ...(node.data.templates || {}), segment_seconds: next } });
                   }}
                   className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-200 outline-none"
@@ -1250,10 +1261,10 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
                   type="number"
                   min={1}
                   step={1}
-                  value={parseInt(String(node.data.templates?.workflow_batch_size ?? 33), 10)}
+                  value={parseInt(String(node.data.templates?.workflow_batch_size ?? 1), 10)}
                   onChange={(e) => {
                     const v = parseInt(e.target.value, 10);
-                    const next = Math.max(1, isNaN(v) ? 33 : v);
+                    const next = Math.max(1, isNaN(v) ? 1 : v);
                     updateData(node.id, { templates: { ...(node.data.templates || {}), workflow_batch_size: next } });
                   }}
                   className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-200 outline-none"
@@ -1269,6 +1280,7 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
           {/* Size & Ratio */}
           {isProcessor &&
             (node.data.mode === "text2img" ||
+              node.data.mode === "local_text2img" ||
               node.data.mode === "multi_image_generate" ||
               node.data.mode === "feature_extract" ||
               node.data.mode === "rmbg") && (
@@ -1276,7 +1288,7 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
               <div>
                 <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">尺寸 (Size)</div>
                 <div className="grid grid-cols-3 gap-1.5">
-                  {((node.data.mode === "text2img" && node.data.model === LOCAL_TEXT2IMG_MODEL) ? ["1k", "2k"] : ["1k", "2k", "4k"]).map((opt) => {
+                  {(node.data.mode === "local_text2img" ? ["1k", "2k"] : ["1k", "2k", "4k"]).map((opt) => {
                     let value = opt;
                     if (opt === "1k") value = "1024x1024";
                     const isSelected = node.data.templates?.size === value || (!node.data.templates?.size && opt === "1k");
@@ -1491,7 +1503,7 @@ const NodeComponent = ({
   if (isOutput) title = node.data.angleLabel ? `${node.data.angleLabel} 输出 (${node.data.images?.length || 0})` : `输出 (${node.data.images?.length || 0})`;
   if (isProcessor) title = TOOL_CARDS[node.data.mode]?.name || "图片生成";
   if (isPostProcessor) title = TOOL_CARDS[node.data.mode]?.name || "后期增强";
-  if (isVideoGen) title = "视频生成";
+  if (isVideoGen) title = TOOL_CARDS[node.data.mode]?.name || "视频生成";
   if (node.type === NODE_TYPES.TEXT_INPUT) title = "Prompt";
 
   const getThemeColor = () => {
@@ -1654,6 +1666,11 @@ const NodeComponent = ({
         {/* AI nodes */}
         {isAI && (
           <div className="space-y-2">
+            {isProcessor && node.data.mode === "video_upscale" && (
+              <div className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-300">
+                提醒：上传480P视频
+              </div>
+            )}
             {node.data.status === "loading" && (
               <div className="space-y-1">
                 <div className="flex justify-between text-[10px] text-slate-400">
@@ -1700,7 +1717,7 @@ const NodeComponent = ({
               </button>
             )}
             {/* ✅ 文生图后：一键续上图生图分支 */}
-            {node.data.status === "success" && isProcessor && node.data.mode === "text2img" && (
+            {node.data.status === "success" && isProcessor && (node.data.mode === "text2img" || node.data.mode === "local_text2img") && (
               <button
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
@@ -1923,7 +1940,6 @@ const Workbench = () => {
     skills: false,
     workflows: false,
     learning: false,
-    local_inference: false,
   });
   const [activeSidebarItemKey, setActiveSidebarItemKey] = useState("");
   const [rightPanelWidth, setRightPanelWidth] = useState(292);
@@ -2507,7 +2523,7 @@ const handleNodeMouseDown = (e, nid) => {
         uploadedImages: [],
         status: "idle",
         refImage: null,
-        model: "gemini-3-pro-image-preview",
+        model: getProcessorModeDefaults(modePreset || "multi_image_generate").model || "gemini-3-pro-image-preview",
       },
       [NODE_TYPES.POST_PROCESSOR]: {
         mode: "relight",
@@ -2519,13 +2535,16 @@ const handleNodeMouseDown = (e, nid) => {
         model: "gemini-3-pro-image-preview",
       },
       [NODE_TYPES.VIDEO_GEN]: {
-        mode: "img2video",
+        mode: modePreset === "local_img2video" ? "local_img2video" : "img2video",
         prompt: "",
-        templates: { motion: "", camera: "", duration: 5, resolution: "1080p", ratio: "16:9", note: "" ,generate_audio_new: true,},
+        templates:
+          modePreset === "local_img2video"
+            ? { duration: 5, resolution: "480p", ratio: "1:1", note: "" }
+            : { motion: "", camera: "", duration: 5, resolution: "1080p", ratio: "16:9", note: "", generate_audio_new: true },
         batchSize: 1,
         status: "idle",
         refImage: null,
-        model: VIDEO_MODEL_1_0, // ✅ 默认 1.0
+        model: modePreset === "local_img2video" ? "comfyui-qwen-i2v" : VIDEO_MODEL_1_0,
       },
       [NODE_TYPES.OUTPUT]: { images: [] },
     };
@@ -2591,63 +2610,23 @@ const handleNodeMouseDown = (e, nid) => {
     setViewport({ x: 0, y: 0, zoom: 1 });
   };
 
-  const createVideoUpscaleFlow = () => {
-    if (selectedNodeIds.size === 1) {
-      addNode(NODE_TYPES.PROCESSOR, "video_upscale");
-      return;
-    }
-
-    pushHistory();
-    const r = canvasRef.current?.getBoundingClientRect();
-    const cx = r ? r.width / 2 : window.innerWidth / 2;
-    const cy = r ? r.height / 2 : window.innerHeight / 2;
-    const c = screenToCanvas(cx, cy);
-
-    const startX = c.x - 520;
-    const rowY = c.y - 100;
-    const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: startX, y: rowY, data: { images: [] } };
-    const n2 = {
-      id: generateId(),
-      type: NODE_TYPES.PROCESSOR,
-      x: startX + 350,
-      y: rowY,
-      data: {
-        mode: "video_upscale",
-        prompt: "",
-        templates: { segment_seconds: 1, output_resolution: 1440, workflow_batch_size: 33 },
-        batchSize: 1,
-        uploadedImages: [],
-        status: "idle",
-        refImage: null,
-        model: "gemini-3-pro-image-preview",
-      },
-    };
-    const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: startX + 700, y: rowY, data: { images: [] } };
-
-    setNodes((prev) => [...prev, n1, n2, n3]);
-    setConnections((prev) => [
-      ...prev,
-      { id: generateId(), from: n1.id, to: n2.id },
-      { id: generateId(), from: n2.id, to: n3.id },
-    ]);
-    setSelectedNodeIds(new Set([n2.id]));
-  };
-
   const createLocalText2ImgTemplate = () => {
     pushHistory();
-    const n1 = { id: generateId(), type: NODE_TYPES.TEXT_INPUT, x: 100, y: 200, data: { text: "电商产品主图，干净背景，柔和布光，高清细节" } };
+    const n1 = { id: generateId(), type: NODE_TYPES.TEXT_INPUT, x: 100, y: 200, data: { text: "极简电商海报风格，主体居中，光线干净，细节清晰" } };
     const n2 = {
       id: generateId(),
       type: NODE_TYPES.PROCESSOR,
       x: 500,
       y: 200,
       data: {
-        mode: "text2img",
+        mode: "local_text2img",
         prompt: "",
         templates: { size: "1024x1024", aspect_ratio: "1:1" },
         batchSize: 1,
+        uploadedImages: [],
         status: "idle",
-        model: LOCAL_TEXT2IMG_MODEL,
+        refImage: null,
+        model: "comfyui-image-z-image-turbo",
       },
     };
     const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
@@ -2668,10 +2647,10 @@ const handleNodeMouseDown = (e, nid) => {
       x: 500,
       y: 200,
       data: {
-        mode: "img2video",
-        model: LOCAL_IMG2VIDEO_MODEL,
-        prompt: "",
-        templates: { motion: "标准(Standard)", camera: "固定镜头(Fixed)", duration: 5, resolution: "720p", ratio: "1:1", note: "", generate_audio_new: false },
+        mode: "local_img2video",
+        model: "comfyui-qwen-i2v",
+        prompt: "natural motion",
+        templates: { duration: 5, resolution: "480p", ratio: "1:1", note: "" },
         batchSize: 1,
         status: "idle",
         refImage: null,
@@ -4404,7 +4383,10 @@ const createConnectedImg2ImgBranch = useCallback(
         });
         sourceText = sourceText.trim();
 
-        const needsSingle = procNode.data.mode === "multi_image_generate" || procNode.data.mode === "text2img";
+        const needsSingle =
+          procNode.data.mode === "multi_image_generate" ||
+          procNode.data.mode === "text2img" ||
+          procNode.data.mode === "local_text2img";
         const effectiveInputCount = needsSingle ? 1 : inputImages.length;
 
         if (effectiveInputCount === 0 && !needsSingle) {
@@ -4422,12 +4404,11 @@ const createConnectedImg2ImgBranch = useCallback(
             try {
               let resultUrl = null;
 
-              if (procNode.data.mode === "text2img") {
+              if (procNode.data.mode === "text2img" || procNode.data.mode === "local_text2img") {
                 const promptToUse = sourceText || procNode.data.prompt;
                 if (!promptToUse?.trim()) throw new Error("缺少输入文本提示词");
-                const isLocalText2Img = procNode.data.model === LOCAL_TEXT2IMG_MODEL;
 
-                const resp = await apiFetch(isLocalText2Img ? `/api/local/text2img` : `/api/text2img`, {
+                const resp = await apiFetch(procNode.data.mode === "local_text2img" ? `/api/local/text2img` : `/api/text2img`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({
@@ -4440,11 +4421,14 @@ const createConnectedImg2ImgBranch = useCallback(
                 const data = await resp.json();
                 if (!resp.ok) throw new Error(extractApiError(data));
                 if (data.images?.length > 0) resultUrl = data.images[0];
-              } else if (procNode.type === NODE_TYPES.VIDEO_GEN || procNode.data.mode === "img2video") {
+              } else if (
+                procNode.type === NODE_TYPES.VIDEO_GEN ||
+                procNode.data.mode === "img2video" ||
+                procNode.data.mode === "local_img2video"
+              ) {
                 const rawDuration = procNode.data.templates?.duration || "5";
                 const durationInt = parseInt(String(rawDuration).replace(/[^0-9]/g, "")) || 5;
                 const isCameraFixed = procNode.data.templates?.camera?.includes("固定") || false;
-                const isLocalImg2Video = procNode.data.model === LOCAL_IMG2VIDEO_MODEL;
 
                 const payload = {
                   model: procNode.data.model || "Doubao-Seedance-1.0-pro", // ✅ 新增
@@ -4460,7 +4444,7 @@ const createConnectedImg2ImgBranch = useCallback(
                   seed: 21,
                 };
 
-                const resp = await apiFetch(isLocalImg2Video ? `/api/local/img2video` : `/api/img2video`, {
+                const resp = await apiFetch(procNode.data.mode === "local_img2video" ? `/api/local/img2video` : `/api/img2video`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify(payload),
@@ -4526,9 +4510,9 @@ const createConnectedImg2ImgBranch = useCallback(
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({
                     video: videoInput,
-                    segment_seconds: parseInt(String(procNode.data.templates?.segment_seconds ?? 1), 10) || 1,
+                    segment_seconds: parseInt(String(procNode.data.templates?.segment_seconds ?? 3), 10) || 3,
                     output_resolution: parseInt(String(procNode.data.templates?.output_resolution ?? 1440), 10) || 1440,
-                    workflow_batch_size: parseInt(String(procNode.data.templates?.workflow_batch_size ?? 33), 10) || 33,
+                    workflow_batch_size: parseInt(String(procNode.data.templates?.workflow_batch_size ?? 1), 10) || 1,
                   }),
                 });
                 const startData = await startResp.json();
@@ -4755,7 +4739,7 @@ const createConnectedImg2ImgBranch = useCallback(
             desc: "3 秒切片后逐段超分",
             color: "text-cyan-400",
             bg: "bg-cyan-500/10",
-            onClick: () => createVideoUpscaleFlow(),
+            onClick: () => addNode(NODE_TYPES.PROCESSOR, "video_upscale"),
           },
         ],
       },
@@ -4797,6 +4781,24 @@ const createConnectedImg2ImgBranch = useCallback(
         title: "AI深度学习",
         items: [
           {
+            id: "workflow_local_text2img",
+            icon: Server,
+            label: "本地：文生图",
+            desc: "image_z_image_turbo 工作流",
+            color: "text-emerald-300",
+            bg: "bg-emerald-500/10",
+            onClick: () => createLocalText2ImgTemplate(),
+          },
+          {
+            id: "workflow_local_img2video",
+            icon: Server,
+            label: "本地：图生视频",
+            desc: "Qwen_i2v 工作流",
+            color: "text-sky-300",
+            bg: "bg-sky-500/10",
+            onClick: () => createLocalImg2VideoTemplate(),
+          },
+          {
             id: "workflow_pose_control",
             icon: Film,
             label: "视频：姿态控制",
@@ -4804,30 +4806,6 @@ const createConnectedImg2ImgBranch = useCallback(
             color: "text-rose-300",
             bg: "bg-rose-500/10",
             onClick: () => navigate("/app/pose-control-video"),
-          },
-        ],
-      },
-      {
-        key: "local_inference",
-        title: "本地推理",
-        items: [
-          {
-            id: "local_text2img",
-            icon: Wand2,
-            label: "文生图",
-            desc: "",
-            color: "text-violet-300",
-            bg: "bg-violet-500/10",
-            onClick: () => createLocalText2ImgTemplate(),
-          },
-          {
-            id: "local_img2video",
-            icon: Clapperboard,
-            label: "图生视频",
-            desc: "",
-            color: "text-cyan-300",
-            bg: "bg-cyan-500/10",
-            onClick: () => createLocalImg2VideoTemplate(),
           },
         ],
       },
