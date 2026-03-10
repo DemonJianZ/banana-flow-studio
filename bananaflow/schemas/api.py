@@ -159,7 +159,6 @@ class AgentVideoGenerationResponse(BaseModel):
     shots_failed: int = 0
     artifacts: List[AgentVideoShotArtifact] = Field(default_factory=list)
 
-
 class VideoUpscaleTaskStartResponse(BaseModel):
     task_id: str
     status: str

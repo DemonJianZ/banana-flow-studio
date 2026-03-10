@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { useNavigate, Link } from "../router";
+import { useNavigate } from "../router";
 import { Zap, Shield, Mail, Lock, Loader2, CheckCircle2 } from "lucide-react";
 import { useAuth } from "../auth/AuthProvider";
 import LoginFlowDemo from "../components/LoginFlowDemo";
@@ -246,17 +246,9 @@ export default function AuthPage({ mode = "login" }) {
               </button>
             </form>
 
-            {/* Switch link (route-driven) */}
+            {/* Account apply notice */}
             <div className="mt-8 text-center">
-              <p className="text-sm text-slate-500">
-                {isLogin ? "还没有账号？" : "已经拥有账号？"}
-                <Link
-                  to={isLogin ? "/register" : "/login"}
-                  className="ml-2 text-purple-400 font-semibold hover:text-purple-300 transition-colors underline-offset-4 hover:underline"
-                >
-                  {isLogin ? "立即注册" : "去登录"}
-                </Link>
-              </p>
+              <p className="text-sm text-slate-400">账号申请请联系数字技术部@姚容</p>
             </div>
           </div>
 

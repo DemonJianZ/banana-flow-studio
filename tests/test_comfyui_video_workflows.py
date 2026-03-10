@@ -95,6 +95,44 @@ class ComfyUiVideoWorkflowTests(unittest.TestCase):
         self.assertEqual(sent_workflow["85"]["inputs"]["noise_seed"], 123)
         self.assertEqual(sent_workflow["108"]["inputs"]["filename_prefix"], "video_pipeline/req_2/clip_s01")
 
+    def test_run_qwen_i2v_workflow_should_fill_nodes_and_return_video(self):
+        workflow = {
+            "97": {"inputs": {"image": ""}},
+            "93": {"inputs": {"text": ""}},
+            "98": {"inputs": {"width": 640, "height": 640, "length": 81}},
+            "94": {"inputs": {"fps": 16}},
+            "108": {"inputs": {"filename_prefix": "video/ComfyUI"}},
+        }
+        with (
+            mock.patch.object(comfyui, "_load_workflow", return_value=copy.deepcopy(workflow)),
+            mock.patch.object(comfyui, "_upload_image", return_value="uploaded_qwen_input.png"),
+            mock.patch.object(comfyui, "_queue_prompt", return_value="prompt_qwen") as mock_queue_prompt,
+            mock.patch.object(comfyui, "_wait_for_history", return_value={"outputs": {}}),
+            mock.patch.object(comfyui, "_pick_output_file", return_value={"filename": "qwen_clip.mp4"}),
+            mock.patch.object(comfyui, "_download_file", return_value=b"qwen_video_bytes"),
+        ):
+            video_bytes, mime_type = comfyui.run_qwen_i2v_workflow(
+                req_id="req_qwen",
+                image_bytes=b"fake_png_bytes",
+                positive_prompt="product rotates slowly",
+                width=720,
+                height=1280,
+                length=121,
+                fps=24,
+                filename_prefix="video_pipeline/req_qwen/clip_s01",
+            )
+
+        self.assertEqual(video_bytes, b"qwen_video_bytes")
+        self.assertEqual(mime_type, "video/mp4")
+        sent_workflow = mock_queue_prompt.call_args[0][0]
+        self.assertEqual(sent_workflow["97"]["inputs"]["image"], "uploaded_qwen_input.png")
+        self.assertEqual(sent_workflow["93"]["inputs"]["text"], "product rotates slowly")
+        self.assertEqual(sent_workflow["98"]["inputs"]["width"], 720)
+        self.assertEqual(sent_workflow["98"]["inputs"]["height"], 1280)
+        self.assertEqual(sent_workflow["98"]["inputs"]["length"], 121)
+        self.assertEqual(sent_workflow["94"]["inputs"]["fps"], 24)
+        self.assertEqual(sent_workflow["108"]["inputs"]["filename_prefix"], "video_pipeline/req_qwen/clip_s01")
+
     def test_run_video_upscale_workflow_should_detect_load_and_save_nodes_by_class(self):
         workflow = {
             "10": {"inputs": {"resolution": 1440, "batch_size": 1}, "class_type": "SeedVR2VideoUpscaler"},

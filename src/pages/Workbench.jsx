@@ -306,6 +306,16 @@ const TOOL_CARDS = {
     category: "generate",
     refRequired: false,
   },
+  local_text2img: {
+    id: "local_text2img",
+    name: "本地文生图",
+    short: "本地文生图",
+    icon: Server,
+    desc: "调用 ComfyUI image_z_image_turbo 工作流",
+    scenario: "本地推理 / 低延迟",
+    category: "generate",
+    refRequired: false,
+  },
   multi_image_generate: {
     id: "multi_image_generate",
     name: "图生图 (Img2Img)",
@@ -388,6 +398,17 @@ const TOOL_CARDS = {
     category: "video",
     refRequired: false,
   },
+  local_img2video: {
+    id: "local_img2video",
+    name: "本地图生视频",
+    short: "本地图生视频",
+    icon: Server,
+    desc: "调用 ComfyUI Qwen_i2v 工作流",
+    scenario: "本地视频生成",
+    refLabel: "输入图像",
+    category: "video",
+    refRequired: false,
+  },
 };
 
 const FEATURE_EXTRACT_PRESET_PROMPTS = {
@@ -410,6 +431,9 @@ const MULTI_ANGLE_VARIANTS = [
 const getProcessorModeDefaults = (mode) => {
   if (mode === "text2img") {
     return { mode, prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1" } };
+  }
+  if (mode === "local_text2img") {
+    return { mode, prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1" }, model: "comfyui-image-z-image-turbo" };
   }
   if (mode === "multi_image_generate") {
     return { mode, prompt: "", templates: { size: "1024x1024", note: "" } };
@@ -456,6 +480,11 @@ const PROMPT_TEMPLATES = {
   img2video: {
     categories: [
       { name: "画幅比例", key: "ratio", options: ["16:9", "9:16", "3:4", "21:9", "adaptive"] },
+    ],
+  },
+  local_img2video: {
+    categories: [
+      { name: "画幅比例", key: "ratio", options: ["1:1", "16:9", "9:16", "4:3", "3:4"] },
     ],
   },
 };
@@ -523,9 +552,9 @@ const checkNodeReady = (node, nodes, connections) => {
   const hasLocalImages = (node.data.uploadedImages?.length || 0) > 0;
   const hasInternalPrompt = node.data.prompt && node.data.prompt.length > 0;
 
-  if (node.data.mode === "text2img") return hasUpstreamText || hasInternalPrompt;
+  if (node.data.mode === "text2img" || node.data.mode === "local_text2img") return hasUpstreamText || hasInternalPrompt;
   if (node.data.mode === "multi_image_generate") return hasUpstreamImages || hasLocalImages;
-  if (node.data.mode === "img2video") return hasUpstreamImages;
+  if (node.data.mode === "img2video" || node.data.mode === "local_img2video") return hasUpstreamImages;
   return hasUpstreamImages;
 };
 
@@ -792,9 +821,11 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
     return false;
   });
 
-  const promptModes = ["text2img", "multi_image_generate", "feature_extract"];
+  const promptModes = ["text2img", "local_text2img", "multi_image_generate", "feature_extract", "local_img2video"];
   const isSkillProcessor = isProcessor && currentMode.category === "skill";
   const isMultiAnglesSkill = node.data.mode === "multi_angleshots";
+  const isLocalText2Img = node.data.mode === "local_text2img";
+  const isLocalImg2Video = node.data.mode === "local_img2video";
 
   const handleRefUpload = (e) => {
     const file = e.target.files?.[0];
@@ -912,7 +943,7 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
           </div>
         )}
 
-{isVideoGen && (
+{isVideoGen && !isLocalImg2Video && (
   <div className="space-y-1">
     <div className="flex justify-between items-center">
       <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">尾帧参考图</div>
@@ -1004,7 +1035,7 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
 
           {showAdvanced && (
             <div className="space-y-4 animate-in slide-in-from-top-2 duration-200">
-              {((isProcessor && !isSkillProcessor) || isPostProcessor) && (
+              {((isProcessor && !isSkillProcessor && !isLocalText2Img) || isPostProcessor) && (
             <div className="space-y-2">
               <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center justify-between">
                 <span className="flex items-center gap-1">
@@ -1035,7 +1066,7 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
             </div>
           )}
 
-          {isVideoGen && (
+          {isVideoGen && !isLocalImg2Video && (
             <div className="space-y-2">
               <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center justify-between">
                 <span className="flex items-center gap-1">
@@ -1108,7 +1139,21 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
   <div className="space-y-2">
     <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">视频时长 (秒)</div>
 
-    {node.data.model === VIDEO_MODEL_1_5 ? (
+    {isLocalImg2Video ? (
+      <input
+        type="number"
+        min={1}
+        max={20}
+        step={1}
+        value={parseInt(String(node.data.templates?.duration ?? 5), 10)}
+        onChange={(e) => {
+          const v = parseInt(e.target.value, 10);
+          const clamped = Math.min(20, Math.max(1, isNaN(v) ? 5 : v));
+          updateData(node.id, { templates: { ...(node.data.templates || {}), duration: clamped } });
+        }}
+        className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-200 outline-none"
+      />
+    ) : node.data.model === VIDEO_MODEL_1_5 ? (
       <input
         type="number"
         min={4}
@@ -1144,13 +1189,14 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
     )}
   </div>
 )}
-{isVideoGen && (
+          {isVideoGen && (
   <div className="space-y-2">
     <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">分辨率</div>
 
     <div className="grid grid-cols-3 gap-2">
-      {(node.data.model === VIDEO_MODEL_1_5 ? ["480p", "720p"] : ["480p", "720p", "1080p"]).map((r) => {
-        const isSel = (node.data.templates?.resolution || "1080p") === r;
+      {(isLocalImg2Video ? ["480p", "720p"] : node.data.model === VIDEO_MODEL_1_5 ? ["480p", "720p"] : ["480p", "720p", "1080p"]).map((r) => {
+        const fallbackResolution = isLocalImg2Video ? "480p" : "1080p";
+        const isSel = (node.data.templates?.resolution || fallbackResolution) === r;
         const label = r.toUpperCase(); // 480P/720P/1080P
         return (
           <button
@@ -1234,6 +1280,7 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
           {/* Size & Ratio */}
           {isProcessor &&
             (node.data.mode === "text2img" ||
+              node.data.mode === "local_text2img" ||
               node.data.mode === "multi_image_generate" ||
               node.data.mode === "feature_extract" ||
               node.data.mode === "rmbg") && (
@@ -1241,7 +1288,7 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
               <div>
                 <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">尺寸 (Size)</div>
                 <div className="grid grid-cols-3 gap-1.5">
-                  {["1k", "2k", "4k"].map((opt) => {
+                  {(node.data.mode === "local_text2img" ? ["1k", "2k"] : ["1k", "2k", "4k"]).map((opt) => {
                     let value = opt;
                     if (opt === "1k") value = "1024x1024";
                     const isSelected = node.data.templates?.size === value || (!node.data.templates?.size && opt === "1k");
@@ -1456,7 +1503,7 @@ const NodeComponent = ({
   if (isOutput) title = node.data.angleLabel ? `${node.data.angleLabel} 输出 (${node.data.images?.length || 0})` : `输出 (${node.data.images?.length || 0})`;
   if (isProcessor) title = TOOL_CARDS[node.data.mode]?.name || "图片生成";
   if (isPostProcessor) title = TOOL_CARDS[node.data.mode]?.name || "后期增强";
-  if (isVideoGen) title = "视频生成";
+  if (isVideoGen) title = TOOL_CARDS[node.data.mode]?.name || "视频生成";
   if (node.type === NODE_TYPES.TEXT_INPUT) title = "Prompt";
 
   const getThemeColor = () => {
@@ -1670,7 +1717,7 @@ const NodeComponent = ({
               </button>
             )}
             {/* ✅ 文生图后：一键续上图生图分支 */}
-            {node.data.status === "success" && isProcessor && node.data.mode === "text2img" && (
+            {node.data.status === "success" && isProcessor && (node.data.mode === "text2img" || node.data.mode === "local_text2img") && (
               <button
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
@@ -2476,7 +2523,7 @@ const handleNodeMouseDown = (e, nid) => {
         uploadedImages: [],
         status: "idle",
         refImage: null,
-        model: "gemini-3-pro-image-preview",
+        model: getProcessorModeDefaults(modePreset || "multi_image_generate").model || "gemini-3-pro-image-preview",
       },
       [NODE_TYPES.POST_PROCESSOR]: {
         mode: "relight",
@@ -2488,13 +2535,16 @@ const handleNodeMouseDown = (e, nid) => {
         model: "gemini-3-pro-image-preview",
       },
       [NODE_TYPES.VIDEO_GEN]: {
-        mode: "img2video",
+        mode: modePreset === "local_img2video" ? "local_img2video" : "img2video",
         prompt: "",
-        templates: { motion: "", camera: "", duration: 5, resolution: "1080p", ratio: "16:9", note: "" ,generate_audio_new: true,},
+        templates:
+          modePreset === "local_img2video"
+            ? { duration: 5, resolution: "480p", ratio: "1:1", note: "" }
+            : { motion: "", camera: "", duration: 5, resolution: "1080p", ratio: "16:9", note: "", generate_audio_new: true },
         batchSize: 1,
         status: "idle",
         refImage: null,
-        model: VIDEO_MODEL_1_0, // ✅ 默认 1.0
+        model: modePreset === "local_img2video" ? "comfyui-qwen-i2v" : VIDEO_MODEL_1_0,
       },
       [NODE_TYPES.OUTPUT]: { images: [] },
     };
@@ -2551,6 +2601,61 @@ const handleNodeMouseDown = (e, nid) => {
     pushHistory();
     const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 200, data: { images: [] } };
     const n2 = { id: generateId(), type: NODE_TYPES.VIDEO_GEN, x: 500, y: 200, data: { mode: "img2video",model: VIDEO_MODEL_1_0, prompt: "", templates: { motion: "标准(Standard)", camera: "推近(Zoom In)", duration: 5, resolution: "1080p", ratio: "16:9", note: "" ,generate_audio_new: true,}, batchSize: 1, status: "idle", refImage: null } };
+    const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
+    setNodes([n1, n2, n3]);
+    setConnections([
+      { id: generateId(), from: n1.id, to: n2.id },
+      { id: generateId(), from: n2.id, to: n3.id },
+    ]);
+    setViewport({ x: 0, y: 0, zoom: 1 });
+  };
+
+  const createLocalText2ImgTemplate = () => {
+    pushHistory();
+    const n1 = { id: generateId(), type: NODE_TYPES.TEXT_INPUT, x: 100, y: 200, data: { text: "极简电商海报风格，主体居中，光线干净，细节清晰" } };
+    const n2 = {
+      id: generateId(),
+      type: NODE_TYPES.PROCESSOR,
+      x: 500,
+      y: 200,
+      data: {
+        mode: "local_text2img",
+        prompt: "",
+        templates: { size: "1024x1024", aspect_ratio: "1:1" },
+        batchSize: 1,
+        uploadedImages: [],
+        status: "idle",
+        refImage: null,
+        model: "comfyui-image-z-image-turbo",
+      },
+    };
+    const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
+    setNodes([n1, n2, n3]);
+    setConnections([
+      { id: generateId(), from: n1.id, to: n2.id },
+      { id: generateId(), from: n2.id, to: n3.id },
+    ]);
+    setViewport({ x: 0, y: 0, zoom: 1 });
+  };
+
+  const createLocalImg2VideoTemplate = () => {
+    pushHistory();
+    const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 200, data: { images: [] } };
+    const n2 = {
+      id: generateId(),
+      type: NODE_TYPES.VIDEO_GEN,
+      x: 500,
+      y: 200,
+      data: {
+        mode: "local_img2video",
+        model: "comfyui-qwen-i2v",
+        prompt: "natural motion",
+        templates: { duration: 5, resolution: "480p", ratio: "1:1", note: "" },
+        batchSize: 1,
+        status: "idle",
+        refImage: null,
+      },
+    };
     const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
     setNodes([n1, n2, n3]);
     setConnections([
@@ -4278,7 +4383,10 @@ const createConnectedImg2ImgBranch = useCallback(
         });
         sourceText = sourceText.trim();
 
-        const needsSingle = procNode.data.mode === "multi_image_generate" || procNode.data.mode === "text2img";
+        const needsSingle =
+          procNode.data.mode === "multi_image_generate" ||
+          procNode.data.mode === "text2img" ||
+          procNode.data.mode === "local_text2img";
         const effectiveInputCount = needsSingle ? 1 : inputImages.length;
 
         if (effectiveInputCount === 0 && !needsSingle) {
@@ -4296,11 +4404,11 @@ const createConnectedImg2ImgBranch = useCallback(
             try {
               let resultUrl = null;
 
-              if (procNode.data.mode === "text2img") {
+              if (procNode.data.mode === "text2img" || procNode.data.mode === "local_text2img") {
                 const promptToUse = sourceText || procNode.data.prompt;
                 if (!promptToUse?.trim()) throw new Error("缺少输入文本提示词");
 
-                const resp = await apiFetch(`/api/text2img`, {
+                const resp = await apiFetch(procNode.data.mode === "local_text2img" ? `/api/local/text2img` : `/api/text2img`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({
@@ -4313,7 +4421,11 @@ const createConnectedImg2ImgBranch = useCallback(
                 const data = await resp.json();
                 if (!resp.ok) throw new Error(extractApiError(data));
                 if (data.images?.length > 0) resultUrl = data.images[0];
-              } else if (procNode.type === NODE_TYPES.VIDEO_GEN || procNode.data.mode === "img2video") {
+              } else if (
+                procNode.type === NODE_TYPES.VIDEO_GEN ||
+                procNode.data.mode === "img2video" ||
+                procNode.data.mode === "local_img2video"
+              ) {
                 const rawDuration = procNode.data.templates?.duration || "5";
                 const durationInt = parseInt(String(rawDuration).replace(/[^0-9]/g, "")) || 5;
                 const isCameraFixed = procNode.data.templates?.camera?.includes("固定") || false;
@@ -4332,7 +4444,7 @@ const createConnectedImg2ImgBranch = useCallback(
                   seed: 21,
                 };
 
-                const resp = await apiFetch(`/api/img2video`, {
+                const resp = await apiFetch(procNode.data.mode === "local_img2video" ? `/api/local/img2video` : `/api/img2video`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify(payload),
@@ -4668,6 +4780,24 @@ const createConnectedImg2ImgBranch = useCallback(
         key: "learning",
         title: "AI深度学习",
         items: [
+          {
+            id: "workflow_local_text2img",
+            icon: Server,
+            label: "本地：文生图",
+            desc: "image_z_image_turbo 工作流",
+            color: "text-emerald-300",
+            bg: "bg-emerald-500/10",
+            onClick: () => createLocalText2ImgTemplate(),
+          },
+          {
+            id: "workflow_local_img2video",
+            icon: Server,
+            label: "本地：图生视频",
+            desc: "Qwen_i2v 工作流",
+            color: "text-sky-300",
+            bg: "bg-sky-500/10",
+            onClick: () => createLocalImg2VideoTemplate(),
+          },
           {
             id: "workflow_pose_control",
             icon: Film,

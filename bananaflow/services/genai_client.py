@@ -3,7 +3,7 @@ from google import genai
 try:
     from ..core.config import API_KEY, PROJECT_ID, LOCATION, MODEL_GEMINI
     from ..core.logging import sys_logger
-except Exception:  # pragma: no cover - 兼容 python bananaflow/main.py 直跑
+except Exception:  # pragma: no cover - compatible with direct python bananaflow/main.py runs
     from core.config import API_KEY, PROJECT_ID, LOCATION, MODEL_GEMINI
     from core.logging import sys_logger
 
@@ -26,17 +26,18 @@ def init_client():
 def get_client():
     return init_client()
 
-def call_genai_retry(contents, config, req_id: str, retries=2, model: str = MODEL_GEMINI):
+def call_genai_retry(contents, config, req_id: str, retries=2, model=None):
     client = get_client()
     if client is None:
         raise RuntimeError("AI client not initialized")
 
+    target_model = model or MODEL_GEMINI
     last_err = None
     for i in range(retries):
         try:
-            return client.models.generate_content(model=model or MODEL_GEMINI, contents=contents, config=config)
+            return client.models.generate_content(model=target_model, contents=contents, config=config)
         except Exception as e:
             last_err = e
-            sys_logger.warning(f"[{req_id}] Gemini Retry {i+1}/{retries} failed (model={model}): {e}")
+            sys_logger.warning(f"[{req_id}] Gemini Retry {i+1}/{retries} failed: {e}")
             time.sleep(1 * (i + 1))
     raise RuntimeError(f"Gemini AI Service Failed: {last_err}")

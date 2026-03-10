@@ -21,6 +21,8 @@ MODEL_COMFYUI_RMBG = "comfyui-rmbg"
 MODEL_COMFYUI_MULTI_ANGLESHOTS = "comfyui-multi-angleshots"
 MODEL_COMFYUI_VIDEO_UPSCALE = "comfyui-video-upscale"
 MODEL_COMFYUI_CONTROLNET = "comfyui-controlnet"
+MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO = "comfyui-image-z-image-turbo"
+MODEL_COMFYUI_QWEN_I2V = "comfyui-qwen-i2v"
 
 ARK_VIDEO_API_URL = "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks"
 ARK_VIDEO_MODEL_ID = "ep-20250708120248-4w7w5"
@@ -30,7 +32,9 @@ ARK_VIDEO_MODEL_ID_NEW = "ep-20251225103241-gkccd"
 VIDEO_MODEL_1_0 = "Doubao-Seedance-1.0-pro"
 VIDEO_MODEL_1_5 = "Doubao-Seedance-1.5-pro"
 
-BASE_DIR = os.getcwd()
+CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
+PACKAGE_DIR = os.path.dirname(CONFIG_DIR)
+BASE_DIR = os.path.dirname(PACKAGE_DIR)
 COMFYUI_URL = os.getenv("COMFYUI_URL", "http://192.168.20.30:8188").rstrip("/")
 _default_overlaytext = os.path.join(BASE_DIR, "workflows", "textoverlay.json")
 if not os.path.exists(_default_overlaytext):
@@ -104,6 +108,11 @@ _default_video_wan_i2v = os.path.join(BASE_DIR, "workflows", "video_wan2_2_14B_i
 if not os.path.exists(_default_video_wan_i2v):
     _default_video_wan_i2v = os.path.join(BASE_DIR, "bananaflow", "workflows", "video_wan2_2_14B_i2v.json")
 COMFYUI_VIDEO_WAN_I2V_PATH = os.getenv("COMFYUI_VIDEO_WAN_I2V_PATH", _default_video_wan_i2v)
+
+_default_video_qwen_i2v = os.path.join(BASE_DIR, "workflows", "Qwen_i2v.json")
+if not os.path.exists(_default_video_qwen_i2v):
+    _default_video_qwen_i2v = os.path.join(BASE_DIR, "bananaflow", "workflows", "Qwen_i2v.json")
+COMFYUI_VIDEO_QWEN_I2V_PATH = os.getenv("COMFYUI_VIDEO_QWEN_I2V_PATH", _default_video_qwen_i2v)
 
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 DEBUG_DIR = os.path.join(BASE_DIR, "debug_output")

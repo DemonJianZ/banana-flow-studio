@@ -23,6 +23,8 @@ from core.config import (
     MODEL_COMFYUI_MULTI_ANGLESHOTS,
     MODEL_COMFYUI_VIDEO_UPSCALE,
     MODEL_COMFYUI_CONTROLNET,
+    MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO,
+    MODEL_COMFYUI_QWEN_I2V,
 )
 from core.logging import sys_logger
 from auth_routes import get_current_user
@@ -47,15 +49,18 @@ from services.genai_client import call_genai_retry
 from services.ark import call_doubao_image_gen
 from services.ark_video import generate_video_from_image, VideoGenError
 from services.comfyui import (
+    run_image_z_image_turbo_workflow,
     run_overlaytext_workflow,
     run_rmbg_workflow,
     run_multi_angleshots_workflow,
+    run_qwen_i2v_workflow,
     run_controlnet_pose_video_workflow,
     run_video_upscale_workflow,
 )
 from services.video_generation_pipeline import run_e2e_video_workflow
 
 from utils.images import parse_data_url, bytes_to_data_url, get_image_from_response
+from utils.size import calculate_target_resolution
 from prompts.business import build_business_prompt
 
 from agent.idea_script.orchestrator import IdeaScriptOrchestrator
@@ -346,6 +351,42 @@ def _normalize_video_upscale_batch_size(value: Any) -> int:
     return max(1, parsed)
 
 
+def _parse_size_to_dimensions(size: Optional[str], aspect_ratio: Optional[str], *, default: tuple[int, int] = (1024, 1024)) -> tuple[int, int]:
+    target = str(calculate_target_resolution(size or "1024x1024", aspect_ratio or "1:1") or "").strip()
+    matched = re.match(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$", target)
+    if not matched:
+        return default
+    width = max(64, int(matched.group(1)))
+    height = max(64, int(matched.group(2)))
+    return width, height
+
+
+def _parse_local_i2v_dimensions(resolution: Optional[str], ratio: Optional[str]) -> tuple[int, int]:
+    text = str(resolution or "").strip().lower()
+    direct = re.match(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$", text)
+    if direct:
+        return min(1280, max(64, int(direct.group(1)))), min(1280, max(64, int(direct.group(2))))
+
+    p_match = re.match(r"^\s*(\d+)\s*p\s*$", text)
+    base = int(p_match.group(1)) if p_match else 640
+    base = min(720, max(64, base))
+
+    ratio_text = str(ratio or "").strip().lower()
+    ratio_match = re.match(r"^\s*(\d+)\s*:\s*(\d+)\s*$", ratio_text)
+    if not ratio_match:
+        return base, base
+
+    ratio_w = max(1, int(ratio_match.group(1)))
+    ratio_h = max(1, int(ratio_match.group(2)))
+    if ratio_w >= ratio_h:
+        height = base
+        width = max(64, int(round(base * ratio_w / ratio_h)))
+    else:
+        width = base
+        height = max(64, int(round(base * ratio_h / ratio_w)))
+    return width, height
+
+
 def _cache_edit_plans(plans: List[EditPlan]) -> None:
     with idea_script_plan_cache_lock:
         for plan in list(plans or []):
@@ -506,6 +547,119 @@ def multi_image_generate(req: MultiImageRequest, request: Request, current_user=
             req.model_dump(),
             req.prompt,
             {"temperature": req.temperature, "ar": req.aspect_ratio},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/local/text2img", response_model=Text2ImgResponse)
+def local_text_to_image(req: Text2ImgRequest, request: Request, current_user=Depends(get_current_user)):
+    req_id = request.state.req_id
+    t0 = time.time()
+    try:
+        width, height = _parse_size_to_dimensions(req.size, req.aspect_ratio, default=(1024, 1024))
+        if width > 2048 or height > 2048:
+            raise HTTPException(status_code=400, detail="本地文生图暂不支持 4K，仅支持 1K / 2K")
+        img_bytes = run_image_z_image_turbo_workflow(
+            req_id=req_id,
+            prompt=req.prompt,
+            width=width,
+            height=height,
+            filename_prefix=f"local/text2img-{req_id}",
+        )
+        if not img_bytes:
+            raise RuntimeError("No image returned")
+
+        output_data_url = bytes_to_data_url(img_bytes)
+        prompt_logger.log(
+            req_id,
+            "local_text2img",
+            req.model_dump(),
+            req.prompt,
+            {"model": MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO, "width": width, "height": height},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            output_full={"images": [output_data_url]},
+        )
+        record_usage(current_user["id"], MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO)
+        return Text2ImgResponse(images=[output_data_url])
+    except Exception as e:
+        sys_logger.error(f"[{req_id}] Local Text2Img Error: {e}")
+        prompt_logger.log(
+            req_id,
+            "local_text2img",
+            req.model_dump(),
+            req.prompt,
+            {"model": MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/local/img2video", response_model=Img2VideoResponse)
+def local_img_to_video(req: Img2VideoRequest, request: Request, current_user=Depends(get_current_user)):
+    req_id = request.state.req_id
+    t0 = time.time()
+    try:
+        if str(req.resolution or "").strip().lower() == "1080p":
+            raise HTTPException(status_code=400, detail="本地图生视频暂不支持 1080P，仅支持 480P / 720P")
+        _, image_bytes = parse_data_url(req.image)
+        fps = max(1, int(req.fps or 16))
+        duration = max(1, int(req.duration or 5))
+        length = max(1, min(321, duration * fps + 1))
+        width, height = _parse_local_i2v_dimensions(req.resolution, req.ratio)
+        video_bytes, mime_type = run_qwen_i2v_workflow(
+            req_id=req_id,
+            image_bytes=image_bytes,
+            positive_prompt=req.prompt or "natural motion",
+            width=width,
+            height=height,
+            length=length,
+            fps=fps,
+            seed=req.seed,
+            filename_prefix=f"local/qwen-i2v-{req_id}",
+        )
+        output_data_url = bytes_to_data_url(video_bytes, mime_type)
+        prompt_logger.log(
+            req_id,
+            "local_img2video",
+            req.model_dump(),
+            req.prompt or "",
+            {
+                "model": MODEL_COMFYUI_QWEN_I2V,
+                "width": width,
+                "height": height,
+                "fps": fps,
+                "length": length,
+                "resolution": req.resolution,
+                "ratio": req.ratio,
+            },
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=current_user["id"],
+            inputs_full=req.model_dump(),
+            output_full={"videos": [output_data_url]},
+        )
+        record_usage(current_user["id"], MODEL_COMFYUI_QWEN_I2V)
+        return Img2VideoResponse(image=output_data_url)
+    except Exception as e:
+        sys_logger.error(f"[{req_id}] Local Img2Video Error: {e}")
+        prompt_logger.log(
+            req_id,
+            "local_img2video",
+            req.model_dump(),
+            req.prompt or "",
+            {"model": MODEL_COMFYUI_QWEN_I2V},
             {"file": "mem"},
             time.time() - t0,
             user_id=current_user["id"],

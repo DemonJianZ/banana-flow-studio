@@ -23,6 +23,7 @@ from core.config import (
     COMFYUI_MULTI_ANGLESHOTS_PATH,
     COMFYUI_IMAGE_Z_IMAGE_TURBO_PATH,
     COMFYUI_VIDEO_WAN_I2V_PATH,
+    COMFYUI_VIDEO_QWEN_I2V_PATH,
     COMFYUI_UPSCALE_PATH,
     COMFYUI_CONTROLNET_PATH,
     COMFYUI_OUTPUT_NODE_ID,
@@ -1070,8 +1071,10 @@ def run_image_z_image_turbo_workflow(
     return _download_image(image_info)
 
 
-def run_video_wan_i2v_workflow(
+def _run_wan_style_i2v_workflow(
     *,
+    workflow_path: str,
+    workflow_label: str,
     req_id: str,
     image_bytes: bytes,
     positive_prompt: str,
@@ -1083,11 +1086,11 @@ def run_video_wan_i2v_workflow(
     seed: Optional[int] = None,
     filename_prefix: Optional[str] = None,
 ) -> tuple[bytes, str]:
-    workflow = _load_workflow(COMFYUI_VIDEO_WAN_I2V_PATH)
+    workflow = _load_workflow(workflow_path)
     workflow = copy.deepcopy(workflow)
 
-    image_upload_name = f"wan-i2v-{uuid.uuid4().hex}.png"
-    sys_logger.info(f"[{req_id}] Uploading image to ComfyUI for Wan i2v: {image_upload_name}")
+    image_upload_name = f"{workflow_label}-{uuid.uuid4().hex}.png"
+    sys_logger.info(f"[{req_id}] Uploading image to ComfyUI for {workflow_label}: {image_upload_name}")
     uploaded_image = _upload_image(image_bytes, image_upload_name)
 
     _set_node_input(workflow, "97", "image", uploaded_image)
@@ -1109,7 +1112,7 @@ def run_video_wan_i2v_workflow(
         _set_node_input(workflow, "108", "filename_prefix", str(filename_prefix))
 
     client_id = uuid.uuid4().hex
-    sys_logger.info(f"[{req_id}] ComfyUI Wan i2v queue prompt client_id={client_id}")
+    sys_logger.info(f"[{req_id}] ComfyUI {workflow_label} queue prompt client_id={client_id}")
     prompt_id = _queue_prompt(workflow, client_id)
     history = _wait_for_history(prompt_id, timeout_sec=COMFYUI_VIDEO_UPSCALE_TIMEOUT_SEC)
     output_info = _pick_output_file(history, preferred_node_ids=["108"])
@@ -1120,6 +1123,64 @@ def run_video_wan_i2v_workflow(
     if output_mime == "application/octet-stream":
         output_mime = "video/mp4"
     return output_bytes, output_mime
+
+
+def run_video_wan_i2v_workflow(
+    *,
+    req_id: str,
+    image_bytes: bytes,
+    positive_prompt: str,
+    negative_prompt: Optional[str] = None,
+    width: int = 640,
+    height: int = 640,
+    length: int = 81,
+    fps: int = 16,
+    seed: Optional[int] = None,
+    filename_prefix: Optional[str] = None,
+) -> tuple[bytes, str]:
+    return _run_wan_style_i2v_workflow(
+        workflow_path=COMFYUI_VIDEO_WAN_I2V_PATH,
+        workflow_label="wan-i2v",
+        req_id=req_id,
+        image_bytes=image_bytes,
+        positive_prompt=positive_prompt,
+        negative_prompt=negative_prompt,
+        width=width,
+        height=height,
+        length=length,
+        fps=fps,
+        seed=seed,
+        filename_prefix=filename_prefix,
+    )
+
+
+def run_qwen_i2v_workflow(
+    *,
+    req_id: str,
+    image_bytes: bytes,
+    positive_prompt: str,
+    negative_prompt: Optional[str] = None,
+    width: int = 640,
+    height: int = 640,
+    length: int = 81,
+    fps: int = 16,
+    seed: Optional[int] = None,
+    filename_prefix: Optional[str] = None,
+) -> tuple[bytes, str]:
+    return _run_wan_style_i2v_workflow(
+        workflow_path=COMFYUI_VIDEO_QWEN_I2V_PATH,
+        workflow_label="qwen-i2v",
+        req_id=req_id,
+        image_bytes=image_bytes,
+        positive_prompt=positive_prompt,
+        negative_prompt=negative_prompt,
+        width=width,
+        height=height,
+        length=length,
+        fps=fps,
+        seed=seed,
+        filename_prefix=filename_prefix,
+    )
 
 
 def run_controlnet_pose_video_workflow(

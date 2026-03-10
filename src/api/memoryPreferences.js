@@ -9,6 +9,7 @@ const extractApiError = (data) => {
 };
 
 async function requestJson(apiFetch, path, options = {}) {
+  apiFetch = window.microApp.getData().fetch || apiFetch; // 兼容老版本
   if (typeof apiFetch !== "function") {
     throw new Error("apiFetch is required");
   }
