@@ -12,6 +12,7 @@ BRANCH="dev"
 BACKEND_HOST="0.0.0.0"
 BACKEND_PORT="8083"
 NO_PROXY_BACKEND_HOST="192.168.20.30"
+FRONTEND_PORT="5174"
 
 ############################################
 # 2️⃣ 进入仓库目录
@@ -60,5 +61,8 @@ export no_proxy="$NO_PROXY"
 
 echo "🚀 Starting backend server..."
 echo "🌐 Backend: http://${BACKEND_HOST}:${BACKEND_PORT}"
-
-HOST="${BACKEND_HOST}" PORT="${BACKEND_PORT}" .venv/bin/python bananaflow/main.py
+DEFAULT_CORS_ORIGINS="http://test.dayukeji-inc.cn,http://${NO_PROXY_BACKEND_HOST}:${FRONTEND_PORT},http://localhost:${FRONTEND_PORT},http://127.0.0.1:${FRONTEND_PORT}"
+HOST="${BACKEND_HOST}" PORT="${BACKEND_PORT}" \
+BANANAFLOW_CORS_ALLOW_ORIGINS="${BANANAFLOW_CORS_ALLOW_ORIGINS:-$DEFAULT_CORS_ORIGINS}" \
+BANANAFLOW_CORS_ALLOW_CREDENTIALS="${BANANAFLOW_CORS_ALLOW_CREDENTIALS:-1}" \
+.venv/bin/python bananaflow/main.py

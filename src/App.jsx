@@ -1,6 +1,6 @@
 import React from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "./router";
-import { AuthProvider, useAuth } from "./auth/AuthProvider";
+import { AuthProvider } from "./auth/AuthProvider";
 import Workbench from "./pages/Workbench";
 import AuthPage from "./pages/AuthPage";
 import PipelineSwapTrio from "./pages/PipelineSwapTrio";
@@ -21,19 +21,9 @@ const LoadingScreen = () => (
   </div>
 );
 
-const ProtectedRoute = ({ children }) => {
-  const { user, token, loading } = useAuth();
-  if (loading) return <LoadingScreen />;
-  if (!token || !user) return <Navigate to="/login" replace />;
-  return children;
-};
+const ProtectedRoute = ({ children }) => children;
 
-const RootRedirect = () => {
-  const { user, token, loading } = useAuth();
-  if (loading) return <LoadingScreen />;
-  if (token && user) return <Navigate to="/app" replace />;
-  return <Navigate to="/login" replace />;
-};
+const RootRedirect = () => <Navigate to="/app" replace />;
 
 export default function App() {
   return (
@@ -41,8 +31,8 @@ export default function App() {
       <AuthProvider>
         <GlobalToast />
         <Routes>
-          <Route path="/login" element={<AuthPage mode="login" />} />
-          <Route path="/register" element={<AuthPage mode="register" />} />
+          <Route path="/login" element={<Navigate to="/app" replace />} />
+          <Route path="/register" element={<Navigate to="/app" replace />} />
           <Route
             path="/app"
             element={

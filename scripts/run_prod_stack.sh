@@ -121,9 +121,12 @@ stop_if_running() {
 start_backend() {
   stop_if_running "$BACKEND_PID_FILE"
   mkdir -p "$RUN_DIR"
+  local cors_origins
+  cors_origins="${BANANAFLOW_CORS_ALLOW_ORIGINS:-http://test.dayukeji-inc.cn,http://${DISPLAY_HOST}:${FRONTEND_PORT},http://localhost:${FRONTEND_PORT},http://127.0.0.1:${FRONTEND_PORT}}"
   (
     cd "$WORKTREE_ROOT/bananaflow"
     AUTH_DB_PATH="$AUTH_DB_PATH_VALUE" HOST="0.0.0.0" PORT="$BACKEND_PORT" WORKERS="1" \
+      BANANAFLOW_CORS_ALLOW_ORIGINS="$cors_origins" BANANAFLOW_CORS_ALLOW_CREDENTIALS="${BANANAFLOW_CORS_ALLOW_CREDENTIALS:-1}" \
       nohup "$WORKTREE_ROOT/.venv/bin/python" main.py >"$BACKEND_LOG" 2>&1 &
     echo $! >"$BACKEND_PID_FILE"
   )

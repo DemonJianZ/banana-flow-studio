@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export http_proxy="http://szdayu:123456@124.243.168.90:16607"
-export https_proxy="http://szdayu:123456@124.243.168.90:16607"
-INTERNAL_NO_PROXY="127.0.0.1,localhost,::1,0.0.0.0,192.168.20.30,192.168.20.30:8188,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
-export no_proxy="${no_proxy:+${no_proxy},}${INTERNAL_NO_PROXY}"
-export NO_PROXY="${NO_PROXY:+${NO_PROXY},}${INTERNAL_NO_PROXY}"
 
 BRANCH="dev"
 BACKEND_PORT="8083"
@@ -94,9 +89,12 @@ stop_if_running() {
 start_backend() {
   stop_if_running "$BACKEND_PID_FILE"
   mkdir -p "$RUN_DIR"
+  local cors_origins
+  cors_origins="${BANANAFLOW_CORS_ALLOW_ORIGINS:-http://test.dayukeji-inc.cn,http://${DISPLAY_HOST}:${FRONTEND_PORT},http://localhost:${FRONTEND_PORT},http://127.0.0.1:${FRONTEND_PORT}}"
   (
     cd "$WORKTREE_ROOT/bananaflow"
     AUTH_DB_PATH="$AUTH_DB_PATH_VALUE" HOST="0.0.0.0" PORT="$BACKEND_PORT" WORKERS="1" \
+      BANANAFLOW_CORS_ALLOW_ORIGINS="$cors_origins" BANANAFLOW_CORS_ALLOW_CREDENTIALS="${BANANAFLOW_CORS_ALLOW_CREDENTIALS:-1}" \
       nohup "$WORKTREE_ROOT/.venv/bin/python" main.py >"$BACKEND_LOG" 2>&1 &
     echo $! >"$BACKEND_PID_FILE"
   )

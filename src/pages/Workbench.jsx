@@ -19,9 +19,9 @@ import {
   Undo,
   Redo,
   Copy,
+  Clipboard,
   Hand,
   ShoppingBag,
-  CheckSquare,
   MessageSquare,
   AlertCircle,
   ChevronRight,
@@ -50,7 +50,6 @@ import {
   Link as LinkIcon,
   Server,
   Keyboard,
-  Clipboard,
   Activity,
   Layout,
   Send,
@@ -80,6 +79,8 @@ import {
   setPreference as setMemoryPreference,
 } from "../api/memoryPreferences";
 import { harvestEvalCase } from "../api/qualityFeedback";
+import { aiChatStream, viewAIChatModelParams, viewAIChatModels } from "../api/aiChat";
+import { viewMemberInfo } from "../api/memberInfo";
 import { detectIntent } from "../agent/router";
 import { detectPreferenceSuggestions } from "../agent/preferenceSuggestion";
 import { buildHitlFeedbackRows } from "../agent/hitlFeedbackHistory";
@@ -240,6 +241,260 @@ const saveAgentStore = (store) => {
   localStorage.setItem(AGENT_SESSION_STORE_KEY, JSON.stringify(store));
 };
 
+const resolveMemberDisplayName = (response) => {
+  const pickValue = (record) => {
+    if (typeof record === "string") return record.trim();
+    if (!record || typeof record !== "object") return "";
+    const value =
+      record.name ||
+      record.nickname ||
+      record.nick_name ||
+      record.real_name ||
+      record.user_name ||
+      record.username ||
+      record.member_name ||
+      record.email ||
+      record.mobile ||
+      record.phone;
+    return String(value || "").trim();
+  };
+
+  const directValue = pickValue(resolveMemberRecord(response));
+  if (directValue) return directValue;
+
+  const visited = new Set();
+  const queue = [response];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || typeof current !== "object" || Array.isArray(current) || visited.has(current)) {
+      continue;
+    }
+    visited.add(current);
+
+    const value = pickValue(current);
+    if (value) return value;
+
+    if (current.data && typeof current.data === "object") queue.push(current.data);
+    if (current.user && typeof current.user === "object") queue.push(current.user);
+    if (current.member && typeof current.member === "object") queue.push(current.member);
+    if (current.info && typeof current.info === "object") queue.push(current.info);
+  }
+
+  return "";
+};
+
+const resolveMemberRecord = (response) => {
+  const visited = new Set();
+  const queue = [response];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || typeof current !== "object" || Array.isArray(current) || visited.has(current)) {
+      continue;
+    }
+    visited.add(current);
+
+    const hasMemberFields =
+      current.name ||
+      current.nickname ||
+      current.nick_name ||
+      current.real_name ||
+      current.user_name ||
+      current.username ||
+      current.member_name ||
+      current.avatar ||
+      current.avatar_url ||
+      current.head_img ||
+      current.headimgurl ||
+      current.photo ||
+      current.point !== undefined ||
+      current.total_point !== undefined ||
+      current.totalPoint !== undefined;
+
+    if (hasMemberFields) return current;
+
+    if (current.data && typeof current.data === "object") queue.push(current.data);
+    if (current.user && typeof current.user === "object") queue.push(current.user);
+    if (current.member && typeof current.member === "object") queue.push(current.member);
+    if (current.info && typeof current.info === "object") queue.push(current.info);
+  }
+
+  return null;
+};
+
+const resolveMemberAvatar = (response) => {
+  const record = resolveMemberRecord(response);
+  const value = record?.avatar || record?.avatar_url || record?.head_img || record?.headimgurl || record?.photo;
+  return typeof value === "string" ? value.trim() : "";
+};
+
+const resolveMemberPoints = (response, fieldNames) => {
+  const record = resolveMemberRecord(response);
+  if (!record) return null;
+
+  for (const fieldName of fieldNames) {
+    const value = record[fieldName];
+    const numericValue = Number(value);
+    if (Number.isFinite(numericValue)) {
+      return numericValue;
+    }
+  }
+
+  return null;
+};
+
+const formatMemberPoints = (value) => {
+  if (!Number.isFinite(value)) return "--";
+  return new Intl.NumberFormat("zh-CN").format(value);
+};
+
+const formatDebugTime = (timestamp) => {
+  if (!timestamp) return "--";
+  try {
+    return new Date(timestamp).toLocaleTimeString("zh-CN", { hour12: false });
+  } catch {
+    return "--";
+  }
+};
+
+const API_DEBUG_STATUS_LABEL = {
+  idle: "待执行",
+  loading: "请求中",
+  success: "成功",
+  error: "失败",
+  timeout: "超时",
+  login_required: "需登录",
+};
+
+const formatAIChatErrorMessage = (error) => {
+  const messageCandidates = [
+    error?.message,
+    error?.data?.message,
+    error?.data?.detail,
+    error?.data?.errMsg,
+    error?.data?.data?.message,
+  ];
+  const baseMessage = messageCandidates.find(
+    (value) => typeof value === "string" && value.trim(),
+  );
+  const parts = [];
+  if (baseMessage) parts.push(baseMessage.trim());
+  if (error?.status !== undefined && error?.status !== null) parts.push(`status=${error.status}`);
+  if (error?.errNo !== undefined && error?.errNo !== null) parts.push(`err_no=${error.errNo}`);
+  if (error?.source) parts.push(`source=${error.source}`);
+  if (error?.path) parts.push(`path=${error.path}`);
+  if (parts.length > 0) return parts.join(" | ");
+  return "未知错误（无错误信息）";
+};
+
+const IMAGE_URL_PATTERN = /(https?:\/\/[^\s"'<>]+?\.(?:png|jpe?g|webp|gif|bmp|svg)(?:\?[^\s"'<>]*)?)/i;
+const URL_PATTERN = /(https?:\/\/[^\s"'<>]+)/i;
+const RELATIVE_IMAGE_PATH_PATTERN = /(\/[^\s"'<>]+?\.(?:png|jpe?g|webp|gif|bmp|svg)(?:\?[^\s"'<>]*)?)/i;
+const MARKDOWN_IMAGE_PATTERN = /!\[[^\]]*?\]\(([^)]+)\)/i;
+
+const isLikelyImageUrl = (value) => {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  if (text.startsWith("data:image/")) return true;
+  if (text.startsWith("blob:")) return true;
+  if (text.startsWith("http://") || text.startsWith("https://")) return true;
+  if (text.startsWith("/") && RELATIVE_IMAGE_PATH_PATTERN.test(text)) return true;
+  return IMAGE_URL_PATTERN.test(text);
+};
+
+const pickFirstImageUrl = (payload) => {
+  if (!payload) return "";
+  if (typeof payload === "string") {
+    const text = payload.trim();
+    if (!text) return "";
+    if (isLikelyImageUrl(text)) return text;
+    const markdownImage = text.match(MARKDOWN_IMAGE_PATTERN)?.[1];
+    if (markdownImage && isLikelyImageUrl(markdownImage)) return markdownImage.trim();
+    if ((text.startsWith("{") && text.endsWith("}")) || (text.startsWith("[") && text.endsWith("]"))) {
+      try {
+        const parsed = JSON.parse(text);
+        const nested = pickFirstImageUrl(parsed);
+        if (nested) return nested;
+      } catch {
+        // ignore invalid JSON string
+      }
+    }
+    const matched = text.match(IMAGE_URL_PATTERN);
+    return matched?.[1] || "";
+  }
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const found = pickFirstImageUrl(item);
+      if (found) return found;
+    }
+    return "";
+  }
+  if (typeof payload !== "object") return "";
+
+  const directKeys = [
+    "image",
+    "image_url",
+    "imageUrl",
+    "image_uri",
+    "imageUri",
+    "image_path",
+    "imagePath",
+    "url",
+    "uri",
+    "src",
+    "path",
+    "file_url",
+    "download_url",
+    "cdn_url",
+    "oss_url",
+    "origin_url",
+    "output",
+    "result",
+  ];
+  for (const key of directKeys) {
+    const found = pickFirstImageUrl(payload[key]);
+    if (found) return found;
+  }
+
+  const listKeys = ["images", "image_list", "image_urls", "outputs", "results", "attachments", "files", "data", "list", "items"];
+  for (const key of listKeys) {
+    const found = pickFirstImageUrl(payload[key]);
+    if (found) return found;
+  }
+
+  for (const value of Object.values(payload)) {
+    const found = pickFirstImageUrl(value);
+    if (found) return found;
+  }
+  return "";
+};
+
+const summarizeAIChatResponse = (resp) => {
+  try {
+    const raw = JSON.stringify(resp || {});
+    if (!raw) return "";
+    return raw.length > 240 ? `${raw.slice(0, 240)}...` : raw;
+  } catch {
+    const text = String(resp || "");
+    return text.length > 240 ? `${text.slice(0, 240)}...` : text;
+  }
+};
+
+const extractAIChatDoneError = (resp) => {
+  // If the stream already yielded a usable image URL, prefer the result and
+  // ignore terminal errMsg noise from the upstream SSE protocol.
+  if (pickFirstImageUrl(resp)) return "";
+  const events = Array.isArray(resp?.events) ? resp.events : EMPTY_LIST;
+  for (const event of events) {
+    if (!event || typeof event !== "object") continue;
+    const isDone = event.finish === true || String(event.event || "").toLowerCase() === "done";
+    const errMsg = String(event.errMsg || event.error || event.message || "").trim();
+    if (isDone && errMsg) return errMsg;
+  }
+  return "";
+};
+
 const NODE_TYPES = {
   INPUT: "input",
   TEXT_INPUT: "text_input",
@@ -249,18 +504,211 @@ const NODE_TYPES = {
   OUTPUT: "output",
 };
 
-const AI_MODELS = [
+const AI_CHAT_PART_ENUM_1 = 1;
+const AI_CHAT_PART_ENUM_2 = 2;
+const AI_CHAT_PART_ENUM_3 = 3;
+const AI_CHAT_PART_ENUM_4 = 4;
+const AI_CHAT_PART_ENUM_5 = 5;
+
+const DEFAULT_AI_MODELS = [
   { id: "gemini-3-pro-image-preview", name: "Gemini 3 Pro", vendor: "Google", icon: Sparkles },
   { id: "doubao-seedream-4.5", name: "Doubao 4.5", vendor: "ByteDance", icon: Zap },
 ];
 
-const VIDEO_MODELS = [
+const DEFAULT_VIDEO_MODELS = [
   { id: "Doubao-Seedance-1.0-pro", name: "Doubao Seedance 1.0 Pro", vendor: "ByteDance" },
   { id: "Doubao-Seedance-1.5-pro", name: "Doubao Seedance 1.5 Pro", vendor: "ByteDance" },
 ];
 
 const VIDEO_MODEL_1_0 = "Doubao-Seedance-1.0-pro";
 const VIDEO_MODEL_1_5 = "Doubao-Seedance-1.5-pro";
+const DEFAULT_IMAGE_MODEL_ID = DEFAULT_AI_MODELS[0].id;
+const DEFAULT_VIDEO_MODEL_ID = DEFAULT_VIDEO_MODELS[0].id;
+
+const pickModelField = (record, keys) => {
+  for (const key of keys) {
+    const value = record?.[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  }
+  return "";
+};
+
+const resolveAIChatModelVendor = (record) =>
+  pickModelField(record, [
+    "vendor",
+    "vendor_name",
+    "provider",
+    "provider_name",
+    "company",
+    "company_name",
+    "platform",
+    "platform_name",
+    "source",
+  ]);
+
+const resolveAIChatModelIcon = (record) => {
+  const vendor = resolveAIChatModelVendor(record).toLowerCase();
+  const modelId = pickModelField(record, ["model", "model_id", "ai_chat_model", "ai_chat_model_id", "id"]).toLowerCase();
+  if (vendor.includes("google") || modelId.includes("gemini")) return Sparkles;
+  if (vendor.includes("byte") || vendor.includes("doubao") || modelId.includes("doubao") || modelId.includes("seed")) {
+    return Zap;
+  }
+  return Cpu;
+};
+
+const normalizeAIChatModelOption = (record, fallback = {}) => {
+  if (typeof record === "string") {
+    const value = record.trim();
+    return value ? { id: value, name: value, vendor: fallback.vendor || "", icon: fallback.icon || Cpu } : null;
+  }
+  if (!record || typeof record !== "object") return null;
+
+  const id = pickModelField(record, [
+    "model",
+    "model_id",
+    "ai_chat_model",
+    "ai_chat_model_id",
+    "id",
+    "value",
+    "code",
+  ]);
+  const name = pickModelField(record, [
+    "ai_model_name",
+    "model_name",
+    "ai_chat_model_name",
+    "name",
+    "label",
+    "title",
+    "text",
+    "desc",
+  ]);
+
+  if (!id && !name) return null;
+
+  return {
+    id: id || name,
+    name: name || id,
+    vendor: resolveAIChatModelVendor(record) || fallback.vendor || "",
+    icon: fallback.icon || resolveAIChatModelIcon(record),
+  };
+};
+
+const extractAIChatModelRecords = (payload) => {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== "object") return EMPTY_LIST;
+
+  const queue = [payload];
+  const visited = new Set();
+  const preferredKeys = ["list", "records", "items", "rows", "models", "model_list", "data", "result"];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || typeof current !== "object" || visited.has(current)) continue;
+    visited.add(current);
+
+    for (const key of preferredKeys) {
+      if (Array.isArray(current[key])) return current[key];
+    }
+
+    for (const value of Object.values(current)) {
+      if (Array.isArray(value)) return value;
+      if (value && typeof value === "object") queue.push(value);
+    }
+  }
+
+  return EMPTY_LIST;
+};
+
+const buildAIChatModelOptions = (payload, fallbackOptions) => {
+  const normalized = extractAIChatModelRecords(payload)
+    .map((item) => normalizeAIChatModelOption(item))
+    .filter(Boolean);
+
+  if (!normalized.length) return fallbackOptions;
+
+  const seen = new Set();
+  return normalized.filter((item) => {
+    if (!item?.id || seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+};
+
+const getDefaultImageModelId = (options) => {
+  const list = Array.isArray(options) ? options : EMPTY_LIST;
+  const preferred = list.find((item) => String(item?.id || "").trim() === "4");
+  return preferred?.id || list[0]?.id || DEFAULT_IMAGE_MODEL_ID;
+};
+const getDefaultLanguageModelId = (options) => options[0]?.id || "";
+const getDefaultVideoModelId = (options) => {
+  if (!Array.isArray(options) || options.length === 0) return DEFAULT_VIDEO_MODEL_ID;
+  return options.find((item) => item.id === VIDEO_MODEL_1_0)?.id || options[0].id;
+};
+
+const extractModelParamList = (payload) => {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== "object") return EMPTY_LIST;
+  const queue = [payload];
+  const visited = new Set();
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || typeof current !== "object" || visited.has(current)) continue;
+    visited.add(current);
+    if (Array.isArray(current.list)) return current.list;
+    for (const value of Object.values(current)) {
+      if (Array.isArray(value)) return value;
+      if (value && typeof value === "object") queue.push(value);
+    }
+  }
+  return EMPTY_LIST;
+};
+
+const sortParamValues = (values) => {
+  const list = Array.isArray(values) ? values.slice() : [];
+  list.sort((a, b) => {
+    const ai = Number(a?.order_index ?? Number.MAX_SAFE_INTEGER);
+    const bi = Number(b?.order_index ?? Number.MAX_SAFE_INTEGER);
+    return ai - bi;
+  });
+  return list;
+};
+
+const resolveDefaultParamValueId = (paramItem) => {
+  const first = sortParamValues(paramItem?.param_values || [])[0];
+  const valueId = first?.param_value_id;
+  if (valueId === undefined || valueId === null || valueId === "") return "";
+  return String(valueId);
+};
+
+const buildAIChatParamPayload = (paramList) => {
+  const payload = {};
+  for (const item of paramList) {
+    const valueId = resolveDefaultParamValueId(item);
+    if (!valueId) continue;
+    const name = String(item?.param_name || "").toLowerCase();
+    if (name.includes("任务") || name.includes("task") || name.includes("类型")) {
+      payload.ai_image_param_task_type_id = valueId;
+      continue;
+    }
+    if (name.includes("尺寸") || name.includes("size")) {
+      payload.ai_image_param_size_id = valueId;
+      continue;
+    }
+    if (name.includes("分辨率") || name.includes("resolution")) {
+      payload.ai_video_param_resolution_id = valueId;
+      continue;
+    }
+    if (name.includes("比例") || name.includes("ratio")) {
+      payload.ai_video_param_ratio_id = valueId;
+      continue;
+    }
+    if (name.includes("时长") || name.includes("duration")) {
+      payload.ai_video_param_duration_id = valueId;
+    }
+  }
+  return payload;
+};
 
 const TOOL_CARDS = {
   bg_replace: {
@@ -795,7 +1243,7 @@ const AgentResultCardContent = ({
 
 
 
-const PropertyPanel = ({ node, updateData, onClose }) => {
+const PropertyPanel = ({ node, updateData, onClose, imageModelOptions = EMPTY_LIST, videoModelOptions = EMPTY_LIST }) => {
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   if (!node || [NODE_TYPES.INPUT, NODE_TYPES.OUTPUT, NODE_TYPES.TEXT_INPUT].includes(node.type)) return null;
@@ -1044,7 +1492,7 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
               </div>
 
               <div className="grid grid-cols-1 gap-2">
-                {AI_MODELS.map((m) => (
+                {imageModelOptions.map((m) => (
                   <button
                     key={m.id}
                     onClick={() => updateData(node.id, { model: m.id })}
@@ -1075,7 +1523,7 @@ const PropertyPanel = ({ node, updateData, onClose }) => {
               </div>
               
               <div className="grid grid-cols-1 gap-2">
-                {VIDEO_MODELS.map((m) => (
+                {videoModelOptions.map((m) => (
                   <button
                     key={m.id}
                     onClick={() => {
@@ -1844,7 +2292,7 @@ const NodeComponent = ({
               </div>
             ) : (
               <div className="h-full flex flex-col items-center justify-center text-xs text-slate-600 py-4">
-                <CheckSquare className="w-6 h-6 opacity-20" />
+                <CheckCircle2 className="w-6 h-6 opacity-20" />
                 <span>结果展示区</span>
               </div>
             )}
@@ -1901,6 +2349,9 @@ const newCanvasId = () => "canvas_" + Math.random().toString(36).slice(2, 12);
 
 const Workbench = () => {
   const { user, logout, apiFetch } = useAuth();
+  const [memberInfo, setMemberInfo] = useState(null);
+  const [memberInfoLoading, setMemberInfoLoading] = useState(true);
+  const [memberInfoLoginUrl, setMemberInfoLoginUrl] = useState("");
   const navigate = useNavigate();
   const [nodes, setNodes] = useState([]);
   const [connections, setConnections] = useState([]);
@@ -1926,7 +2377,6 @@ const Workbench = () => {
   const [_globalError, setGlobalError] = useState(null);
   const [loadingTip, setLoadingTip] = useState("");
   const [previewImage, setPreviewImage] = useState(null);
-  const [isDemoMode, setIsDemoMode] = useState(false);
   const [showHistoryPanel, setShowHistoryPanel] = useState(false);
   const [activeHistoryTab, setActiveHistoryTab] = useState("recent");
   const [apiHistory, setApiHistory] = useState([]);
@@ -1943,7 +2393,6 @@ const Workbench = () => {
   });
   const [activeSidebarItemKey, setActiveSidebarItemKey] = useState("");
   const [rightPanelWidth, setRightPanelWidth] = useState(292);
-  const [canvasIdCopied, setCanvasIdCopied] = useState(false);
   const [agentStore, setAgentStore] = useState(() => loadAgentStore());
   const [agentInput, setAgentInput] = useState("");
   const [agentDevMode, setAgentDevMode] = useState(() => {
@@ -1966,6 +2415,24 @@ const Workbench = () => {
   const [agentResultCards, setAgentResultCards] = useState([]);
   const [selectedAgentCardIds, setSelectedAgentCardIds] = useState(new Set());
   const [activeAgentCardId, setActiveAgentCardId] = useState(null);
+  const [aiChatModels, setAiChatModels] = useState(() => ({
+    language: EMPTY_LIST,
+    image: DEFAULT_AI_MODELS,
+    video: DEFAULT_VIDEO_MODELS,
+  }));
+  const [apiDebugOpen, setApiDebugOpen] = useState(true);
+  const [apiDebugStatus, setApiDebugStatus] = useState(() => ({
+    memberInfo: { status: "idle", message: "", updatedAt: 0 },
+    modelParams: { status: "idle", message: "", updatedAt: 0 },
+    modelsLang: { status: "idle", message: "", updatedAt: 0 },
+    modelsImage: { status: "idle", message: "", updatedAt: 0 },
+    modelsVideo: { status: "idle", message: "", updatedAt: 0 },
+    aiChatLang: { status: "idle", message: "", updatedAt: 0 },
+    aiChatImage: { status: "idle", message: "", updatedAt: 0 },
+  }));
+  const aiChatModelParamsCacheRef = useRef(new Map());
+  const aiChatSessionIdRef = useRef("");
+  const aiChatHistoryRecordIdRef = useRef("");
   const agentInputRef = useRef(null);
   const viewportRef = useRef(viewport);
   const agentCardDragRef = useRef(null);
@@ -1985,6 +2452,222 @@ const Workbench = () => {
   const hasAgentResultCards = agentResultCards.length > 0;
   const minimizedAgentCards = agentResultCards.filter((card) => card.minimized);
 
+  const memberLabel = useMemo(() => {
+    if (memberInfoLoading) return "加载中";
+    return resolveMemberDisplayName(memberInfo) || user?.email || "Guest";
+  }, [memberInfo, memberInfoLoading, user?.email]);
+  const memberAvatar = useMemo(() => resolveMemberAvatar(memberInfo), [memberInfo]);
+  const memberPoint = useMemo(() => resolveMemberPoints(memberInfo, ["point"]), [memberInfo]);
+  const memberTotalPoint = useMemo(() => resolveMemberPoints(memberInfo, ["total_point", "totalPoint"]), [memberInfo]);
+  const languageModelOptions = useMemo(
+    () => (Array.isArray(aiChatModels.language) && aiChatModels.language.length ? aiChatModels.language : EMPTY_LIST),
+    [aiChatModels.language],
+  );
+  const imageModelOptions = useMemo(
+    () => (Array.isArray(aiChatModels.image) && aiChatModels.image.length ? aiChatModels.image : DEFAULT_AI_MODELS),
+    [aiChatModels.image],
+  );
+  const videoModelOptions = useMemo(
+    () => (Array.isArray(aiChatModels.video) && aiChatModels.video.length ? aiChatModels.video : DEFAULT_VIDEO_MODELS),
+    [aiChatModels.video],
+  );
+  const defaultLanguageModelId = useMemo(() => getDefaultLanguageModelId(languageModelOptions), [languageModelOptions]);
+  const defaultImageModelId = useMemo(() => getDefaultImageModelId(imageModelOptions), [imageModelOptions]);
+  const defaultVideoModelId = useMemo(() => getDefaultVideoModelId(videoModelOptions), [videoModelOptions]);
+  const updateApiDebugStatus = useCallback((key, next) => {
+    setApiDebugStatus((prev) => ({
+      ...prev,
+      [key]: {
+        ...(prev[key] || { status: "idle", message: "", updatedAt: 0 }),
+        ...next,
+        updatedAt: Date.now(),
+      },
+    }));
+  }, []);
+
+  const resolveModelParamsForId = useCallback(
+    async (modelId) => {
+      const normalizedModelId = String(modelId || "").trim();
+      if (!normalizedModelId) return EMPTY_LIST;
+      const cached = aiChatModelParamsCacheRef.current.get(normalizedModelId);
+      if (cached) return cached;
+
+      updateApiDebugStatus("modelParams", {
+        status: "loading",
+        message: `POST /ai/viewAIChatModelParams id=${normalizedModelId}`,
+      });
+      const data = await viewAIChatModelParams(apiFetch, { ai_chat_model_id: normalizedModelId });
+      const list = extractModelParamList(data);
+      aiChatModelParamsCacheRef.current.set(normalizedModelId, list);
+      updateApiDebugStatus("modelParams", {
+        status: "success",
+        message: `id=${normalizedModelId}, params=${list.length}`,
+      });
+      return list;
+    },
+    [apiFetch, updateApiDebugStatus],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    let timerId = 0;
+    let timeoutId = 0;
+    let activeController = null;
+
+    const loadMemberInfo = async (attempt = 0) => {
+      const requestController = new AbortController();
+      activeController = requestController;
+      let didTimeout = false;
+
+      if (attempt === 0) setMemberInfoLoading(true);
+      if (attempt === 0) updateApiDebugStatus("memberInfo", { status: "loading", message: "POST /ai/viewMemberInfo" });
+      console.info("[memberInfo] load:attempt", { attempt });
+      if (timeoutId) window.clearTimeout(timeoutId);
+      timeoutId = window.setTimeout(() => {
+        didTimeout = true;
+        updateApiDebugStatus("memberInfo", { status: "timeout", message: "请求超时(10s)" });
+        console.warn("[memberInfo] load:timeout", { attempt });
+        requestController.abort(new DOMException("viewMemberInfo timeout", "AbortError"));
+      }, 10000);
+
+      try {
+        const data = await viewMemberInfo(apiFetch, {}, { signal: requestController.signal });
+        if (cancelled) return;
+        if (timeoutId) window.clearTimeout(timeoutId);
+        console.info("[memberInfo] load:done", { attempt, data });
+        setMemberInfoLoginUrl("");
+        setMemberInfo(data);
+        setMemberInfoLoading(false);
+        updateApiDebugStatus("memberInfo", { status: "success", message: "获取成功" });
+      } catch (error) {
+        if (timeoutId) window.clearTimeout(timeoutId);
+        if (cancelled) return;
+        if (requestController.signal.aborted && !didTimeout) return;
+        console.error("[memberInfo] load:failed", {
+          attempt,
+          didTimeout,
+          message: error instanceof Error ? error.message : String(error),
+        });
+        const ssoUrl = error?.ssoUrl || error?.data?.data?.sso_url || "";
+        const isLoginRequired = Number(error?.errNo) === 2;
+        if (ssoUrl) {
+          setMemberInfoLoginUrl(ssoUrl);
+        }
+        if (didTimeout || isLoginRequired) {
+          if (isLoginRequired) {
+            updateApiDebugStatus("memberInfo", { status: "login_required", message: error?.message || "请登录后再操作" });
+          }
+          setMemberInfo(null);
+          setMemberInfoLoading(false);
+          if (isLoginRequired && ssoUrl) {
+            setRunToast({
+              type: "error",
+              message: "会员服务未登录，请先完成 SSO 登录。",
+              actionLabel: "前往登录",
+              onAction: () => window.open(ssoUrl, "_blank", "noopener,noreferrer"),
+            });
+          }
+          return;
+        }
+        updateApiDebugStatus("memberInfo", { status: "error", message: error instanceof Error ? error.message : String(error) });
+        if (attempt < 2) {
+          timerId = window.setTimeout(() => {
+            loadMemberInfo(attempt + 1);
+          }, 400 * (attempt + 1));
+          return;
+        }
+        setMemberInfo(null);
+        setMemberInfoLoading(false);
+      }
+    };
+
+    loadMemberInfo();
+    return () => {
+      cancelled = true;
+      activeController?.abort();
+      if (timerId) window.clearTimeout(timerId);
+      if (timeoutId) window.clearTimeout(timeoutId);
+    };
+  }, [apiFetch, updateApiDebugStatus]);
+
+  useEffect(() => {
+    if (memberInfoLoading) return;
+    const controller = new AbortController();
+    let cancelled = false;
+
+    const requestModelsWithTimeout = async (partEnum, fallbackOptions, debugKey, debugLabel) => {
+      const requestController = new AbortController();
+      const onAbort = () => requestController.abort();
+      controller.signal.addEventListener("abort", onAbort, { once: true });
+      updateApiDebugStatus(debugKey, { status: "loading", message: `POST /ai/viewAIChatModels part=${partEnum}` });
+      const timeoutId = window.setTimeout(() => {
+        updateApiDebugStatus(debugKey, { status: "timeout", message: "请求超时(4s)" });
+        requestController.abort(new DOMException("viewAIChatModels timeout", "AbortError"));
+      }, 4000);
+      try {
+        const data = await viewAIChatModels(
+          apiFetch,
+          { module_enum: 1, part_enum: partEnum },
+          { signal: requestController.signal },
+        );
+        const options = buildAIChatModelOptions(data, fallbackOptions);
+        updateApiDebugStatus(debugKey, { status: "success", message: `${debugLabel}模型 ${options.length}` });
+        return options;
+      } catch (error) {
+        if (!requestController.signal.aborted) {
+          console.error(`[aiChat:models] request:error(part=${partEnum})`, {
+            message: error instanceof Error ? error.message : String(error),
+            status: error?.status,
+            err_no: error?.errNo,
+            source: error?.source,
+            path: error?.path,
+            data: error?.data,
+          });
+          updateApiDebugStatus(debugKey, {
+            status: "error",
+            message: `${error instanceof Error ? error.message : "请求失败"}${error?.source ? ` [${error.source}]` : ""}`,
+          });
+        }
+        return fallbackOptions;
+      } finally {
+        window.clearTimeout(timeoutId);
+        controller.signal.removeEventListener("abort", onAbort);
+      }
+    };
+
+    const loadAIChatModels = async () => {
+      const language = await requestModelsWithTimeout(
+        AI_CHAT_PART_ENUM_1,
+        EMPTY_LIST,
+        "modelsLang",
+        "语言",
+      );
+      if (cancelled || controller.signal.aborted) return;
+      const image = await requestModelsWithTimeout(
+        AI_CHAT_PART_ENUM_2,
+        DEFAULT_AI_MODELS,
+        "modelsImage",
+        "图片",
+      );
+      if (cancelled || controller.signal.aborted) return;
+      const video = await requestModelsWithTimeout(
+        AI_CHAT_PART_ENUM_3,
+        DEFAULT_VIDEO_MODELS,
+        "modelsVideo",
+        "视频",
+      );
+      if (cancelled || controller.signal.aborted) return;
+
+      setAiChatModels({ language, image, video });
+    };
+
+    loadAIChatModels();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [apiFetch, memberInfoLoading, updateApiDebugStatus]);
+
   useEffect(() => {
     try {
       localStorage.setItem("agent_dev_mode", agentDevMode ? "true" : "false");
@@ -1997,38 +2680,11 @@ const Workbench = () => {
   const nodesRef = useRef(nodes);
   const connectionsRef = useRef(connections);
 
-  const newCanvas = () => {
-    const id = newCanvasId();
-    setCanvasId(id);
-
-    // 你想“新画布”是空白还是模板？这里示例空白
-    pushHistory();
-    setNodes([]);
-    setConnections([]);
-    setSelectedNodeIds(new Set());
-    setSelectedConnectionIds(new Set());
-    setActiveArtifact(null);
-    setViewport({ x: 0, y: 0, zoom: 1 });
-  };
-
-  const [canvasId, setCanvasId] = useState(() => {
+  const [canvasId] = useState(() => {
     // 如果你后续支持“画布列表/切换”，这里可以从 URL 参数取
     const saved = localStorage.getItem(CANVAS_KEY);
     return saved || newCanvasId();
   });
-  const closeUserMenu = (e) => {
-    const details = e?.currentTarget?.closest("details");
-    if (details) details.removeAttribute("open");
-  };
-  const copyCanvasId = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(canvasId);
-      setCanvasIdCopied(true);
-      window.setTimeout(() => setCanvasIdCopied(false), 1200);
-    } catch {
-      setRunToast({ message: "复制 canvasId 失败", type: "error" });
-    }
-  }, [canvasId]);
   const handleLeftSidebarSectionToggle = useCallback((key) => {
     setLeftSidebarSectionOpen((prev) => ({ ...prev, [key]: !prev[key] }));
   }, []);
@@ -2523,7 +3179,7 @@ const handleNodeMouseDown = (e, nid) => {
         uploadedImages: [],
         status: "idle",
         refImage: null,
-        model: getProcessorModeDefaults(modePreset || "multi_image_generate").model || "gemini-3-pro-image-preview",
+        model: getProcessorModeDefaults(modePreset || "multi_image_generate").model || defaultImageModelId,
       },
       [NODE_TYPES.POST_PROCESSOR]: {
         mode: "relight",
@@ -2532,7 +3188,7 @@ const handleNodeMouseDown = (e, nid) => {
         batchSize: 1,
         status: "idle",
         refImage: null,
-        model: "gemini-3-pro-image-preview",
+        model: defaultImageModelId,
       },
       [NODE_TYPES.VIDEO_GEN]: {
         mode: modePreset === "local_img2video" ? "local_img2video" : "img2video",
@@ -2544,7 +3200,7 @@ const handleNodeMouseDown = (e, nid) => {
         batchSize: 1,
         status: "idle",
         refImage: null,
-        model: modePreset === "local_img2video" ? "comfyui-qwen-i2v" : VIDEO_MODEL_1_0,
+        model: modePreset === "local_img2video" ? "comfyui-qwen-i2v" : defaultVideoModelId,
       },
       [NODE_TYPES.OUTPUT]: { images: [] },
     };
@@ -2572,7 +3228,7 @@ const handleNodeMouseDown = (e, nid) => {
   const createText2ImgTemplate = () => {
     pushHistory();
     const n1 = { id: generateId(), type: NODE_TYPES.TEXT_INPUT, x: 100, y: 200, data: { text: "赛博朋克风格的未来城市街道，霓虹灯光" } };
-    const n2 = { id: generateId(), type: NODE_TYPES.PROCESSOR, x: 500, y: 200, data: { mode: "text2img", prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1" }, batchSize: 1, status: "idle", model: "gemini-3-pro-image-preview" } };
+    const n2 = { id: generateId(), type: NODE_TYPES.PROCESSOR, x: 500, y: 200, data: { mode: "text2img", prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1" }, batchSize: 1, status: "idle", model: defaultImageModelId } };
     const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
     setNodes([n1, n2, n3]);
     setConnections([
@@ -2586,7 +3242,7 @@ const handleNodeMouseDown = (e, nid) => {
     pushHistory();
     const n0 = { id: generateId(), type: NODE_TYPES.TEXT_INPUT, x: 100, y: 100, data: { text: "保持原图构图，转为水彩风格" } };
     const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 350, data: { images: [] } };
-    const n2 = { id: generateId(), type: NODE_TYPES.PROCESSOR, x: 500, y: 200, data: { mode: "multi_image_generate", prompt: "", templates: { size: "1024x1024", note: "" }, batchSize: 1, uploadedImages: [], status: "idle", model: "gemini-3-pro-image-preview" } };
+    const n2 = { id: generateId(), type: NODE_TYPES.PROCESSOR, x: 500, y: 200, data: { mode: "multi_image_generate", prompt: "", templates: { size: "1024x1024", note: "" }, batchSize: 1, uploadedImages: [], status: "idle", model: defaultImageModelId } };
     const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
     setNodes([n0, n1, n2, n3]);
     setConnections([
@@ -2600,7 +3256,7 @@ const handleNodeMouseDown = (e, nid) => {
   const createImg2VideoTemplate = () => {
     pushHistory();
     const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 200, data: { images: [] } };
-    const n2 = { id: generateId(), type: NODE_TYPES.VIDEO_GEN, x: 500, y: 200, data: { mode: "img2video",model: VIDEO_MODEL_1_0, prompt: "", templates: { motion: "标准(Standard)", camera: "推近(Zoom In)", duration: 5, resolution: "1080p", ratio: "16:9", note: "" ,generate_audio_new: true,}, batchSize: 1, status: "idle", refImage: null } };
+    const n2 = { id: generateId(), type: NODE_TYPES.VIDEO_GEN, x: 500, y: 200, data: { mode: "img2video",model: defaultVideoModelId, prompt: "", templates: { motion: "标准(Standard)", camera: "推近(Zoom In)", duration: 5, resolution: "1080p", ratio: "16:9", note: "" ,generate_audio_new: true,}, batchSize: 1, status: "idle", refImage: null } };
     const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
     setNodes([n1, n2, n3]);
     setConnections([
@@ -2687,7 +3343,7 @@ const handleNodeMouseDown = (e, nid) => {
       y: sourceNode.y,
       data: {
         mode: "img2video",
-        model: VIDEO_MODEL_1_0,
+        model: defaultVideoModelId,
         prompt: sourceNode.data.prompt || "",
         templates: { motion: "标准(Standard)", camera: "固定镜头(Fixed)", duration: 5,  resolution: "1080p", ratio: "16:9", note: "",generate_audio_new: true, },
         batchSize: 1,
@@ -2745,7 +3401,7 @@ const createConnectedImg2ImgBranch = useCallback(
         uploadedImages: [],
         status: "idle",
         refImage: null,
-        model: "gemini-3-pro-image-preview",
+        model: defaultImageModelId,
       },
     };
 
@@ -3136,6 +3792,99 @@ const createConnectedImg2ImgBranch = useCallback(
     [updateActiveAgentSession],
   );
 
+  const sendAIChatLanguageStream = useCallback(
+    async (userText, route = null) => {
+      const message = String(userText || "").trim();
+      if (!message) return { ok: false, error: "消息为空" };
+      if (!defaultLanguageModelId) {
+        updateApiDebugStatus("aiChatLang", { status: "error", message: "缺少语言模型ID" });
+        setRunToast({ message: "AI Chat 失败：缺少语言模型ID", type: "error" });
+        return { ok: false, error: "缺少语言模型ID" };
+      }
+
+      const turnId = `turn_${makeAgentId()}`;
+      updateApiDebugStatus("aiChatLang", { status: "loading", message: "POST /ai/aiChat part=1" });
+      updateActiveAgentSession((session) => ({
+        ...session,
+        title: session.title === "新会话" ? shortenSessionTitle(message) : session.title,
+        turns: [
+          ...(session.turns || []),
+          {
+            id: turnId,
+            userText: message,
+            extractedProduct: "",
+            status: "assistant",
+            assistantText: "",
+            quickActions: [],
+            productChips: [],
+            routeDebug: buildRouteDebug(route || { intent: "CHITCHAT", reason: "ai_chat_stream", product: "" }, true),
+            createdAt: Date.now(),
+            stepIndex: 0,
+          },
+        ],
+      }));
+
+      let fullText = "";
+      try {
+        await aiChatStream(
+          apiFetch,
+          {
+            history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || undefined,
+            module_enum: "1",
+            part_enum: String(AI_CHAT_PART_ENUM_1),
+            ai_chat_session_id: aiChatSessionIdRef.current || undefined,
+            ai_chat_model_id: defaultLanguageModelId,
+            message,
+          },
+          {
+            onChunk: (chunk) => {
+              const delta = String(chunk || "");
+              if (!delta) return;
+              fullText += delta;
+              updateActiveAgentSession((session) => ({
+                ...session,
+                turns: (session.turns || []).map((turn) =>
+                  turn.id === turnId ? { ...turn, assistantText: fullText } : turn,
+                ),
+              }));
+            },
+            onMeta: (meta) => {
+              if (meta?.aiChatSessionId) aiChatSessionIdRef.current = meta.aiChatSessionId;
+              if (meta?.historyAiChatRecordId) aiChatHistoryRecordIdRef.current = meta.historyAiChatRecordId;
+            },
+          },
+        );
+
+        if (!fullText) fullText = "已收到响应，但内容为空。";
+        updateApiDebugStatus("aiChatLang", {
+          status: "success",
+          message: `ok model=${defaultLanguageModelId}`,
+        });
+        return { ok: true, error: "" };
+      } catch (error) {
+        const messageText = formatAIChatErrorMessage(error);
+        updateApiDebugStatus("aiChatLang", {
+          status: "error",
+          message: messageText,
+        });
+        updateActiveAgentSession((session) => ({
+          ...session,
+          turns: (session.turns || []).map((turn) =>
+            turn.id === turnId
+              ? {
+                  ...turn,
+                  assistantText: fullText || `请求失败：${messageText}`,
+                }
+              : turn,
+          ),
+        }));
+        setRunToast({ message: `AI Chat 失败：${messageText}`, type: "error" });
+        return { ok: false, error: messageText };
+      }
+    },
+    [apiFetch, defaultLanguageModelId, updateActiveAgentSession, updateApiDebugStatus],
+  );
+
   const runVideoMissionOnTurn = useCallback(
     async (turnId, userText, extractedProduct, routeMeta = {}) => {
       try {
@@ -3461,9 +4210,16 @@ const createConnectedImg2ImgBranch = useCallback(
       });
 
       if (route.intent === "CHITCHAT") {
-        appendAssistantTurn(missionText, getChitchatReply(missionText), {
-          routeDebug: buildRouteDebug(route, false),
-        });
+        const streamed = await sendAIChatLanguageStream(missionText, route);
+        if (!streamed.ok) {
+          appendAssistantTurn(
+            missionText,
+            `AI Chat 调用失败：${streamed.error || "未知错误"}\n已降级为本地回复：${getChitchatReply(missionText)}`,
+            {
+            routeDebug: buildRouteDebug(route, false),
+            },
+          );
+        }
         return;
       }
 
@@ -3657,6 +4413,7 @@ const createConnectedImg2ImgBranch = useCallback(
       getLatestResultTurn,
       resolvePendingProductCandidate,
       runMissionOnTurn,
+      sendAIChatLanguageStream,
       runVideoMissionOnTurn,
       setPendingTaskForActiveSession,
       updateActiveAgentSession,
@@ -4216,6 +4973,19 @@ const createConnectedImg2ImgBranch = useCallback(
     executeFlow(new Set(targetNodes.map((n) => n.id)));
   };
 
+  const safeInvoke = useCallback(
+    (action, actionName = "操作") => {
+      try {
+        action?.();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error || "未知错误");
+        console.error(`[Workbench] action:error(${actionName})`, error);
+        setRunToast({ type: "error", message: `${actionName}失败：${message}` });
+      }
+    },
+    [],
+  );
+
   const executeFlow = async (specificNodesSet) => {
     setGlobalError(null);
 
@@ -4408,19 +5178,113 @@ const createConnectedImg2ImgBranch = useCallback(
                 const promptToUse = sourceText || procNode.data.prompt;
                 if (!promptToUse?.trim()) throw new Error("缺少输入文本提示词");
 
-                const resp = await apiFetch(procNode.data.mode === "local_text2img" ? `/api/local/text2img` : `/api/text2img`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    prompt: promptToUse,
-                    model: procNode.data.model,
-                    size: procNode.data.templates?.size || "1024x1024",
-                    aspect_ratio: procNode.data.templates?.aspect_ratio || "1:1",
-                  }),
-                });
-                const data = await resp.json();
-                if (!resp.ok) throw new Error(extractApiError(data));
-                if (data.images?.length > 0) resultUrl = data.images[0];
+                if (procNode.data.mode === "local_text2img") {
+                  const resp = await apiFetch(`/api/local/text2img`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      prompt: promptToUse,
+                      model: procNode.data.model,
+                      size: procNode.data.templates?.size || "1024x1024",
+                      aspect_ratio: procNode.data.templates?.aspect_ratio || "1:1",
+                    }),
+                  });
+                  const data = await resp.json();
+                  if (!resp.ok) throw new Error(extractApiError(data));
+                  if (data.images?.length > 0) resultUrl = data.images[0];
+                } else {
+                  const modelId = String(procNode.data.model || defaultImageModelId || "").trim();
+                  if (!modelId) throw new Error("缺少图像模型ID");
+                  const resolvedParamPayload = {};
+
+                  updateApiDebugStatus("aiChatImage", {
+                    status: "loading",
+                    message: "POST /ai/aiChat part=2",
+                  });
+
+                  const model4Option = imageModelOptions.find((item) => String(item?.id || "").trim() === "4");
+                  const fallbackModelId = model4Option ? "4" : "";
+                  let aiChatResponse = null;
+                  let effectiveModelId = modelId;
+                  const requestAIChatImage = async (targetModelId) =>
+                    aiChatStream(
+                      apiFetch,
+                      {
+                        history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || undefined,
+                        module_enum: "1",
+                        part_enum: String(AI_CHAT_PART_ENUM_2),
+                        ai_chat_session_id: aiChatSessionIdRef.current || undefined,
+                        ai_chat_model_id: targetModelId,
+                        message: promptToUse,
+                        ...resolvedParamPayload,
+                      },
+                      {
+                        onMeta: (meta) => {
+                          if (meta?.aiChatSessionId) aiChatSessionIdRef.current = meta.aiChatSessionId;
+                          if (meta?.historyAiChatRecordId) aiChatHistoryRecordIdRef.current = meta.historyAiChatRecordId;
+                        },
+                      },
+                    );
+                  try {
+                    aiChatResponse = await requestAIChatImage(modelId);
+                    const firstErrMsg = extractAIChatDoneError(aiChatResponse);
+                    const canRetryWithModel4 =
+                      !!firstErrMsg && !!fallbackModelId && String(modelId) !== fallbackModelId;
+                    if (canRetryWithModel4) {
+                      updateApiDebugStatus("aiChatImage", {
+                        status: "loading",
+                        message: `part=2 model=${modelId}失败，自动重试model=${fallbackModelId}`,
+                      });
+                      aiChatResponse = await requestAIChatImage(fallbackModelId);
+                      effectiveModelId = fallbackModelId;
+                    }
+                  } catch (error) {
+                    updateApiDebugStatus("aiChatImage", {
+                      status: "error",
+                      message: formatAIChatErrorMessage(error),
+                    });
+                    throw error;
+                  }
+
+                  resultUrl =
+                    pickFirstImageUrl(aiChatResponse?.meta) ||
+                    pickFirstImageUrl(aiChatResponse?.events) ||
+                    pickFirstImageUrl(aiChatResponse?.data) ||
+                    pickFirstImageUrl(aiChatResponse?.text) ||
+                    "";
+
+                  const doneErrMsg = extractAIChatDoneError(aiChatResponse);
+                  if (!resultUrl || doneErrMsg) {
+                    console.info(
+                      "[aiChatImage] parsed-response",
+                      JSON.stringify(
+                        {
+                          result_url: resultUrl || "",
+                          done_error: doneErrMsg || "",
+                          event_count: Array.isArray(aiChatResponse?.events) ? aiChatResponse.events.length : 0,
+                          last_events: Array.isArray(aiChatResponse?.events) ? aiChatResponse.events.slice(-3) : [],
+                          response_summary: summarizeAIChatResponse(aiChatResponse),
+                        },
+                        null,
+                        2,
+                      ),
+                    );
+                  }
+                  if (!resultUrl && doneErrMsg) {
+                    throw new Error(`AI Chat 返回错误：${doneErrMsg}`);
+                  }
+
+                  if (!resultUrl) {
+                    const summary = summarizeAIChatResponse(aiChatResponse);
+                    throw new Error(
+                      `aiChat 文生图未返回可解析图片URL${summary ? ` | 响应摘要: ${summary}` : ""}`,
+                    );
+                  }
+                  updateApiDebugStatus("aiChatImage", {
+                    status: "success",
+                    message: `part=2 model=${effectiveModelId} params=${Object.keys(resolvedParamPayload).length}`,
+                  });
+                }
               } else if (
                 procNode.type === NODE_TYPES.VIDEO_GEN ||
                 procNode.data.mode === "img2video" ||
@@ -4431,7 +5295,7 @@ const createConnectedImg2ImgBranch = useCallback(
                 const isCameraFixed = procNode.data.templates?.camera?.includes("固定") || false;
 
                 const payload = {
-                  model: procNode.data.model || "Doubao-Seedance-1.0-pro", // ✅ 新增
+                  model: procNode.data.model || defaultVideoModelId,
                   image: inputImages[i],
                   last_frame_image: procNode.data.refImage || null,
                   prompt: procNode.data.prompt || sourceText || "natural motion",
@@ -4869,7 +5733,7 @@ const createConnectedImg2ImgBranch = useCallback(
                           compact={leftSidebarCollapsed}
                           onClick={() => {
                             setActiveSidebarItemKey(item.id);
-                            item.onClick();
+                            safeInvoke(item.onClick, item.label || "侧栏操作");
                             onAction?.();
                           }}
                         />
@@ -4883,6 +5747,25 @@ const createConnectedImg2ImgBranch = useCallback(
         )}
       </>
     );
+  };
+
+  const apiDebugItems = [
+    { key: "memberInfo", label: "memberInfo" },
+    { key: "modelParams", label: "modelParams(id=4)" },
+    { key: "modelsLang", label: "models(part=1)" },
+    { key: "modelsImage", label: "models(part=2)" },
+    { key: "modelsVideo", label: "models(part=3)" },
+    { key: "aiChatLang", label: "aiChat(part=1 语言)" },
+    { key: "aiChatImage", label: "aiChat(part=2 图片)" },
+  ];
+
+  const getApiDebugStatusClass = (status) => {
+    if (status === "success") return "text-emerald-300 border-emerald-700/60 bg-emerald-950/30";
+    if (status === "loading") return "text-cyan-200 border-cyan-700/60 bg-cyan-950/30";
+    if (status === "timeout" || status === "error" || status === "login_required") {
+      return "text-rose-200 border-rose-700/60 bg-rose-950/30";
+    }
+    return "text-slate-300 border-slate-700/70 bg-slate-900/60";
   };
 
   return (
@@ -4939,56 +5822,9 @@ const createConnectedImg2ImgBranch = useCallback(
             <Sliders className="w-3 h-3" /> 设置
           </button>
 
-          <button
-            type="button"
-            onClick={copyCanvasId}
-            title={canvasIdCopied ? "已复制" : "复制 canvasId"}
-            className={`h-8 w-8 rounded-md border transition-colors ${canvasIdCopied ? "border-yellow-500/55 bg-yellow-500/15 text-yellow-100" : "border-slate-700/90 bg-slate-900/65 text-slate-300 hover:border-slate-600 hover:text-slate-100"}`}
-          >
-            {canvasIdCopied ? <CheckSquare className="w-4 h-4 mx-auto" /> : <Clipboard className="w-4 h-4 mx-auto" />}
-          </button>
-
-          <details className="relative">
-            <summary className="list-none cursor-pointer inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-slate-700/90 bg-slate-900/65 text-[11px] text-slate-300 hover:border-slate-600 hover:text-slate-100 [&::-webkit-details-marker]:hidden">
-              <span className="max-w-[120px] truncate">{user?.email || "Guest"}</span>
-              <ChevronDown className="w-3 h-3 text-slate-500" />
-            </summary>
-            <div className="absolute right-0 top-full mt-1.5 w-52 rounded-lg border border-slate-700 bg-slate-900/98 shadow-2xl p-1.5 z-[70]">
-              <div className="px-2 py-1 text-[10px] text-slate-500">当前会话</div>
-              <div className="px-2 py-1.5 text-[11px] text-slate-200 truncate">{user?.email || "Guest"}</div>
-              <button
-                onClick={(e) => {
-                  newCanvas();
-                  closeUserMenu(e);
-                }}
-                className="w-full text-left px-2 py-1.5 rounded text-[11px] text-slate-200 hover:bg-slate-800"
-              >
-                新建画布
-              </button>
-              <button
-                onClick={(e) => {
-                  setIsDemoMode((prev) => !prev);
-                  closeUserMenu(e);
-                }}
-                className="w-full text-left px-2 py-1.5 rounded text-[11px] text-slate-200 hover:bg-slate-800"
-              >
-                {isDemoMode ? "演示模式：ON" : "演示模式：OFF"}
-              </button>
-              <button
-                onClick={(e) => {
-                  logout(true);
-                  closeUserMenu(e);
-                }}
-                className="w-full text-left px-2 py-1.5 rounded text-[11px] text-rose-200 hover:bg-rose-500/15"
-              >
-                退出登录
-              </button>
-            </div>
-          </details>
-
           <div className="flex rounded-md shadow-lg shadow-purple-900/45">
             <button
-              onClick={handleRunClick}
+              onClick={() => safeInvoke(handleRunClick, "运行工作流")}
               disabled={isRunning}
               className={`flex items-center gap-2 px-4 py-2 rounded-l-md font-bold text-sm transition-all min-w-[112px] justify-center ${isRunning ? "bg-slate-700 cursor-not-allowed text-slate-300" : "bg-purple-600 hover:bg-purple-500 text-white"}`}
             >
@@ -5036,14 +5872,153 @@ const createConnectedImg2ImgBranch = useCallback(
         </div>
       )}
 
+      <div className="fixed right-4 bottom-4 z-[92] w-[320px] max-w-[calc(100vw-1rem)] rounded-xl border border-slate-700/80 bg-slate-950/95 shadow-2xl backdrop-blur-sm">
+        <button
+          type="button"
+          onClick={() => setApiDebugOpen((prev) => !prev)}
+          className="flex w-full items-center justify-between px-3 py-2 text-left border-b border-slate-800/80"
+        >
+          <span className="text-xs font-semibold text-slate-100">新接口状态</span>
+          <span className="text-[10px] text-slate-400">{apiDebugOpen ? "收起" : "展开"}</span>
+        </button>
+        {apiDebugOpen ? (
+          <div className="space-y-1.5 p-2.5">
+            {apiDebugItems.map((item) => {
+              const state = apiDebugStatus[item.key] || { status: "idle", message: "", updatedAt: 0 };
+              return (
+                <div key={item.key} className={`rounded-md border px-2 py-1.5 ${getApiDebugStatusClass(state.status)}`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] font-semibold truncate">{item.label}</span>
+                    <span className="text-[10px] opacity-90">{API_DEBUG_STATUS_LABEL[state.status] || state.status}</span>
+                  </div>
+                  <div className="mt-0.5 flex items-center justify-between gap-2">
+                    <span className="text-[10px] opacity-85 truncate">{state.message || "--"}</span>
+                    <span className="text-[10px] opacity-70 shrink-0">{formatDebugTime(state.updatedAt)}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+
       <div className="flex-1 flex relative min-h-0 overflow-hidden">
         {/* Sidebar */}
         <div
-          className={`z-40 flex flex-col select-none shrink-0 h-full min-h-0 overflow-y-auto custom-scrollbar [scrollbar-gutter:stable] overscroll-contain border-r border-[var(--bf-border)] bg-gradient-to-b from-slate-900/96 via-slate-900/92 to-slate-950/96 ${leftSidebarCollapsed ? "px-1.5 py-2" : "px-2.5 py-3"} shadow-[var(--bf-shadow-md)] ${leftSidebarCollapsed ? "items-center" : "items-stretch"}`}
+          className={`z-40 flex flex-col select-none shrink-0 h-full min-h-0 border-r border-[var(--bf-border)] bg-gradient-to-b from-slate-900/96 via-slate-900/92 to-slate-950/96 ${leftSidebarCollapsed ? "px-1.5 py-2" : "px-2.5 py-3"} shadow-[var(--bf-shadow-md)] ${leftSidebarCollapsed ? "items-center" : "items-stretch"}`}
           style={{ WebkitOverflowScrolling: "touch", width: leftSidebarCollapsed ? 70 : 270 }}
         >
-          {!leftSidebarCollapsed && <div className="mb-2.5 h-px w-full bg-gradient-to-r from-yellow-500/45 via-purple-500/20 to-transparent" />}
-          {renderSidebarContent()}
+          <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar [scrollbar-gutter:stable] overscroll-contain">
+            {!leftSidebarCollapsed && <div className="mb-2.5 h-px w-full bg-gradient-to-r from-yellow-500/45 via-purple-500/20 to-transparent" />}
+            {renderSidebarContent()}
+          </div>
+          <div className={`shrink-0 border-t border-slate-800/80 ${leftSidebarCollapsed ? "mt-2 pt-2 w-full" : "mt-3 pt-3"}`}>
+            {leftSidebarCollapsed ? (
+              <details className="relative group">
+                <summary
+                  className="list-none mx-auto flex h-10 w-10 cursor-pointer items-center justify-center rounded-xl border border-slate-700/90 bg-slate-900/80 text-slate-200 hover:border-yellow-500/35 hover:text-yellow-100 [&::-webkit-details-marker]:hidden"
+                  title={memberLabel}
+                >
+                  {memberAvatar ? (
+                    <img src={memberAvatar} alt={memberLabel} className="h-full w-full rounded-xl object-cover" />
+                  ) : (
+                    <span className="text-xs font-semibold">{String(memberLabel || "G").slice(0, 1).toUpperCase()}</span>
+                  )}
+                </summary>
+                <div className="absolute bottom-full left-0 mb-2 w-56 rounded-xl border border-slate-700/90 bg-slate-900/98 p-3 shadow-2xl z-[70]">
+                  <div className="flex items-center gap-3">
+                    <div className="h-11 w-11 overflow-hidden rounded-xl border border-slate-700/90 bg-slate-800/90">
+                      {memberAvatar ? (
+                        <img src={memberAvatar} alt={memberLabel} className="h-full w-full object-cover" />
+                      ) : (
+                        <div className="flex h-full w-full items-center justify-center text-sm font-semibold text-slate-200">
+                          {String(memberLabel || "G").slice(0, 1).toUpperCase()}
+                        </div>
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-semibold text-slate-100">{memberLabel}</div>
+                      <div className="text-[10px] text-slate-400">
+                        {memberInfoLoginUrl ? "会员未登录" : "会员信息"}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <div className="rounded-lg border border-slate-800/90 bg-slate-950/80 px-2 py-1.5">
+                      <div className="text-[10px] text-slate-500">当前积分</div>
+                      <div className="mt-0.5 text-xs font-semibold text-yellow-200">{formatMemberPoints(memberPoint)}</div>
+                    </div>
+                    <div className="rounded-lg border border-slate-800/90 bg-slate-950/80 px-2 py-1.5">
+                      <div className="text-[10px] text-slate-500">累计积分</div>
+                      <div className="mt-0.5 text-xs font-semibold text-emerald-200">{formatMemberPoints(memberTotalPoint)}</div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => logout(true)}
+                    className="mt-3 w-full rounded-lg border border-slate-700/90 bg-slate-900/80 px-3 py-2 text-left text-[11px] text-slate-200 hover:border-rose-500/35 hover:bg-rose-500/10 hover:text-rose-100"
+                  >
+                    退出登录
+                  </button>
+                  {memberInfoLoginUrl ? (
+                    <button
+                      type="button"
+                      onClick={() => window.open(memberInfoLoginUrl, "_blank", "noopener,noreferrer")}
+                      className="mt-2 w-full rounded-lg border border-cyan-700/70 bg-cyan-950/40 px-3 py-2 text-left text-[11px] text-cyan-100 hover:border-cyan-500/60 hover:bg-cyan-900/40"
+                    >
+                      前往会员登录
+                    </button>
+                  ) : null}
+                </div>
+              </details>
+            ) : (
+              <div className="rounded-2xl border border-slate-800/90 bg-slate-950/75 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+                <div className="flex items-center gap-3">
+                  <div className="h-12 w-12 overflow-hidden rounded-2xl border border-slate-700/90 bg-slate-800/90">
+                    {memberAvatar ? (
+                      <img src={memberAvatar} alt={memberLabel} className="h-full w-full object-cover" />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center text-sm font-semibold text-slate-200">
+                        {String(memberLabel || "G").slice(0, 1).toUpperCase()}
+                      </div>
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-semibold text-slate-100">{memberLabel}</div>
+                    <div className="truncate text-[10px] text-slate-400">
+                      {memberInfoLoginUrl ? "会员未登录" : user?.email || "会员信息"}
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <div className="rounded-xl border border-slate-800/90 bg-slate-900/75 px-2.5 py-2">
+                    <div className="text-[10px] text-slate-500">当前积分</div>
+                    <div className="mt-1 text-sm font-semibold text-yellow-200">{formatMemberPoints(memberPoint)}</div>
+                  </div>
+                  <div className="rounded-xl border border-slate-800/90 bg-slate-900/75 px-2.5 py-2">
+                    <div className="text-[10px] text-slate-500">累计积分</div>
+                    <div className="mt-1 text-sm font-semibold text-emerald-200">{formatMemberPoints(memberTotalPoint)}</div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => logout(true)}
+                  className="mt-3 w-full rounded-xl border border-slate-700/90 bg-slate-900/80 px-3 py-2 text-[11px] text-slate-200 hover:border-rose-500/35 hover:bg-rose-500/10 hover:text-rose-100 transition-colors"
+                >
+                  退出登录
+                </button>
+                {memberInfoLoginUrl ? (
+                  <button
+                    type="button"
+                    onClick={() => window.open(memberInfoLoginUrl, "_blank", "noopener,noreferrer")}
+                    className="mt-2 w-full rounded-xl border border-cyan-700/70 bg-cyan-950/40 px-3 py-2 text-[11px] text-cyan-100 hover:border-cyan-500/60 hover:bg-cyan-900/40 transition-colors"
+                  >
+                    前往会员登录
+                  </button>
+                ) : null}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Canvas */}
@@ -5086,21 +6061,21 @@ const createConnectedImg2ImgBranch = useCallback(
                 <p className="text-sm text-slate-400 mb-8">选择下方模版，或直接使用下方 AI 输入框：</p>
 
                 <div className="grid grid-cols-3 gap-4">
-                  <button onClick={createText2ImgTemplate} className="group flex flex-col items-center gap-3 p-4 bg-slate-800/50 hover:bg-slate-800 border border-slate-700 hover:border-purple-500/50 rounded-xl transition-all hover:-translate-y-1">
+                  <button onClick={() => safeInvoke(createText2ImgTemplate, "打开文生图模板")} className="group flex flex-col items-center gap-3 p-4 bg-slate-800/50 hover:bg-slate-800 border border-slate-700 hover:border-purple-500/50 rounded-xl transition-all hover:-translate-y-1">
                     <div className="p-3 bg-purple-500/10 rounded-lg group-hover:bg-purple-500/20 transition-colors">
                       <Wand2 className="w-6 h-6 text-purple-400" />
                     </div>
                     <span className="text-xs font-bold text-slate-300 group-hover:text-white">文生图</span>
                   </button>
 
-                  <button onClick={createImg2ImgTemplate} className="group flex flex-col items-center gap-3 p-4 bg-slate-800/50 hover:bg-slate-800 border border-slate-700 hover:border-blue-500/50 rounded-xl transition-all hover:-translate-y-1">
+                  <button onClick={() => safeInvoke(createImg2ImgTemplate, "打开图生图模板")} className="group flex flex-col items-center gap-3 p-4 bg-slate-800/50 hover:bg-slate-800 border border-slate-700 hover:border-blue-500/50 rounded-xl transition-all hover:-translate-y-1">
                     <div className="p-3 bg-blue-500/10 rounded-lg group-hover:bg-blue-500/20 transition-colors">
                       <Images className="w-6 h-6 text-blue-400" />
                     </div>
                     <span className="text-xs font-bold text-slate-300 group-hover:text-white">图生图</span>
                   </button>
 
-                  <button onClick={createImg2VideoTemplate} className="group flex flex-col items-center gap-3 p-4 bg-slate-800/50 hover:bg-slate-800 border border-slate-700 hover:border-rose-500/50 rounded-xl transition-all hover:-translate-y-1">
+                  <button onClick={() => safeInvoke(createImg2VideoTemplate, "打开图生视频模板")} className="group flex flex-col items-center gap-3 p-4 bg-slate-800/50 hover:bg-slate-800 border border-slate-700 hover:border-rose-500/50 rounded-xl transition-all hover:-translate-y-1">
                     <div className="p-3 bg-rose-500/10 rounded-lg group-hover:bg-rose-500/20 transition-colors">
                       <Clapperboard className="w-6 h-6 text-rose-400" />
                     </div>
@@ -5404,7 +6379,7 @@ const createConnectedImg2ImgBranch = useCallback(
                         </button>
                         <button
                           type="button"
-                          onClick={createText2ImgTemplate}
+                          onClick={() => safeInvoke(createText2ImgTemplate, "打开文生图模板")}
                           className="px-2 py-1 rounded border border-slate-700/90 bg-slate-900/85 text-[10px] text-slate-200 hover:bg-slate-800 hover:border-yellow-500/35 hover:text-yellow-100 transition-colors"
                         >
                           打开模板
@@ -5758,7 +6733,13 @@ const createConnectedImg2ImgBranch = useCallback(
         </div>
 
         {/* ✅ 属性栏（保留并确保存在） */}
-        <PropertyPanel node={activeNodeId ? nodes.find((n) => n.id === activeNodeId) : null} updateData={updateNodeData} onClose={() => setActiveNodeId(null)} />
+        <PropertyPanel
+          node={activeNodeId ? nodes.find((n) => n.id === activeNodeId) : null}
+          updateData={updateNodeData}
+          onClose={() => setActiveNodeId(null)}
+          imageModelOptions={imageModelOptions}
+          videoModelOptions={videoModelOptions}
+        />
       </div>
 
       {/* History Panel（保持你原逻辑） */}
@@ -6008,4 +6989,64 @@ const createConnectedImg2ImgBranch = useCallback(
   );
 };
 
-export default Workbench;
+class WorkbenchErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, message: "" };
+  }
+
+  static getDerivedStateFromError(error) {
+    return {
+      hasError: true,
+      message: error?.message || "未知页面错误",
+    };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error("[Workbench] runtime:error", {
+      message: error?.message || String(error),
+      stack: error?.stack || "",
+      componentStack: errorInfo?.componentStack || "",
+    });
+  }
+
+  handleRecover = () => {
+    this.setState({ hasError: false, message: "" });
+  };
+
+  render() {
+    if (!this.state.hasError) return this.props.children;
+    return (
+      <div className="h-screen w-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6">
+        <div className="w-[min(92vw,640px)] rounded-xl border border-rose-700/70 bg-slate-900/95 p-5 shadow-2xl">
+          <div className="text-sm font-semibold text-rose-300">页面运行异常</div>
+          <div className="mt-2 text-xs text-slate-300 break-all">{this.state.message || "未知错误"}</div>
+          <div className="mt-4 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={this.handleRecover}
+              className="rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-100 hover:bg-slate-700"
+            >
+              尝试恢复
+            </button>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="rounded-md border border-cyan-700/70 bg-cyan-900/30 px-3 py-1.5 text-xs text-cyan-100 hover:bg-cyan-900/50"
+            >
+              刷新页面
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+}
+
+const WorkbenchWithBoundary = () => (
+  <WorkbenchErrorBoundary>
+    <Workbench />
+  </WorkbenchErrorBoundary>
+);
+
+export default WorkbenchWithBoundary;
