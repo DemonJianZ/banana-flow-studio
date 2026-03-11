@@ -188,9 +188,9 @@ const resolveStreamCaller = (apiFetch, forceSource = "") => {
     return apiFetchCaller || microCaller || sameOriginCaller || microMemberCaller || directCaller;
   }
 
-  // 宿主存在时，强制优先走宿主链路，避免降级到无鉴权分支导致 err_no=2
+  // 宿主存在时，优先走宿主链路；无宿主时优先直连 member-api，避免 same-origin 未代理导致 404/网络错误
   if (microCaller) return microCaller;
-  return sameOriginCaller || microMemberCaller || apiFetchCaller || directCaller;
+  return apiFetchCaller || directCaller || sameOriginCaller;
 };
 
 const postJson = async (apiFetch, path, payload = {}, options = {}) => {
@@ -652,6 +652,28 @@ export async function aiChatStream(apiFetch, payload = {}, options = {}) {
         __forceStreamSource: "microApp.fetch(member-api)",
         __requestMode: "fetch",
         __triedSources: [...nextTried, "microApp.fetch(member-api)"],
+      });
+    }
+
+
+    const canRetryDirectFromSameOrigin =
+      source === "window.fetch(same-origin)" &&
+      requestMode === "fetch" &&
+      !hasTried("window.fetch(member-api)") &&
+      isLikelyTransportError(error);
+    if (canRetryDirectFromSameOrigin) {
+      console.warn("[aiChatStream] request:retry", {
+        from: "window.fetch(same-origin)(fetch-mode)",
+        to: "window.fetch(member-api)(fetch-mode)",
+        part_enum: payload?.part_enum,
+        ai_chat_model_id: payload?.ai_chat_model_id,
+        error: formatTransportErrorDetail(error),
+      });
+      return aiChatStream(apiFetch, payload, {
+        ...options,
+        __forceStreamSource: "window.fetch(member-api)",
+        __requestMode: "fetch",
+        __triedSources: [...nextTried, "window.fetch(member-api)"],
       });
     }
 
