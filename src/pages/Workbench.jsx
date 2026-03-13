@@ -49,15 +49,12 @@ import {
   RotateCcw,
   Link as LinkIcon,
   Server,
-  Keyboard,
   Activity,
   Layout,
   Send,
   Scan,
   Scissors,
   Search,
-  PanelLeftClose,
-  PanelLeftOpen,
   GripVertical,
 } from "lucide-react";
 import { useAuth } from "../auth/AuthProvider";
@@ -70,6 +67,7 @@ import ExportPanel from "../components/agent-canvas/ExportPanel";
 import PreferenceSuggestionCard from "../components/agent-canvas/PreferenceSuggestionCard";
 import {
   extractProductKeyword,
+  generateAgentChitchat,
   exportIdeaScriptFfmpegBundle,
   generateIdeaScriptMission,
   generateIdeaScriptVideo,
@@ -79,7 +77,7 @@ import {
   setPreference as setMemoryPreference,
 } from "../api/memoryPreferences";
 import { harvestEvalCase } from "../api/qualityFeedback";
-import { aiChatStream, viewAIChatModelParams, viewAIChatModels } from "../api/aiChat";
+import { aiChatStream, resolveMemberAuthorizationInfo, viewAIChatModelParams, viewAIChatModels } from "../api/aiChat";
 import { viewMemberInfo } from "../api/memberInfo";
 import { detectIntent } from "../agent/router";
 import { detectPreferenceSuggestions } from "../agent/preferenceSuggestion";
@@ -358,6 +356,38 @@ const formatDebugTime = (timestamp) => {
   }
 };
 
+const stringifyDebugValue = (value) => {
+  if (value === undefined) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value || "");
+  }
+};
+
+const buildApiDebugDetailText = (event) => {
+  if (!event || typeof event !== "object") return "";
+  const lines = [];
+  if (event.url) lines.push(`url: ${event.url}`);
+  if (event.path) lines.push(`path: ${event.path}`);
+  if (event.source) lines.push(`source: ${event.source}`);
+  if (Array.isArray(event.candidates) && event.candidates.length) lines.push(`candidates: ${event.candidates.join(" -> ")}`);
+  if (event.authorizationSource) lines.push(`auth: ${event.authorizationSource}`);
+  if (event.message) lines.push(`message: ${event.message}`);
+  if (event.payload !== undefined) {
+    lines.push("payload:");
+    lines.push(stringifyDebugValue(event.payload));
+  }
+  if (event.response !== undefined) {
+    lines.push("response:");
+    lines.push(stringifyDebugValue(event.response));
+  }
+  return lines.join("\n").trim();
+};
+
+const API_DEBUG_DETAIL_KEYS = new Set(["aiChatLang", "aiChatImage"]);
+
 const API_DEBUG_STATUS_LABEL = {
   idle: "待执行",
   loading: "请求中",
@@ -635,12 +665,22 @@ const buildAIChatModelOptions = (payload, fallbackOptions) => {
   });
 };
 
-const getDefaultImageModelId = (options) => {
+const getDefaultImageModelId = (options, allowFallback = false) => {
   const list = Array.isArray(options) ? options : EMPTY_LIST;
+  if (!list.length) return allowFallback ? DEFAULT_IMAGE_MODEL_ID : "";
   const preferred = list.find((item) => String(item?.id || "").trim() === "4");
-  return preferred?.id || list[0]?.id || DEFAULT_IMAGE_MODEL_ID;
+  return preferred?.id || list[0]?.id || (allowFallback ? DEFAULT_IMAGE_MODEL_ID : "");
 };
-const getDefaultLanguageModelId = (options) => options[0]?.id || "";
+const getDefaultLanguageModelId = (options) => {
+  const list = Array.isArray(options) ? options : EMPTY_LIST;
+  if (!list.length) return "";
+  const preferred = list.find((item) => {
+    const id = String(item?.id || "").trim().toLowerCase();
+    const name = String(item?.name || "").trim().toLowerCase();
+    return name.includes("gemini-3-flash") || id.includes("gemini-3-flash");
+  });
+  return preferred?.id || list[0]?.id || "";
+};
 const getDefaultVideoModelId = (options) => {
   if (!Array.isArray(options) || options.length === 0) return DEFAULT_VIDEO_MODEL_ID;
   return options.find((item) => item.id === VIDEO_MODEL_1_0)?.id || options[0].id;
@@ -686,7 +726,7 @@ const buildAIChatParamPayload = (paramList) => {
   for (const item of paramList) {
     const valueId = resolveDefaultParamValueId(item);
     if (!valueId) continue;
-    const name = String(item?.param_name || "").toLowerCase();
+    const name = String(item?.param_name || item?.name || item?.desc || "").toLowerCase();
     if (name.includes("任务") || name.includes("task") || name.includes("类型")) {
       payload.ai_image_param_task_type_id = valueId;
       continue;
@@ -700,7 +740,7 @@ const buildAIChatParamPayload = (paramList) => {
       continue;
     }
     if (name.includes("比例") || name.includes("ratio")) {
-      payload.ai_video_param_ratio_id = valueId;
+      payload.ai_image_param_ratio_id = valueId;
       continue;
     }
     if (name.includes("时长") || name.includes("duration")) {
@@ -708,6 +748,44 @@ const buildAIChatParamPayload = (paramList) => {
     }
   }
   return payload;
+};
+
+const findAIChatParamItem = (paramList, keywords = []) => {
+  const list = Array.isArray(paramList) ? paramList : EMPTY_LIST;
+  const lowerKeywords = keywords.map((item) => String(item || "").toLowerCase()).filter(Boolean);
+  for (const item of list) {
+    const name = String(item?.param_name || item?.name || item?.desc || "").toLowerCase();
+    if (!name) continue;
+    if (lowerKeywords.some((keyword) => name.includes(keyword))) return item;
+  }
+  return null;
+};
+
+const findAIChatParamValueId = (paramList, keywords = [], preferredValue = "") => {
+  const valueText = String(preferredValue || "").trim().toLowerCase();
+  if (!valueText) return "";
+  const item = findAIChatParamItem(paramList, keywords);
+  if (!item) return "";
+  const values = sortParamValues(item?.param_values || EMPTY_LIST);
+  for (const val of values) {
+    const candidates = [
+      String(val?.param_value || "").trim().toLowerCase(),
+      String(val?.remark || "").trim().toLowerCase(),
+    ].filter(Boolean);
+    if (candidates.includes(valueText)) {
+      const id = val?.param_value_id;
+      return id === undefined || id === null || id === "" ? "" : String(id);
+    }
+  }
+  return "";
+};
+
+const listAIChatParamValues = (paramList, keywords = []) => {
+  const item = findAIChatParamItem(paramList, keywords);
+  if (!item) return EMPTY_LIST;
+  return sortParamValues(item?.param_values || EMPTY_LIST)
+    .map((val) => String(val?.param_value || "").trim())
+    .filter(Boolean);
 };
 
 const TOOL_CARDS = {
@@ -746,9 +824,9 @@ const TOOL_CARDS = {
   },
   text2img: {
     id: "text2img",
-    name: "创意生成 (Text2Img)",
+    name: "文生图",
     short: "文生图",
-    icon: Wand2,
+    icon: ImagePlus,
     desc: "从零生成营销素材",
     scenario: "灵感构思",
     category: "generate",
@@ -758,7 +836,7 @@ const TOOL_CARDS = {
     id: "local_text2img",
     name: "本地文生图",
     short: "本地文生图",
-    icon: Server,
+    icon: ImagePlus,
     desc: "调用 ComfyUI image_z_image_turbo 工作流",
     scenario: "本地推理 / 低延迟",
     category: "generate",
@@ -766,9 +844,9 @@ const TOOL_CARDS = {
   },
   multi_image_generate: {
     id: "multi_image_generate",
-    name: "图生图 (Img2Img)",
+    name: "图生图",
     short: "图生图",
-    icon: ImageIcon,
+    icon: Images,
     desc: "参考原图生成新图像",
     scenario: "风格迁移/重绘",
     category: "generate",
@@ -798,7 +876,7 @@ const TOOL_CARDS = {
     id: "multi_angleshots",
     name: "多角度镜头",
     short: "多角度",
-    icon: Clapperboard,
+    icon: LayoutGrid,
     desc: "单图扩展 8 个镜头角度",
     scenario: "电商展示/机位扩展",
     category: "skill",
@@ -808,7 +886,7 @@ const TOOL_CARDS = {
     id: "video_upscale",
     name: "超分辨率视频",
     short: "视频超分",
-    icon: Sparkles,
+    icon: TrendingUp,
     desc: "视频清晰度增强（自动按 3 秒切片）",
     scenario: "低清视频修复",
     category: "skill",
@@ -829,7 +907,7 @@ const TOOL_CARDS = {
     id: "upscale",
     name: "高清放大 (Upscale)",
     short: "超清放大",
-    icon: Sparkles,
+    icon: TrendingUp,
     desc: "提升分辨率与细节",
     scenario: "最终出图",
     category: "enhance",
@@ -837,9 +915,9 @@ const TOOL_CARDS = {
   },
   img2video: {
     id: "img2video",
-    name: "图生视频 (I2V)",
+    name: "图生视频",
     short: "生视频",
-    icon: Clapperboard,
+    icon: Film,
     desc: "静态图片转动态短视频",
     scenario: "电商动态详情 / 社交媒体",
     refLabel: "尾帧参考图",
@@ -850,7 +928,7 @@ const TOOL_CARDS = {
     id: "local_img2video",
     name: "本地图生视频",
     short: "本地图生视频",
-    icon: Server,
+    icon: Film,
     desc: "调用 ComfyUI Qwen_i2v 工作流",
     scenario: "本地视频生成",
     refLabel: "输入图像",
@@ -1051,44 +1129,63 @@ const ToolIconBtn = ({ icon, onClick, disabled, active, title }) => {
   );
 };
 
-const SidebarBtn = ({ icon, label, desc, onClick, color, bg, active = false, compact = false }) => {
+const SidebarBtn = ({ icon, label, desc, onClick, color, bg, active = false, compact = false, expanded = false, onHoverChange }) => {
   const IconComponent = icon;
   return (
     <button
       onClick={onClick}
-      title={compact ? label : undefined}
-      className={`group relative flex w-full items-center rounded-md border text-left transition-colors ${
+      onMouseEnter={(event) => onHoverChange?.(true, event.currentTarget)}
+      onMouseLeave={() => onHoverChange?.(false)}
+      className={`group relative flex items-center border text-left transition-all duration-200 ${
         compact
-          ? "h-10 justify-center border-transparent text-slate-300 hover:bg-slate-800/70 hover:text-slate-100"
-          : `h-10 gap-2.5 px-2.5 border-slate-800/70 ${
+          ? `justify-center rounded-xl ${
+              expanded ? "h-12 w-12 -translate-y-0.5" : "h-10 w-10"
+            } ${
               active
-                ? "bg-slate-800/85 text-slate-100 border-slate-700/90"
-                : "bg-transparent text-slate-300 hover:bg-slate-800/70 hover:text-slate-100"
+                ? "border-cyan-400/25 bg-[linear-gradient(180deg,rgba(15,23,42,0.95),rgba(30,41,59,0.9))] text-slate-100 shadow-[0_10px_24px_rgba(8,145,178,0.14)]"
+                : "border-transparent text-slate-300 hover:bg-slate-800/70 hover:text-slate-100"
+            }`
+          : `mx-auto min-h-[52px] rounded-[22px] ${
+              expanded ? "w-full px-3.5 py-2.5 justify-start overflow-hidden" : "w-[56px] px-0 py-0 justify-center overflow-hidden"
+            } ${
+              active
+                ? "bg-[linear-gradient(180deg,rgba(15,23,42,0.95),rgba(30,41,59,0.9))] text-slate-100 border-cyan-400/25 shadow-[0_10px_24px_rgba(8,145,178,0.14)]"
+                : "bg-[linear-gradient(180deg,rgba(15,23,42,0.82),rgba(15,23,42,0.68))] text-slate-300 border-slate-800/80 hover:border-slate-600/80 hover:bg-slate-900/90"
             }`
       }`}
     >
       <span
-        className={`absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-r ${
-          active ? "bg-yellow-400" : "bg-transparent group-hover:bg-yellow-500/45"
+        className={`absolute left-0 top-2.5 bottom-2.5 w-0.5 rounded-r transition-all ${
+          active ? "bg-cyan-300" : expanded ? "bg-cyan-400/45" : "bg-transparent"
         }`}
       />
       <div
         className={`${
-          compact ? "w-7 h-7" : "w-6 h-6"
-        } rounded-md ${bg} flex items-center justify-center ${color} shrink-0 ring-1 ${
-          active ? "ring-yellow-500/35" : "ring-slate-700/70 group-hover:ring-slate-500/60"
+          compact ? (expanded ? "w-8 h-8" : "w-7 h-7") : expanded ? "w-10 h-10" : "w-10 h-10"
+        } rounded-2xl ${bg} flex items-center justify-center ${color} shrink-0 ring-1 transition-all ${
+          active ? "ring-cyan-400/35" : "ring-slate-700/70 group-hover:ring-slate-500/60"
         }`}
       >
-        {IconComponent ? React.createElement(IconComponent, { className: "w-5 h-5" }) : null}
+        {IconComponent
+          ? React.createElement(IconComponent, {
+              className: compact ? (expanded ? "w-[22px] h-[22px]" : "w-5 h-5") : "w-[18px] h-[18px]",
+            })
+          : null}
       </div>
       {!compact && (
-        <>
-          <div className="min-w-0 flex-1 overflow-hidden">
-            <div className={`font-medium text-xs truncate ${active ? "text-slate-100" : "text-slate-200 group-hover:text-slate-100"}`}>{label}</div>
+        <div
+          className={`grid transition-all duration-200 ${
+            expanded ? "ml-3 min-w-0 flex-1 opacity-100" : "ml-0 w-0 opacity-0"
+          }`}
+        >
+          <div className="min-w-0 overflow-hidden">
+            <div className={`font-medium text-[12px] truncate ${active ? "text-slate-100" : "text-slate-200 group-hover:text-slate-100"}`}>{label}</div>
             <div className="text-[10px] text-slate-500 truncate">{desc}</div>
           </div>
-          <Plus className={`w-3 h-3 shrink-0 transition-all ${active ? "text-yellow-300 opacity-90" : "text-slate-600 opacity-0 group-hover:opacity-100 group-hover:text-yellow-300"}`} />
-        </>
+          <Plus className={`absolute right-3.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 shrink-0 transition-all ${
+            expanded ? (active ? "text-cyan-200 opacity-90" : "text-slate-500 opacity-100") : "opacity-0"
+          }`} />
+        </div>
       )}
     </button>
   );
@@ -1243,17 +1340,37 @@ const AgentResultCardContent = ({
 
 
 
-const PropertyPanel = ({ node, updateData, onClose, imageModelOptions = EMPTY_LIST, videoModelOptions = EMPTY_LIST }) => {
+const PropertyPanel = ({
+  node,
+  updateData,
+  onClose,
+  imageModelOptions = EMPTY_LIST,
+  videoModelOptions = EMPTY_LIST,
+  resolveModelParamsForId,
+}) => {
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [videoParamOptions, setVideoParamOptions] = useState(() => ({
+    resolution: EMPTY_LIST,
+    ratio: EMPTY_LIST,
+    duration: EMPTY_LIST,
+  }));
+  const [videoParamLoading, setVideoParamLoading] = useState(false);
+  const [videoParamError, setVideoParamError] = useState("");
+  const [imageParamOptions, setImageParamOptions] = useState(() => ({
+    taskType: EMPTY_LIST,
+    size: EMPTY_LIST,
+    ratio: EMPTY_LIST,
+  }));
+  const [imageParamLoading, setImageParamLoading] = useState(false);
+  const [imageParamError, setImageParamError] = useState("");
+  const hasConfigNode = !!node && ![NODE_TYPES.INPUT, NODE_TYPES.OUTPUT, NODE_TYPES.TEXT_INPUT].includes(node?.type);
 
-  if (!node || [NODE_TYPES.INPUT, NODE_TYPES.OUTPUT, NODE_TYPES.TEXT_INPUT].includes(node.type)) return null;
+  const isProcessor = node?.type === NODE_TYPES.PROCESSOR;
+  const isPostProcessor = node?.type === NODE_TYPES.POST_PROCESSOR;
+  const isVideoGen = node?.type === NODE_TYPES.VIDEO_GEN;
 
-  const isProcessor = node.type === NODE_TYPES.PROCESSOR;
-  const isPostProcessor = node.type === NODE_TYPES.POST_PROCESSOR;
-  const isVideoGen = node.type === NODE_TYPES.VIDEO_GEN;
-
-  const currentMode = TOOL_CARDS[node.data.mode] || TOOL_CARDS.bg_replace;
-  const activeTemplates = PROMPT_TEMPLATES[node.data.mode];
+  const currentMode = TOOL_CARDS[node?.data?.mode] || TOOL_CARDS.bg_replace;
+  const activeTemplates = PROMPT_TEMPLATES[node?.data?.mode];
 
   const theme = (() => {
     if (isPostProcessor) return { text: "text-cyan-400", bg: "bg-cyan-600", border: "border-cyan-500" };
@@ -1271,9 +1388,198 @@ const PropertyPanel = ({ node, updateData, onClose, imageModelOptions = EMPTY_LI
 
   const promptModes = ["text2img", "local_text2img", "multi_image_generate", "feature_extract", "local_img2video"];
   const isSkillProcessor = isProcessor && currentMode.category === "skill";
-  const isMultiAnglesSkill = node.data.mode === "multi_angleshots";
-  const isLocalText2Img = node.data.mode === "local_text2img";
-  const isLocalImg2Video = node.data.mode === "local_img2video";
+  const isMultiAnglesSkill = node?.data?.mode === "multi_angleshots";
+  const isLocalText2Img = node?.data?.mode === "local_text2img";
+  const isLocalImg2Video = node?.data?.mode === "local_img2video";
+  const isRemoteImg2Video = isVideoGen && !isLocalImg2Video && node?.data?.mode === "img2video";
+  const isRemoteImageGen =
+    isProcessor &&
+    !isLocalText2Img &&
+    (node?.data?.mode === "text2img" || node?.data?.mode === "multi_image_generate");
+  const currentVideoModelId = String(node?.data?.model || "").trim();
+  const currentImageModelId = String(node?.data?.model || "").trim();
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!isRemoteImg2Video || typeof resolveModelParamsForId !== "function" || !currentVideoModelId) {
+      setVideoParamOptions({ resolution: EMPTY_LIST, ratio: EMPTY_LIST, duration: EMPTY_LIST });
+      setVideoParamLoading(false);
+      setVideoParamError("");
+      return () => {
+        cancelled = true;
+      };
+    }
+    setVideoParamLoading(true);
+    setVideoParamError("");
+    resolveModelParamsForId(currentVideoModelId)
+      .then((paramList) => {
+        if (cancelled) return;
+        const readOptions = (keywords = []) => {
+          const item = findAIChatParamItem(paramList, keywords);
+          if (!item) return EMPTY_LIST;
+          return sortParamValues(item?.param_values || EMPTY_LIST)
+            .map((val) => String(val?.param_value || "").trim())
+            .filter(Boolean);
+        };
+        setVideoParamOptions({
+          resolution: readOptions(["resolution", "分辨率"]),
+          ratio: readOptions(["ratio", "比例", "宽高比"]),
+          duration: readOptions(["duration", "时长"]),
+        });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setVideoParamError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setVideoParamLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isRemoteImg2Video, resolveModelParamsForId, currentVideoModelId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!isRemoteImageGen || typeof resolveModelParamsForId !== "function" || !currentImageModelId) {
+      setImageParamOptions({ taskType: EMPTY_LIST, size: EMPTY_LIST, ratio: EMPTY_LIST });
+      setImageParamLoading(false);
+      setImageParamError("");
+      return () => {
+        cancelled = true;
+      };
+    }
+    setImageParamLoading(true);
+    setImageParamError("");
+    resolveModelParamsForId(currentImageModelId)
+      .then((paramList) => {
+        if (cancelled) return;
+        setImageParamOptions({
+          taskType: listAIChatParamValues(paramList, ["task", "任务", "类型"]),
+          size: listAIChatParamValues(paramList, ["size", "尺寸"]),
+          ratio: listAIChatParamValues(paramList, ["ratio", "比例", "宽高比"]),
+        });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setImageParamError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setImageParamLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isRemoteImageGen, resolveModelParamsForId, currentImageModelId]);
+
+  const remoteResolutionOptions = useMemo(() => {
+    if (videoParamOptions.resolution.length) return videoParamOptions.resolution;
+    return node?.data?.model === VIDEO_MODEL_1_5 ? ["480p", "720p"] : ["480p", "720p", "1080p"];
+  }, [videoParamOptions.resolution, node?.data?.model]);
+
+  const remoteDurationOptions = useMemo(() => {
+    if (videoParamOptions.duration.length) return videoParamOptions.duration;
+    return node?.data?.model === VIDEO_MODEL_1_5 ? ["4", "5", "8", "12"] : ["3", "5", "10"];
+  }, [videoParamOptions.duration, node?.data?.model]);
+
+  const remoteRatioOptions = useMemo(() => {
+    if (videoParamOptions.ratio.length) return videoParamOptions.ratio;
+    return ["16:9", "9:16", "3:4", "21:9", "adaptive"];
+  }, [videoParamOptions.ratio]);
+
+  const remoteImageSizeOptions = useMemo(() => {
+    if (imageParamOptions.size.length) return imageParamOptions.size;
+    return imageParamLoading || imageParamError ? ["1024x1024", "2k", "4k"] : EMPTY_LIST;
+  }, [imageParamOptions.size, imageParamLoading, imageParamError]);
+
+  const remoteImageRatioOptions = useMemo(() => {
+    if (imageParamOptions.ratio.length) return imageParamOptions.ratio;
+    return EMPTY_LIST;
+  }, [imageParamOptions.ratio]);
+
+  const remoteImageTaskTypeOptions = useMemo(() => {
+    if (imageParamOptions.taskType.length) return imageParamOptions.taskType;
+    return EMPTY_LIST;
+  }, [imageParamOptions.taskType]);
+
+  useEffect(() => {
+    if (!isRemoteImg2Video) return;
+    if (!node) return;
+    const currentTemplates = node.data.templates || {};
+    const nextTemplates = { ...currentTemplates };
+    let changed = false;
+
+    const currentResolution = String(currentTemplates.resolution || "").trim().toLowerCase();
+    const allowedResolutions = new Set(remoteResolutionOptions.map((item) => String(item).trim().toLowerCase()));
+    if (remoteResolutionOptions.length && !allowedResolutions.has(currentResolution)) {
+      nextTemplates.resolution = remoteResolutionOptions[0];
+      changed = true;
+    }
+
+    const currentDuration = String(currentTemplates.duration ?? "").trim();
+    const allowedDurations = new Set(remoteDurationOptions.map((item) => String(item).trim()));
+    if (remoteDurationOptions.length && !allowedDurations.has(currentDuration)) {
+      nextTemplates.duration = remoteDurationOptions[0];
+      changed = true;
+    }
+
+    const currentRatio = String(currentTemplates.ratio || "").trim();
+    const allowedRatios = new Set(remoteRatioOptions.map((item) => String(item).trim()));
+    if (currentRatio && remoteRatioOptions.length && !allowedRatios.has(currentRatio)) {
+      nextTemplates.ratio = "";
+      changed = true;
+    }
+
+    if (changed) updateData(node.id, { templates: nextTemplates });
+  }, [isRemoteImg2Video, remoteResolutionOptions, remoteDurationOptions, remoteRatioOptions, node?.data?.templates, node?.id, updateData]);
+
+  useEffect(() => {
+    if (!isRemoteImageGen || !node) return;
+    const currentTemplates = node.data.templates || {};
+    const nextTemplates = { ...currentTemplates };
+    let changed = false;
+
+    const currentSize = String(currentTemplates.size || "").trim();
+    if (remoteImageSizeOptions.length && currentSize && !remoteImageSizeOptions.includes(currentSize)) {
+      nextTemplates.size = remoteImageSizeOptions[0];
+      changed = true;
+    }
+
+    const currentRatio = String(currentTemplates.aspect_ratio || "").trim();
+    if (currentRatio && remoteImageRatioOptions.length && !remoteImageRatioOptions.includes(currentRatio)) {
+      delete nextTemplates.aspect_ratio;
+      changed = true;
+    }
+
+    const currentTaskType = String(currentTemplates.task_type || "").trim();
+    if (currentTaskType && remoteImageTaskTypeOptions.length && !remoteImageTaskTypeOptions.includes(currentTaskType)) {
+      delete nextTemplates.task_type;
+      changed = true;
+    }
+
+    if (changed) updateData(node.id, { templates: nextTemplates });
+  }, [
+    isRemoteImageGen,
+    remoteImageSizeOptions,
+    remoteImageRatioOptions,
+    remoteImageTaskTypeOptions,
+    node?.data?.templates,
+    node?.id,
+    updateData,
+  ]);
+
+  const effectiveTemplates = useMemo(() => {
+    if (!activeTemplates) return activeTemplates;
+    if (!isRemoteImg2Video || !Array.isArray(activeTemplates.categories)) return activeTemplates;
+    return {
+      ...activeTemplates,
+      categories: activeTemplates.categories.map((cat) =>
+        cat?.key === "ratio" ? { ...cat, options: remoteRatioOptions } : cat,
+      ),
+    };
+  }, [activeTemplates, isRemoteImg2Video, remoteRatioOptions]);
 
   const handleRefUpload = (e) => {
     const file = e.target.files?.[0];
@@ -1305,14 +1611,16 @@ const PropertyPanel = ({ node, updateData, onClose, imageModelOptions = EMPTY_LI
   };
 
   const previewPrompt = [
-    node.data.prompt,
-    node.data.templates?.style,
-    node.data.templates?.direction,
-    node.data.templates?.vibe,
-    node.data.templates?.note,
+    node?.data?.prompt,
+    node?.data?.templates?.style,
+    node?.data?.templates?.direction,
+    node?.data?.templates?.vibe,
+    node?.data?.templates?.note,
   ]
     .filter(Boolean)
     .join(", ");
+
+  if (!hasConfigNode) return null;
 
   return (
   <div className="w-80 bg-slate-900 border-l border-slate-800 z-40 flex flex-col shadow-xl shrink-0 h-full min-h-0 overflow-hidden animate-in slide-in-from-right duration-200">
@@ -1443,7 +1751,7 @@ const PropertyPanel = ({ node, updateData, onClose, imageModelOptions = EMPTY_LI
         {!isSkillProcessor && (
           <div className="space-y-1">
             <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
-              {promptModes.includes(node.data.mode) ? "提示词 (Prompt)" : "补充描述 / Note"}
+              {promptModes.includes(node.data.mode) ? "提示词" : "补充描述 / Note"}
             </div>
             <textarea
               className={`w-full bg-slate-950 border rounded p-2 text-xs text-slate-200 outline-none resize-none transition-colors border-slate-800 focus:${theme.border}`}
@@ -1529,40 +1837,11 @@ const PropertyPanel = ({ node, updateData, onClose, imageModelOptions = EMPTY_LI
                     onClick={() => {
                       const nextModel = m.id;
                       const prevT = node.data.templates || {};
-
-                      // ✅ 切到 1.5：时长 4~12；分辨率仅 480/720；默认开声音
-                      if (nextModel === VIDEO_MODEL_1_5) {
-                        const prevRes = (prevT.resolution || "").toLowerCase();
-                        const nextResolution = ["480p", "720p"].includes(prevRes) ? prevRes : "720p";
-
-                        const d = parseInt(String(prevT.duration ?? 5), 10);
-                        const nextDuration = Math.min(12, Math.max(4, isNaN(d) ? 5 : d));
-
-                        updateData(node.id, {
-                          model: nextModel,
-                          templates: {
-                            ...prevT,
-                            resolution: nextResolution,
-                            duration: nextDuration,
-                            generate_audio_new: prevT.generate_audio_new ?? true,
-                          },
-                        });
-                        return;
-                      }
-
-                      // ✅ 切到 1.0：时长 3~12；分辨率允许 1080p
-                      const d = parseInt(String(prevT.duration ?? 5), 10);
-                      const nextDuration = Math.min(12, Math.max(3, isNaN(d) ? 5 : d));
-
-                      const prevRes = (prevT.resolution || "").toLowerCase();
-                      const nextResolution = prevRes || "1080p"; // 保留已有设置，没有就给 1080p
-
                       updateData(node.id, {
                         model: nextModel,
                         templates: {
                           ...prevT,
-                          duration: nextDuration,
-                          resolution: nextResolution,
+                          generate_audio_new: prevT.generate_audio_new ?? true,
                         },
                       });
                     }}
@@ -1601,40 +1880,29 @@ const PropertyPanel = ({ node, updateData, onClose, imageModelOptions = EMPTY_LI
         }}
         className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-200 outline-none"
       />
-    ) : node.data.model === VIDEO_MODEL_1_5 ? (
-      <input
-        type="number"
-        min={4}
-        max={12}
-        step={1}
-        value={parseInt(String(node.data.templates?.duration ?? 5), 10)}
-        onChange={(e) => {
-          const v = parseInt(e.target.value, 10);
-          const clamped = Math.min(12, Math.max(4, isNaN(v) ? 5 : v));
-          updateData(node.id, { templates: { ...(node.data.templates || {}), duration: clamped } });
-        }}
-        className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-200 outline-none"
-      />
     ) : (
-      <div className="grid grid-cols-3 gap-2">
-        {[3, 5, 10].map((sec) => {
-          const cur = parseInt(String(node.data.templates?.duration ?? 5), 10);
-          const isSel = cur === sec;
+      <div className="grid grid-cols-4 gap-2">
+        {remoteDurationOptions.map((sec) => {
+          const secText = String(sec).trim();
+          const cur = String(node.data.templates?.duration ?? "").trim();
+          const isSel = cur ? cur === secText : secText === String(remoteDurationOptions[0] || "").trim();
           return (
             <button
-              key={sec}
+              key={secText}
               type="button"
-              onClick={() => updateData(node.id, { templates: { ...(node.data.templates || {}), duration: sec } })}
+              onClick={() => updateData(node.id, { templates: { ...(node.data.templates || {}), duration: secText } })}
               className={`px-2 py-1.5 rounded-md text-[10px] border transition-all ${
                 isSel ? "bg-rose-600 border-rose-500 text-white" : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-600"
               }`}
             >
-              {sec}秒
+              {secText}秒
             </button>
           );
         })}
       </div>
     )}
+    {!isLocalImg2Video && videoParamLoading ? <div className="text-[10px] text-slate-500">参数加载中...</div> : null}
+    {!isLocalImg2Video && videoParamError ? <div className="text-[10px] text-amber-400">{videoParamError}</div> : null}
   </div>
 )}
           {isVideoGen && (
@@ -1642,9 +1910,10 @@ const PropertyPanel = ({ node, updateData, onClose, imageModelOptions = EMPTY_LI
     <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">分辨率</div>
 
     <div className="grid grid-cols-3 gap-2">
-      {(isLocalImg2Video ? ["480p", "720p"] : node.data.model === VIDEO_MODEL_1_5 ? ["480p", "720p"] : ["480p", "720p", "1080p"]).map((r) => {
+      {(isLocalImg2Video ? ["480p", "720p"] : remoteResolutionOptions).map((r) => {
         const fallbackResolution = isLocalImg2Video ? "480p" : "1080p";
-        const isSel = (node.data.templates?.resolution || fallbackResolution) === r;
+        const remoteFallbackResolution = String(remoteResolutionOptions[0] || fallbackResolution);
+        const isSel = (node.data.templates?.resolution || remoteFallbackResolution) === r;
         const label = r.toUpperCase(); // 480P/720P/1080P
         return (
           <button
@@ -1733,29 +2002,63 @@ const PropertyPanel = ({ node, updateData, onClose, imageModelOptions = EMPTY_LI
               node.data.mode === "feature_extract" ||
               node.data.mode === "rmbg") && (
             <>
+              {isRemoteImageGen && remoteImageTaskTypeOptions.length > 0 && (
+                <div>
+                  <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">任务类型 (Task)</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {remoteImageTaskTypeOptions.map((opt) => {
+                      const isSelected = String(node.data.templates?.task_type || "").trim() === String(opt).trim();
+                      return (
+                        <button
+                          key={opt}
+                          onClick={() => {
+                            const nextTemplates = { ...(node.data.templates || {}) };
+                            nextTemplates.task_type = isSelected ? "" : opt;
+                            updateData(node.id, { templates: nextTemplates });
+                          }}
+                          className={`px-2 py-1 rounded-md text-[10px] border transition-all ${
+                            isSelected ? "bg-purple-600 border-purple-500 text-white" : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-600"
+                          }`}
+                          type="button"
+                        >
+                          {opt}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               <div>
                 <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">尺寸 (Size)</div>
-                <div className="grid grid-cols-3 gap-1.5">
-                  {(node.data.mode === "local_text2img" ? ["1k", "2k"] : ["1k", "2k", "4k"]).map((opt) => {
-                    let value = opt;
-                    if (opt === "1k") value = "1024x1024";
-                    const isSelected = node.data.templates?.size === value || (!node.data.templates?.size && opt === "1k");
-                    return (
-                      <button
-                        key={opt}
-                        onClick={() => updateData(node.id, { templates: { ...(node.data.templates || {}), size: value } })}
-                        className={`px-2 py-1.5 rounded-md text-[10px] border transition-all ${
-                          isSelected
-                            ? "bg-purple-600 border-purple-500 text-white"
-                            : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-600"
-                        }`}
-                        type="button"
-                      >
-                        {opt}
-                      </button>
-                    );
-                  })}
-                </div>
+                {(node.data.mode === "local_text2img" ? ["1k", "2k"] : (isRemoteImageGen ? remoteImageSizeOptions : ["1k", "2k", "4k"])).length > 0 ? (
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {(node.data.mode === "local_text2img" ? ["1k", "2k"] : (isRemoteImageGen ? remoteImageSizeOptions : ["1k", "2k", "4k"])).map((opt) => {
+                      let value = opt;
+                      if (!isRemoteImageGen && opt === "1k") value = "1024x1024";
+                      const fallbackSize = isRemoteImageGen ? String(remoteImageSizeOptions[0] || "") : "1024x1024";
+                      const isSelected = String(node.data.templates?.size || fallbackSize) === String(value);
+                      return (
+                        <button
+                          key={String(opt)}
+                          onClick={() => updateData(node.id, { templates: { ...(node.data.templates || {}), size: value } })}
+                          className={`px-2 py-1.5 rounded-md text-[10px] border transition-all ${
+                            isSelected
+                              ? "bg-purple-600 border-purple-500 text-white"
+                              : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-600"
+                          }`}
+                          type="button"
+                        >
+                          {String(opt)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="text-[10px] text-slate-500">该模型未返回尺寸参数</div>
+                )}
+                {isRemoteImageGen && imageParamLoading ? <div className="mt-2 text-[10px] text-slate-500">参数加载中...</div> : null}
+                {isRemoteImageGen && imageParamError ? <div className="mt-2 text-[10px] text-amber-400">{imageParamError}</div> : null}
               </div>
 
               <div>
@@ -1763,46 +2066,82 @@ const PropertyPanel = ({ node, updateData, onClose, imageModelOptions = EMPTY_LI
                 {node.data.mode === "multi_image_generate" && (
                   <div className="text-[10px] text-slate-500 mb-2">可不选；不选时默认跟随输入图像尺寸</div>
                 )}
-                <div className="grid grid-cols-5 gap-2">
-                  {ASPECT_RATIOS.map((ar) => {
-                    const selectedRatio = node.data.templates?.aspect_ratio;
-                    const isImg2Img = node.data.mode === "multi_image_generate";
-                    const isSelected = (isImg2Img ? selectedRatio : selectedRatio || "1:1") === ar.label;
-                    return (
-                      <button
-                        key={ar.label}
-                        onClick={() => {
-                          const nextTemplates = { ...(node.data.templates || {}) };
-                          if (isImg2Img && isSelected) {
-                            delete nextTemplates.aspect_ratio;
-                          } else {
-                            nextTemplates.aspect_ratio = ar.label;
-                          }
-                          updateData(node.id, { templates: nextTemplates });
-                        }}
-                        className={`flex flex-col items-center gap-1 p-1 rounded-md border transition-all ${
-                          isSelected
-                            ? "bg-purple-600 border-purple-500 text-white"
-                            : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-600 hover:bg-slate-800"
-                        }`}
-                        title={ar.label}
-                        type="button"
-                      >
-                        <div
-                          className={`border ${isSelected ? "border-white bg-white/20" : "border-slate-500 bg-slate-800"}`}
-                          style={{ width: ar.w, height: ar.h, borderRadius: 2 }}
-                        />
-                        <span className="text-[9px] scale-90">{ar.label}</span>
-                      </button>
-                    );
-                  })}
-                </div>
+                {isRemoteImageGen ? (
+                  remoteImageRatioOptions.length > 0 ? (
+                  <div className="flex flex-wrap gap-1.5">
+                    {remoteImageRatioOptions.map((ratioText) => {
+                      const selectedRatio = String(node.data.templates?.aspect_ratio || "").trim();
+                      const isImg2Img = node.data.mode === "multi_image_generate";
+                      const isSelected = selectedRatio === String(ratioText).trim();
+                      return (
+                        <button
+                          key={ratioText}
+                          onClick={() => {
+                            const nextTemplates = { ...(node.data.templates || {}) };
+                            if (isImg2Img && isSelected) {
+                              delete nextTemplates.aspect_ratio;
+                            } else {
+                              nextTemplates.aspect_ratio = ratioText;
+                            }
+                            updateData(node.id, { templates: nextTemplates });
+                          }}
+                          className={`px-2 py-1 rounded-md text-[10px] border transition-all ${
+                            isSelected
+                              ? "bg-purple-600 border-purple-500 text-white"
+                              : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-600"
+                          }`}
+                          type="button"
+                        >
+                          {ratioText}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  ) : (
+                    <div className="text-[10px] text-slate-500">该模型未返回比例参数</div>
+                  )
+                ) : (
+                  <div className="grid grid-cols-5 gap-2">
+                    {ASPECT_RATIOS.map((ar) => {
+                      const selectedRatio = node.data.templates?.aspect_ratio;
+                      const isImg2Img = node.data.mode === "multi_image_generate";
+                      const isSelected = (isImg2Img ? selectedRatio : selectedRatio || "1:1") === ar.label;
+                      return (
+                        <button
+                          key={ar.label}
+                          onClick={() => {
+                            const nextTemplates = { ...(node.data.templates || {}) };
+                            if (isImg2Img && isSelected) {
+                              delete nextTemplates.aspect_ratio;
+                            } else {
+                              nextTemplates.aspect_ratio = ar.label;
+                            }
+                            updateData(node.id, { templates: nextTemplates });
+                          }}
+                          className={`flex flex-col items-center gap-1 p-1 rounded-md border transition-all ${
+                            isSelected
+                              ? "bg-purple-600 border-purple-500 text-white"
+                              : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-600 hover:bg-slate-800"
+                          }`}
+                          title={ar.label}
+                          type="button"
+                        >
+                          <div
+                            className={`border ${isSelected ? "border-white bg-white/20" : "border-slate-500 bg-slate-800"}`}
+                            style={{ width: ar.w, height: ar.h, borderRadius: 2 }}
+                          />
+                          <span className="text-[9px] scale-90">{ar.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </>
           )}
 
           {/* Style Templates */}
-          {activeTemplates?.categories?.map((cat, idx) => (
+          {effectiveTemplates?.categories?.map((cat, idx) => (
             <div key={idx} className="space-y-1.5">
               <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{cat.name}</div>
               <div className="flex flex-wrap gap-1.5">
@@ -1855,7 +2194,7 @@ const PropertyPanel = ({ node, updateData, onClose, imageModelOptions = EMPTY_LI
 
     {/* Preview（固定在底部） */}
     <div className="p-4 border-t border-slate-800">
-      <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Prompt 预览</div>
+      <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">提示词预览</div>
       <div className="text-[10px] text-slate-400 font-mono bg-black/20 p-2 rounded border border-slate-800/50 break-words">
         {previewPrompt || "(暂无内容)"}
       </div>
@@ -1941,10 +2280,18 @@ const NodeComponent = ({
   const isInput = node.type === NODE_TYPES.INPUT;
   const isOutput = node.type === NODE_TYPES.OUTPUT;
 
-  let statusColor = "border-slate-800";
-  if (node.data.status === "error") statusColor = "border-red-500 shadow-[0_0_10px_rgba(239,68,68,0.3)]";
-  else if (node.data.status === "success") statusColor = "border-green-500/50";
-  else if (selected) statusColor = "border-white ring-2 ring-blue-500 ring-offset-2 ring-offset-slate-900";
+  let statusColor =
+    "border-slate-800/85 shadow-[0_24px_56px_rgba(2,6,23,0.42)] hover:border-slate-700/90";
+  if (node.data.status === "error") {
+    statusColor =
+      "border-red-900/70 shadow-[0_24px_60px_rgba(127,29,29,0.28)] ring-1 ring-red-500/12";
+  } else if (node.data.status === "success") {
+    statusColor =
+      "border-emerald-900/55 shadow-[0_24px_60px_rgba(2,44,34,0.28)]";
+  } else if (selected) {
+    statusColor =
+      "border-cyan-800/80 ring-1 ring-cyan-400/22 shadow-[0_28px_64px_rgba(8,145,178,0.18)]";
+  }
 
   let title = "Node";
   if (isInput) title = `图片/视频上传 (${node.data.images?.length || 0})`;
@@ -1952,14 +2299,21 @@ const NodeComponent = ({
   if (isProcessor) title = TOOL_CARDS[node.data.mode]?.name || "图片生成";
   if (isPostProcessor) title = TOOL_CARDS[node.data.mode]?.name || "后期增强";
   if (isVideoGen) title = TOOL_CARDS[node.data.mode]?.name || "视频生成";
-  if (node.type === NODE_TYPES.TEXT_INPUT) title = "Prompt";
+  if (node.type === NODE_TYPES.TEXT_INPUT) title = "提示词";
 
   const getThemeColor = () => {
-    if (isPostProcessor) return { text: "text-cyan-400", icon: Palette };
-    if (isVideoGen) return { text: "text-rose-400", icon: Film };
-    if (isInput) return { text: "text-blue-400", icon: Images };
+    const modeCard = TOOL_CARDS[node.data.mode] || null;
+    if (node.type === NODE_TYPES.TEXT_INPUT) return { text: "text-amber-300", icon: Clipboard };
+    if (isPostProcessor) return { text: "text-cyan-400", icon: modeCard?.icon || Palette };
+    if (isVideoGen) return { text: "text-rose-400", icon: modeCard?.icon || Film };
+    if (isInput) return { text: "text-blue-400", icon: Upload };
     if (isOutput) return { text: "text-green-400", icon: Download };
-    return { text: "text-purple-400", icon: Wand2 };
+    if (isProcessor) {
+      if (modeCard?.category === "skill") return { text: "text-amber-300", icon: modeCard.icon };
+      if (modeCard?.category === "enhance") return { text: "text-cyan-300", icon: modeCard.icon };
+      return { text: "text-purple-400", icon: modeCard?.icon || ImagePlus };
+    }
+    return { text: "text-purple-400", icon: ImagePlus };
   };
   const theme = getThemeColor();
   const Icon = theme.icon;
@@ -1977,8 +2331,8 @@ const NodeComponent = ({
     return (
       <div
         key={i}
-        className={`aspect-square relative group rounded overflow-hidden bg-slate-950 border cursor-pointer ${
-          isActive ? "border-yellow-400 ring-2 ring-yellow-400/40" : "border-slate-800"
+        className={`aspect-square relative group overflow-hidden rounded-[18px] border bg-[linear-gradient(150deg,rgba(6,11,21,0.98),rgba(13,22,39,0.95)_58%,rgba(9,17,31,0.98))] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] cursor-pointer ${
+          isActive ? "border-amber-700/80 ring-1 ring-amber-400/18" : "border-slate-800/90"
         }`}
         onPointerDown={(e) => e.stopPropagation()}
         onMouseDown={(e) => e.stopPropagation()}
@@ -2000,7 +2354,7 @@ const NodeComponent = ({
         {/* ✅ 真正可点的“选中产物”按钮：只选中，不预览 */}
         <button
           type="button"
-          className="nodrag absolute bottom-1 left-1 text-[9px] px-2 py-1 rounded bg-black/60 text-white opacity-0 group-hover:opacity-100 hover:bg-yellow-500/30 hover:text-yellow-200 transition"
+          className="nodrag absolute bottom-1.5 left-1.5 text-[9px] px-2 py-1 rounded-full border border-slate-700/80 bg-slate-950/84 text-slate-100 opacity-0 backdrop-blur-sm group-hover:opacity-100 hover:border-amber-700/60 hover:bg-amber-500/12 hover:text-amber-100 transition"
           onPointerDown={(e) => e.stopPropagation()}
           onMouseDown={(e) => e.stopPropagation()}
           onClick={(e) => {
@@ -2034,21 +2388,23 @@ const NodeComponent = ({
 
   return (
     <div
-      className={`absolute w-[280px] rounded-2xl border bg-slate-900/95 backdrop-blur-md shadow-2xl flex flex-col transition-colors transition-shadow duration-200 ${statusColor}`}
+      className={`absolute w-[280px] overflow-hidden rounded-[30px] border bg-[linear-gradient(155deg,rgba(6,12,24,0.98),rgba(10,19,35,0.96)_50%,rgba(7,15,29,0.98))] backdrop-blur-xl shadow-[0_30px_80px_rgba(2,6,23,0.48)] flex flex-col transition-colors transition-shadow duration-200 before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:h-14 before:bg-[linear-gradient(180deg,rgba(148,163,184,0.06),rgba(148,163,184,0))] ${statusColor}`}
       style={{ left: node.x, top: node.y }}
       onMouseDown={onMouseDown}
     >
       {/* Header */}
       <div
-        className={`flex justify-between items-center p-3 border-b border-slate-800 bg-slate-950/50 rounded-t-2xl handle cursor-grab active:cursor-grabbing ${
-          selected ? "bg-blue-900/20" : ""
+        className={`relative flex justify-between items-center px-4 py-3.5 border-b border-slate-800/80 bg-[linear-gradient(180deg,rgba(15,23,42,0.28),rgba(15,23,42,0.06))] handle cursor-grab active:cursor-grabbing ${
+          selected ? "bg-cyan-950/24" : ""
         }`}
       >
         <div className="flex items-center gap-2 overflow-hidden">
-          <Icon className={`w-4 h-4 ${theme.text}`} />
-          <span className="font-semibold text-sm text-slate-200 truncate select-none">{title}</span>
+          <div className="flex h-8 w-8 items-center justify-center rounded-[14px] border border-slate-800/80 bg-slate-900/70 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+            <Icon className={`w-4 h-4 ${theme.text}`} />
+          </div>
+          <span className="font-medium text-[13px] tracking-[0.01em] text-slate-100 truncate select-none">{title}</span>
           {isReady && (
-            <div className="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.8)]" title="Ready to Run" />
+            <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.85)]" title="Ready to Run" />
           )}
         </div>
         <div className="flex gap-1">
@@ -2059,7 +2415,7 @@ const NodeComponent = ({
                 e.stopPropagation();
                 onRetry?.();
               }}
-              className="text-red-400 hover:bg-red-900/30 p-1 rounded"
+              className="rounded-full border border-red-900/70 bg-red-950/50 p-1.5 text-red-300 transition hover:border-red-800 hover:bg-red-900/60"
               title="重试"
               type="button"
             >
@@ -2068,7 +2424,7 @@ const NodeComponent = ({
           )}
 
           {isAI && (
-            <div className={`p-1 rounded ${selected ? "bg-slate-800 text-white" : "text-slate-600"}`}>
+            <div className={`rounded-full border p-1.5 ${selected ? "border-slate-700/90 bg-slate-900/80 text-white" : "border-slate-800/80 bg-slate-900/55 text-slate-500"}`}>
               <Settings2 className="w-3.5 h-3.5" />
             </div>
           )}
@@ -2079,7 +2435,7 @@ const NodeComponent = ({
               e.stopPropagation();
               onDelete?.();
             }}
-            className="text-slate-500 hover:text-red-400 hover:bg-slate-800 rounded p-1 transition-colors"
+            className="rounded-full border border-slate-800/80 bg-slate-900/55 p-1.5 text-slate-500 transition-colors hover:border-red-900 hover:bg-red-950/55 hover:text-red-300"
             type="button"
           >
             <X className="w-3.5 h-3.5" />
@@ -2087,22 +2443,22 @@ const NodeComponent = ({
         </div>
       </div>
 
-      <div className="p-3 space-y-3">
+      <div className="space-y-3 p-4">
         {/* Error */}
         {node.data.status === "error" && (
-          <div className="bg-red-950/40 border border-red-900/50 rounded p-2 text-xs text-red-300 flex flex-col gap-2 animate-in fade-in zoom-in-95">
+          <div className="rounded-[22px] border border-red-900/70 bg-[linear-gradient(180deg,rgba(69,10,10,0.7),rgba(28,10,10,0.76))] px-3 py-2.5 text-xs text-red-200 flex flex-col gap-2 animate-in fade-in zoom-in-95 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
             <div className="flex items-start gap-2">
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-500" />
               <span className="break-all font-mono">{node.data.error || "Unknown Error"}</span>
             </div>
-            <div className="flex justify-end gap-2 border-t border-red-900/30 pt-1 mt-1">
+            <div className="mt-1 flex justify-end gap-2 border-t border-red-400/10 pt-1">
               <button
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
                   e.stopPropagation();
                   copyDebugInfo();
                 }}
-                className="flex items-center gap-1 text-[9px] opacity-70 hover:opacity-100"
+                className="flex items-center gap-1 text-[9px] opacity-75 transition hover:opacity-100"
                 type="button"
               >
                 <Clipboard className="w-3 h-3" /> {showCopied ? "已复制!" : "复制调试信息"}
@@ -2115,13 +2471,13 @@ const NodeComponent = ({
         {isAI && (
           <div className="space-y-2">
             {isProcessor && node.data.mode === "video_upscale" && (
-              <div className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-300">
+              <div className="rounded-full border border-amber-900/65 bg-amber-950/55 px-2.5 py-1 text-[10px] text-amber-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
                 提醒：上传480P视频
               </div>
             )}
             {node.data.status === "loading" && (
-              <div className="space-y-1">
-                <div className="flex justify-between text-[10px] text-slate-400">
+              <div className="space-y-1.5 rounded-[22px] border border-slate-800/80 bg-slate-900/42 px-3 py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+                <div className="flex justify-between text-[10px] text-slate-300">
                   <span className="flex items-center gap-1">
                     <Loader2 className="w-3 h-3 animate-spin" /> 处理中...
                   </span>
@@ -2129,8 +2485,8 @@ const NodeComponent = ({
                     {node.data.progress || 0}/{node.data.total || 0}
                   </span>
                 </div>
-                <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
-                  <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: safeProgressWidth }} />
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-950/90">
+                  <div className="h-full bg-[linear-gradient(90deg,rgba(34,211,238,0.88),rgba(59,130,246,0.92))] transition-all duration-300" style={{ width: safeProgressWidth }} />
                 </div>
               </div>
             )}
@@ -2144,9 +2500,9 @@ const NodeComponent = ({
               </div>
             ) : (
               !["loading", "error"].includes(node.data.status) && (
-                <div className="flex flex-col items-center justify-center py-6 text-slate-600 bg-slate-950/50 rounded border border-dashed border-slate-800">
-                  {isReady ? <Play className="w-6 h-6 mb-2 text-green-500/50" /> : <Icon className="w-6 h-6 mb-2 opacity-20" />}
-                  <span className="text-[10px]">{isReady ? "准备就绪" : "等待连接..."}</span>
+                <div className="flex flex-col items-center justify-center rounded-[24px] border border-dashed border-slate-800/85 bg-[linear-gradient(180deg,rgba(15,23,42,0.34),rgba(15,23,42,0.16))] py-7 text-slate-500 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+                  {isReady ? <Play className="mb-2 h-6 w-6 text-emerald-300/70" /> : <Icon className="mb-2 h-6 w-6 opacity-25" />}
+                  <span className="text-[10px] tracking-[0.03em]">{isReady ? "准备就绪" : "等待连接..."}</span>
                 </div>
               )
             )}
@@ -2158,7 +2514,7 @@ const NodeComponent = ({
                   e.stopPropagation();
                   onContinue?.(node.id);
                 }}
-                className="w-full py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[10px] flex items-center justify-center gap-1 transition-colors border border-slate-700"
+                className="flex w-full items-center justify-center gap-1 rounded-full border border-slate-800/80 bg-slate-900/60 py-2 text-[10px] text-slate-200 transition-colors hover:border-cyan-800 hover:bg-cyan-950/36"
                 type="button"
               >
                 <Film className="w-3 h-3" /> 生成视频 <ArrowRight className="w-3 h-3" />
@@ -2172,7 +2528,7 @@ const NodeComponent = ({
                   e.stopPropagation();
                   onIterateImg2Img?.(node.id);
                 }}
-                className="w-full py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[10px] flex items-center justify-center gap-1 transition-colors border border-slate-700"
+                className="flex w-full items-center justify-center gap-1 rounded-full border border-slate-800/80 bg-slate-900/60 py-2 text-[10px] text-slate-200 transition-colors hover:border-cyan-800 hover:bg-cyan-950/36"
                 title="先点缩略图选中你要迭代的产物，再点这里"
               >
                 <ImageIcon className="w-3 h-3" /> 继续图生图 <ArrowRight className="w-3 h-3" />
@@ -2183,7 +2539,7 @@ const NodeComponent = ({
 
         {/* Input */}
         {isInput && (
-          <div className="relative bg-slate-950 rounded border border-slate-800 flex flex-col overflow-hidden group hover:border-blue-500 transition-colors h-32">
+          <div className="relative flex h-32 flex-col overflow-hidden rounded-[24px] border border-slate-800/85 bg-[linear-gradient(160deg,rgba(5,9,18,0.98),rgba(11,18,32,0.96)_56%,rgba(7,13,24,0.98))] shadow-[inset_0_1px_0_rgba(255,255,255,0.02)] group transition-colors hover:border-cyan-800">
             <div className="flex-1 overflow-y-auto p-2 custom-scrollbar">
               {node.data.images?.length > 0 ? (
                 <div className="grid grid-cols-3 gap-1">
@@ -2194,7 +2550,7 @@ const NodeComponent = ({
                         <video
                           src={img}
                           className={`w-full h-full object-cover rounded cursor-pointer border ${
-                            activeArtifact?.url === img ? "border-yellow-400 ring-2 ring-yellow-400/40" : "border-transparent"
+                            activeArtifact?.url === img ? "border-amber-700 ring-1 ring-amber-400/18" : "border-transparent"
                           }`}
                           onMouseDown={(e) => e.stopPropagation()}
                           onClick={(e) => {
@@ -2210,7 +2566,7 @@ const NodeComponent = ({
                         <img
                           src={img}
                           className={`w-full h-full object-cover rounded cursor-pointer border ${
-                            activeArtifact?.url === img ? "border-yellow-400 ring-2 ring-yellow-400/40" : "border-transparent"
+                            activeArtifact?.url === img ? "border-amber-700 ring-1 ring-amber-400/18" : "border-transparent"
                           }`}
                           onMouseDown={(e) => e.stopPropagation()}
                           onClick={(e) => {
@@ -2224,7 +2580,7 @@ const NodeComponent = ({
 
                       <button
                         type="button"
-                        className="nodrag absolute bottom-1 left-1 text-[9px] px-1.5 py-0.5 rounded bg-black/60 text-white opacity-0 group-hover/img:opacity-100 hover:bg-yellow-500/30 hover:text-yellow-200 transition"
+                        className="nodrag absolute bottom-1.5 left-1.5 rounded-full border border-slate-700/80 bg-slate-950/84 px-1.5 py-0.5 text-[9px] text-white opacity-0 backdrop-blur-sm transition group-hover/img:opacity-100 hover:border-amber-700/60 hover:bg-amber-500/12 hover:text-amber-100"
                         onMouseDown={(e) => e.stopPropagation()}
                         onClick={(e) => {
                           e.stopPropagation();
@@ -2247,7 +2603,7 @@ const NodeComponent = ({
                           e.stopPropagation();
                           removeImage(i);
                         }}
-                        className="absolute -top-1 -right-1 bg-red-500 rounded-full p-0.5 opacity-0 group-hover/img:opacity-100"
+                        className="absolute -right-1 -top-1 rounded-full border border-red-300/18 bg-red-500/90 p-0.5 opacity-0 transition group-hover/img:opacity-100"
                         type="button"
                         title="删除"
                       >
@@ -2256,14 +2612,14 @@ const NodeComponent = ({
                     </div>
                   ))}
 
-                  <div className="aspect-square bg-slate-800 rounded flex items-center justify-center cursor-pointer hover:bg-slate-700 relative">
-                    <Plus className="w-4 h-4 text-slate-400" />
+                  <div className="relative flex aspect-square cursor-pointer items-center justify-center rounded-[18px] border border-dashed border-slate-800/85 bg-slate-900/45 transition hover:border-cyan-800 hover:bg-cyan-950/30">
+                    <Plus className="w-4 h-4 text-slate-300" />
                     <input type="file" multiple accept="image/*,video/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={handleFileUpload} />
                   </div>
                 </div>
               ) : (
-                <div className="h-full flex flex-col items-center justify-center text-slate-500 relative">
-                  <Images className="w-6 h-6 mb-1 opacity-50" />
+                <div className="relative flex h-full flex-col items-center justify-center text-slate-400">
+                  <Images className="mb-1 h-6 w-6 opacity-55" />
                   <span className="text-[10px]">点击上传</span>
                   <input type="file" multiple accept="image/*,video/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={handleFileUpload} />
                 </div>
@@ -2275,7 +2631,7 @@ const NodeComponent = ({
         {/* Output */}
         {isOutput && (
           <div
-            className="relative min-h-[100px] max-h-[200px] overflow-y-auto bg-slate-950 rounded border border-slate-800 p-1 custom-scrollbar nodrag"
+            className="relative min-h-[100px] max-h-[200px] overflow-y-auto rounded-[24px] border border-slate-800/85 bg-[linear-gradient(160deg,rgba(5,9,18,0.98),rgba(11,18,32,0.96)_56%,rgba(7,13,24,0.98))] p-1.5 custom-scrollbar nodrag shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]"
             onMouseDown={(e) => e.stopPropagation()}
           >
             {node.data.images?.length > 0 ? (
@@ -2291,8 +2647,8 @@ const NodeComponent = ({
                 ))}
               </div>
             ) : (
-              <div className="h-full flex flex-col items-center justify-center text-xs text-slate-600 py-4">
-                <CheckCircle2 className="w-6 h-6 opacity-20" />
+              <div className="flex h-full flex-col items-center justify-center py-5 text-xs text-slate-500">
+                <CheckCircle2 className="h-6 w-6 opacity-25" />
                 <span>结果展示区</span>
               </div>
             )}
@@ -2304,7 +2660,7 @@ const NodeComponent = ({
                   e.stopPropagation();
                   downloadAll();
                 }}
-                className="w-full mt-2 py-1 bg-green-900/30 text-green-400 border border-green-800 rounded text-[10px] flex justify-center items-center gap-1 hover:bg-green-900/50"
+                className="mt-2 flex w-full items-center justify-center gap-1 rounded-full border border-emerald-900/60 bg-emerald-950/50 py-1.5 text-[10px] text-emerald-200 transition hover:border-emerald-800 hover:bg-emerald-950/70"
                 type="button"
               >
                 <Download className="w-3 h-3" /> 下载全部
@@ -2316,7 +2672,7 @@ const NodeComponent = ({
         {/* Text input */}
         {node.type === NODE_TYPES.TEXT_INPUT && (
           <textarea
-            className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-200 outline-none resize-none nodrag"
+            className="w-full resize-none rounded-[24px] border border-slate-800/85 bg-[linear-gradient(160deg,rgba(5,9,18,0.98),rgba(11,18,32,0.96)_56%,rgba(7,13,24,0.98))] px-3 py-2.5 text-xs text-slate-100 outline-none shadow-[inset_0_1px_0_rgba(255,255,255,0.02)] nodrag placeholder:text-slate-500"
             rows={3}
             placeholder="输入提示词..."
             value={node.data.text || ""}
@@ -2327,17 +2683,17 @@ const NodeComponent = ({
       </div>
 
       {/* Ports */}
-      <div className="absolute top-[52px] w-full flex justify-between px-0 pointer-events-none">
+      <div className="pointer-events-none absolute top-[58px] w-full flex justify-between px-0">
         {node.type !== NODE_TYPES.INPUT && node.type !== NODE_TYPES.TEXT_INPUT && (
           <div
             onMouseUp={onConnectEnd}
-            className="w-3 h-3 bg-slate-400 border-2 border-slate-800 rounded-full -ml-1.5 pointer-events-auto cursor-crosshair hover:bg-white hover:scale-125 z-20 shadow-lg"
+            className="pointer-events-auto -ml-1.5 h-3 w-3 cursor-crosshair rounded-full border border-slate-700 bg-slate-900 shadow-[0_0_0_2px_rgba(2,6,23,0.65)] transition hover:border-cyan-700 hover:bg-cyan-950 z-20"
           />
         )}
         {node.type !== NODE_TYPES.OUTPUT && (
           <div
             onMouseDown={onConnectStart}
-            className="w-3 h-3 bg-slate-400 border-2 border-slate-800 rounded-full -mr-1.5 pointer-events-auto cursor-crosshair hover:bg-white hover:scale-125 ml-auto z-20 shadow-lg"
+            className="pointer-events-auto -mr-1.5 ml-auto h-3 w-3 cursor-crosshair rounded-full border border-slate-700 bg-slate-900 shadow-[0_0_0_2px_rgba(2,6,23,0.65)] transition hover:border-cyan-700 hover:bg-cyan-950 z-20"
           />
         )}
       </div>
@@ -2385,6 +2741,8 @@ const Workbench = () => {
   const [runToast, setRunToast] = useState(null);
   const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(false);
   const [leftSidebarQuery, setLeftSidebarQuery] = useState("");
+  const [hoveredSidebarItemKey, setHoveredSidebarItemKey] = useState("");
+  const [hoveredSidebarPreview, setHoveredSidebarPreview] = useState(null);
   const [leftSidebarSectionOpen, setLeftSidebarSectionOpen] = useState({
     nodes: true,
     skills: false,
@@ -2395,6 +2753,9 @@ const Workbench = () => {
   const [rightPanelWidth, setRightPanelWidth] = useState(292);
   const [agentStore, setAgentStore] = useState(() => loadAgentStore());
   const [agentInput, setAgentInput] = useState("");
+  const [agentInputFocused, setAgentInputFocused] = useState(false);
+  const [activeComposerActionId, setActiveComposerActionId] = useState("script");
+  const [agentComposerFiles, setAgentComposerFiles] = useState([]);
   const [agentDevMode, setAgentDevMode] = useState(() => {
     try {
       return localStorage.getItem("agent_dev_mode") === "true";
@@ -2402,7 +2763,7 @@ const Workbench = () => {
       return false;
     }
   });
-  const [agentHistoryCollapsed, setAgentHistoryCollapsed] = useState(false);
+  const [agentHistoryCollapsed, setAgentHistoryCollapsed] = useState(true);
   const [showPreferencesPanel, setShowPreferencesPanel] = useState(false);
   const [preferencesPanelPrefill, setPreferencesPanelPrefill] = useState(null);
   const [preferenceNotice, setPreferenceNotice] = useState(null);
@@ -2417,23 +2778,26 @@ const Workbench = () => {
   const [activeAgentCardId, setActiveAgentCardId] = useState(null);
   const [aiChatModels, setAiChatModels] = useState(() => ({
     language: EMPTY_LIST,
-    image: DEFAULT_AI_MODELS,
+    image: EMPTY_LIST,
     video: DEFAULT_VIDEO_MODELS,
   }));
   const [apiDebugOpen, setApiDebugOpen] = useState(true);
   const [apiDebugStatus, setApiDebugStatus] = useState(() => ({
-    memberInfo: { status: "idle", message: "", updatedAt: 0 },
-    modelParams: { status: "idle", message: "", updatedAt: 0 },
-    modelsLang: { status: "idle", message: "", updatedAt: 0 },
-    modelsImage: { status: "idle", message: "", updatedAt: 0 },
-    modelsVideo: { status: "idle", message: "", updatedAt: 0 },
-    aiChatLang: { status: "idle", message: "", updatedAt: 0 },
-    aiChatImage: { status: "idle", message: "", updatedAt: 0 },
+    memberInfo: { status: "idle", message: "", detail: "", updatedAt: 0 },
+    modelParams: { status: "idle", message: "", detail: "", updatedAt: 0 },
+    modelsLang: { status: "idle", message: "", detail: "", updatedAt: 0 },
+    modelsImage: { status: "idle", message: "", detail: "", updatedAt: 0 },
+    modelsVideo: { status: "idle", message: "", detail: "", updatedAt: 0 },
+    aiChatLang: { status: "idle", message: "", detail: "", updatedAt: 0 },
+    aiChatImage: { status: "idle", message: "", detail: "", updatedAt: 0 },
   }));
   const aiChatModelParamsCacheRef = useRef(new Map());
   const aiChatSessionIdRef = useRef("");
   const aiChatHistoryRecordIdRef = useRef("");
   const agentInputRef = useRef(null);
+  const agentUploadInputRef = useRef(null);
+  const agentComposerRef = useRef(null);
+  const workspaceShellRef = useRef(null);
   const viewportRef = useRef(viewport);
   const agentCardDragRef = useRef(null);
   const agentConversationBottomRef = useRef(null);
@@ -2441,6 +2805,7 @@ const Workbench = () => {
   const rightPanelResizeRef = useRef(null);
 
   const agentSessions = agentStore.sessions ?? EMPTY_LIST;
+  const isLeftSidebarCollapsed = true;
   const activeAgentSession = useMemo(
     () => agentSessions.find((session) => session.id === agentStore.activeSessionId) || agentSessions[0] || null,
     [agentSessions, agentStore.activeSessionId],
@@ -2451,6 +2816,26 @@ const Workbench = () => {
   const hasActiveAgentConversation = agentTurns.length > 0 || !!activePendingTask;
   const hasAgentResultCards = agentResultCards.length > 0;
   const minimizedAgentCards = agentResultCards.filter((card) => card.minimized);
+
+  useEffect(() => {
+    return () => {
+      agentComposerFiles.forEach((item) => {
+        if (item?.previewUrl) URL.revokeObjectURL(item.previewUrl);
+      });
+    };
+  }, [agentComposerFiles]);
+
+  useEffect(() => {
+    if (!agentInputFocused) return undefined;
+    const handlePointerDown = (event) => {
+      if (agentComposerRef.current?.contains(event.target)) return;
+      setAgentInputFocused(false);
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+    };
+  }, [agentInputFocused]);
 
   const memberLabel = useMemo(() => {
     if (memberInfoLoading) return "加载中";
@@ -2463,26 +2848,49 @@ const Workbench = () => {
     () => (Array.isArray(aiChatModels.language) && aiChatModels.language.length ? aiChatModels.language : EMPTY_LIST),
     [aiChatModels.language],
   );
-  const imageModelOptions = useMemo(
-    () => (Array.isArray(aiChatModels.image) && aiChatModels.image.length ? aiChatModels.image : DEFAULT_AI_MODELS),
+  const imageModelRecords = useMemo(
+    () => (Array.isArray(aiChatModels.image) && aiChatModels.image.length ? aiChatModels.image : EMPTY_LIST),
     [aiChatModels.image],
+  );
+  const imageModelOptions = useMemo(
+    () => (imageModelRecords.length ? imageModelRecords : DEFAULT_AI_MODELS),
+    [imageModelRecords],
   );
   const videoModelOptions = useMemo(
     () => (Array.isArray(aiChatModels.video) && aiChatModels.video.length ? aiChatModels.video : DEFAULT_VIDEO_MODELS),
     [aiChatModels.video],
   );
   const defaultLanguageModelId = useMemo(() => getDefaultLanguageModelId(languageModelOptions), [languageModelOptions]);
-  const defaultImageModelId = useMemo(() => getDefaultImageModelId(imageModelOptions), [imageModelOptions]);
+  const defaultImageModelId = useMemo(() => getDefaultImageModelId(imageModelRecords), [imageModelRecords]);
   const defaultVideoModelId = useMemo(() => getDefaultVideoModelId(videoModelOptions), [videoModelOptions]);
   const updateApiDebugStatus = useCallback((key, next) => {
     setApiDebugStatus((prev) => ({
       ...prev,
       [key]: {
-        ...(prev[key] || { status: "idle", message: "", updatedAt: 0 }),
+        ...(prev[key] || { status: "idle", message: "", detail: "", updatedAt: 0 }),
         ...next,
         updatedAt: Date.now(),
       },
     }));
+  }, []);
+  const pushApiDebugDetail = useCallback((key, event) => {
+    const nextDetail = buildApiDebugDetailText(event);
+    if (!nextDetail) return;
+    setApiDebugStatus((prev) => {
+      const current = prev[key] || { status: "idle", message: "", detail: "", updatedAt: 0 };
+      const detail =
+        event?.type === "start" || !current.detail
+          ? nextDetail
+          : `${current.detail}\n\n[${event.type || "event"}]\n${nextDetail}`;
+      return {
+        ...prev,
+        [key]: {
+          ...current,
+          detail,
+          updatedAt: Date.now(),
+        },
+      };
+    });
   }, []);
 
   const resolveModelParamsForId = useCallback(
@@ -2491,12 +2899,16 @@ const Workbench = () => {
       if (!normalizedModelId) return EMPTY_LIST;
       const cached = aiChatModelParamsCacheRef.current.get(normalizedModelId);
       if (cached) return cached;
+      const numericModelId = Number(normalizedModelId);
+      const requestModelId = Number.isFinite(numericModelId) ? numericModelId : normalizedModelId;
 
       updateApiDebugStatus("modelParams", {
         status: "loading",
         message: `POST /ai/viewAIChatModelParams id=${normalizedModelId}`,
       });
-      const data = await viewAIChatModelParams(apiFetch, { ai_chat_model_id: normalizedModelId });
+      const data = await viewAIChatModelParams(apiFetch, { ai_chat_model_id: requestModelId }, {
+        onDebug: (event) => pushApiDebugDetail("modelParams", event),
+      });
       const list = extractModelParamList(data);
       aiChatModelParamsCacheRef.current.set(normalizedModelId, list);
       updateApiDebugStatus("modelParams", {
@@ -2505,7 +2917,7 @@ const Workbench = () => {
       });
       return list;
     },
-    [apiFetch, updateApiDebugStatus],
+    [apiFetch, pushApiDebugDetail, updateApiDebugStatus],
   );
 
   useEffect(() => {
@@ -2531,7 +2943,10 @@ const Workbench = () => {
       }, 10000);
 
       try {
-        const data = await viewMemberInfo(apiFetch, {}, { signal: requestController.signal });
+        const data = await viewMemberInfo(apiFetch, {}, {
+          signal: requestController.signal,
+          onDebug: (event) => pushApiDebugDetail("memberInfo", event),
+        });
         if (cancelled) return;
         if (timeoutId) window.clearTimeout(timeoutId);
         console.info("[memberInfo] load:done", { attempt, data });
@@ -2588,10 +3003,9 @@ const Workbench = () => {
       if (timerId) window.clearTimeout(timerId);
       if (timeoutId) window.clearTimeout(timeoutId);
     };
-  }, [apiFetch, updateApiDebugStatus]);
+  }, [apiFetch, pushApiDebugDetail, updateApiDebugStatus]);
 
   useEffect(() => {
-    if (memberInfoLoading) return;
     const controller = new AbortController();
     let cancelled = false;
 
@@ -2608,7 +3022,10 @@ const Workbench = () => {
         const data = await viewAIChatModels(
           apiFetch,
           { module_enum: 1, part_enum: partEnum },
-          { signal: requestController.signal },
+          {
+            signal: requestController.signal,
+            onDebug: (event) => pushApiDebugDetail(debugKey, event),
+          },
         );
         const options = buildAIChatModelOptions(data, fallbackOptions);
         updateApiDebugStatus(debugKey, { status: "success", message: `${debugLabel}模型 ${options.length}` });
@@ -2645,7 +3062,7 @@ const Workbench = () => {
       if (cancelled || controller.signal.aborted) return;
       const image = await requestModelsWithTimeout(
         AI_CHAT_PART_ENUM_2,
-        DEFAULT_AI_MODELS,
+        EMPTY_LIST,
         "modelsImage",
         "图片",
       );
@@ -2666,7 +3083,53 @@ const Workbench = () => {
       cancelled = true;
       controller.abort();
     };
-  }, [apiFetch, memberInfoLoading, updateApiDebugStatus]);
+  }, [apiFetch, pushApiDebugDetail, updateApiDebugStatus]);
+
+  useEffect(() => {
+    if (!imageModelRecords.length) {
+      updateApiDebugStatus("modelParams", { status: "idle", message: "等待图片模型列表" });
+      return;
+    }
+    const modelId = String(defaultImageModelId || "").trim();
+    if (!modelId) {
+      updateApiDebugStatus("modelParams", { status: "idle", message: "缺少默认图片模型ID" });
+      return;
+    }
+
+    let cancelled = false;
+
+    const preloadModelParams = async () => {
+      try {
+        const list = await resolveModelParamsForId(modelId);
+        if (cancelled) return;
+        aiChatModelParamsCacheRef.current.set(modelId, list);
+      } catch (error) {
+        if (cancelled) return;
+        console.error(`[aiChat:modelParams] request:error(id=${modelId})`, {
+          message: error instanceof Error ? error.message : String(error),
+          status: error?.status,
+          err_no: error?.errNo,
+          source: error?.source,
+          path: error?.path,
+          data: error?.data,
+        });
+        updateApiDebugStatus("modelParams", {
+          status: "error",
+          message: `${error instanceof Error ? error.message : "请求失败"}${error?.source ? ` [${error.source}]` : ""}`,
+        });
+      }
+    };
+
+    updateApiDebugStatus("modelParams", {
+      status: "loading",
+      message: `POST /ai/viewAIChatModelParams id=${modelId}`,
+    });
+    preloadModelParams();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [defaultImageModelId, imageModelRecords.length, resolveModelParamsForId, updateApiDebugStatus]);
 
   useEffect(() => {
     try {
@@ -2704,14 +3167,11 @@ const Workbench = () => {
   }, []);
   const rightPanelContainerStyle = useMemo(
     () => ({
-      width: agentHistoryCollapsed ? CHAT_PANEL_COLLAPSED_WIDTH : rightPanelWidth,
-      height: agentHistoryCollapsed ? CHAT_PANEL_COLLAPSED_HEIGHT : "auto",
-      bottom: agentHistoryCollapsed ? "auto" : "7rem",
-      transform: agentHistoryCollapsed ? "translateX(16px)" : "translateX(0px)",
-      transition:
-        "width 280ms cubic-bezier(0.22,1,0.36,1), height 280ms cubic-bezier(0.22,1,0.36,1), transform 280ms cubic-bezier(0.22,1,0.36,1)",
+      width: rightPanelWidth,
+      height: "auto",
+      transition: "width 280ms cubic-bezier(0.22,1,0.36,1)",
     }),
-    [agentHistoryCollapsed, rightPanelWidth],
+    [rightPanelWidth],
   );
 
   useEffect(() => { nodesRef.current = nodes; }, [nodes]);
@@ -3196,7 +3656,7 @@ const handleNodeMouseDown = (e, nid) => {
         templates:
           modePreset === "local_img2video"
             ? { duration: 5, resolution: "480p", ratio: "1:1", note: "" }
-            : { motion: "", camera: "", duration: 5, resolution: "1080p", ratio: "16:9", note: "", generate_audio_new: true },
+            : { motion: "", camera: "", duration: 5, resolution: "1080p", ratio: "", note: "", generate_audio_new: true },
         batchSize: 1,
         status: "idle",
         refImage: null,
@@ -3256,7 +3716,7 @@ const handleNodeMouseDown = (e, nid) => {
   const createImg2VideoTemplate = () => {
     pushHistory();
     const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 200, data: { images: [] } };
-    const n2 = { id: generateId(), type: NODE_TYPES.VIDEO_GEN, x: 500, y: 200, data: { mode: "img2video",model: defaultVideoModelId, prompt: "", templates: { motion: "标准(Standard)", camera: "推近(Zoom In)", duration: 5, resolution: "1080p", ratio: "16:9", note: "" ,generate_audio_new: true,}, batchSize: 1, status: "idle", refImage: null } };
+    const n2 = { id: generateId(), type: NODE_TYPES.VIDEO_GEN, x: 500, y: 200, data: { mode: "img2video",model: defaultVideoModelId, prompt: "", templates: { motion: "标准(Standard)", camera: "推近(Zoom In)", duration: 5, resolution: "1080p", ratio: "", note: "" ,generate_audio_new: true,}, batchSize: 1, status: "idle", refImage: null } };
     const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
     setNodes([n1, n2, n3]);
     setConnections([
@@ -3345,7 +3805,7 @@ const handleNodeMouseDown = (e, nid) => {
         mode: "img2video",
         model: defaultVideoModelId,
         prompt: sourceNode.data.prompt || "",
-        templates: { motion: "标准(Standard)", camera: "固定镜头(Fixed)", duration: 5,  resolution: "1080p", ratio: "16:9", note: "",generate_audio_new: true, },
+        templates: { motion: "标准(Standard)", camera: "固定镜头(Fixed)", duration: 5,  resolution: "1080p", ratio: "", note: "",generate_audio_new: true, },
         batchSize: 1,
         status: "idle",
         refImage: null,
@@ -3356,7 +3816,7 @@ const handleNodeMouseDown = (e, nid) => {
     setSelectedNodeIds(new Set([newNodeId]));
   };
 
-  // ✅ 继续图生图：在“创意生成(text2img)”后，自动接：输入 -> 图生图 -> 输出
+  // ✅ 继续图生图：在“文生图(text2img)”后，自动接：输入 -> 图生图 -> 输出
 const createConnectedImg2ImgBranch = useCallback(
   (sourceNodeId) => {
     pushHistory();
@@ -3415,7 +3875,7 @@ const createConnectedImg2ImgBranch = useCallback(
 
     setNodes((prev) => [...prev, inputNode, img2imgNode, outputNode]);
 
-    // 连起来：创意生成 -> 输入(锁定图) -> 图生图 -> 输出
+    // 连起来：文生图 -> 输入(锁定图) -> 图生图 -> 输出
     setConnections((prev) => [
       ...prev,
       { id: generateId(), from: sourceNodeId, to: inId },
@@ -3426,7 +3886,7 @@ const createConnectedImg2ImgBranch = useCallback(
     setSelectedNodeIds(new Set([procId]));
     setSelectedConnectionIds(new Set());
   },
-  [pushHistory, activeArtifact]
+  [pushHistory, activeArtifact, defaultImageModelId]
 );
 
   const updateActiveAgentSession = useCallback((updater) => {
@@ -3826,6 +4286,24 @@ const createConnectedImg2ImgBranch = useCallback(
 
       let fullText = "";
       try {
+        updateApiDebugStatus("aiChatLang", {
+          status: "loading",
+          message: `POST /ai/viewAIChatModelParams id=${defaultLanguageModelId}`,
+        });
+        await Promise.race([
+          resolveModelParamsForId(defaultLanguageModelId),
+          new Promise((_, reject) =>
+            window.setTimeout(() => reject(new Error("语言模型参数请求超时(4s)")), 4000),
+          ),
+        ]).catch((error) => {
+          pushApiDebugDetail("aiChatLang", {
+            type: "warning",
+            path: "/ai/viewAIChatModelParams",
+            message: error instanceof Error ? error.message : String(error),
+          });
+        });
+        const authorizationInfo = resolveMemberAuthorizationInfo();
+        updateApiDebugStatus("aiChatLang", { status: "loading", message: "POST /api/ai_chat_stream_via_curl" });
         await aiChatStream(
           apiFetch,
           {
@@ -3837,6 +4315,10 @@ const createConnectedImg2ImgBranch = useCallback(
             message,
           },
           {
+            authorization: authorizationInfo?.value || "",
+            preferApiFetchFirst: true,
+            useBackendCurlProxy: true,
+            onDebug: (event) => pushApiDebugDetail("aiChatLang", event),
             onChunk: (chunk) => {
               const delta = String(chunk || "");
               if (!delta) return;
@@ -3882,7 +4364,7 @@ const createConnectedImg2ImgBranch = useCallback(
         return { ok: false, error: messageText };
       }
     },
-    [apiFetch, defaultLanguageModelId, updateActiveAgentSession, updateApiDebugStatus],
+    [apiFetch, defaultLanguageModelId, pushApiDebugDetail, resolveModelParamsForId, updateActiveAgentSession, updateApiDebugStatus],
   );
 
   const runVideoMissionOnTurn = useCallback(
@@ -4210,15 +4692,25 @@ const createConnectedImg2ImgBranch = useCallback(
       });
 
       if (route.intent === "CHITCHAT") {
-        const streamed = await sendAIChatLanguageStream(missionText, route);
-        if (!streamed.ok) {
-          appendAssistantTurn(
-            missionText,
-            `AI Chat 调用失败：${streamed.error || "未知错误"}\n已降级为本地回复：${getChitchatReply(missionText)}`,
-            {
-            routeDebug: buildRouteDebug(route, false),
-            },
-          );
+        try {
+          const response = await generateAgentChitchat(missionText, apiFetch, {
+            intent: route.intent,
+            product: route.product || "",
+            sessionId,
+          });
+          appendAssistantTurn(missionText, String(response?.text || "").trim() || getChitchatReply(missionText), {
+            routeDebug: buildRouteDebug(
+              { ...route, reason: "agent_chitchat_gemini_2_5_flash_lite" },
+              true,
+            ),
+          });
+        } catch (error) {
+          appendAssistantTurn(missionText, getChitchatReply(missionText), {
+            routeDebug: buildRouteDebug(
+              { ...route, reason: "local_chitchat_reply_fallback" },
+              false,
+            ),
+          });
         }
         return;
       }
@@ -4422,13 +4914,78 @@ const createConnectedImg2ImgBranch = useCallback(
 
   const sendAgentMission = () => {
     const text = String(agentInput || "").trim();
-    if (!text) return;
+    if (!text) {
+      if (agentComposerFiles.length > 0) {
+        setRunToast({ message: "请补充一句需求描述，再连同图片一起发送", type: "info" });
+      }
+      return;
+    }
+    const attachmentNote = agentComposerFiles.length
+      ? `\n\n[已附参考图片: ${agentComposerFiles.map((item) => item.name).join("，")}]`
+      : "";
     setAgentInput("");
-    void sendAgentMissionFromText(text);
+    setAgentComposerFiles((prev) => {
+      prev.forEach((item) => {
+        if (item?.previewUrl) URL.revokeObjectURL(item.previewUrl);
+      });
+      return [];
+    });
+    if (agentUploadInputRef.current) {
+      agentUploadInputRef.current.value = "";
+    }
+    void sendAgentMissionFromText(`${text}${attachmentNote}`);
   };
+
+  const handleAgentComposerUpload = useCallback((event) => {
+    const files = Array.from(event.target?.files || []);
+    if (!files.length) return;
+    const accepted = files.filter((file) => String(file.type || "").startsWith("image/"));
+    if (!accepted.length) {
+      setRunToast({ message: "目前仅支持上传图片", type: "error" });
+      event.target.value = "";
+      return;
+    }
+    setAgentComposerFiles((prev) => {
+      const next = [...prev];
+      accepted.forEach((file) => {
+        const duplicate = next.some(
+          (item) => item.name === file.name && item.size === file.size && item.lastModified === file.lastModified,
+        );
+        if (duplicate) return;
+        next.push({
+          id: `agent_file_${makeAgentId()}`,
+          name: file.name,
+          size: file.size,
+          lastModified: file.lastModified,
+          previewUrl: URL.createObjectURL(file),
+        });
+      });
+      return next.slice(0, 4);
+    });
+    setAgentInputFocused(true);
+    agentInputRef.current?.focus();
+    event.target.value = "";
+  }, []);
+
+  const removeAgentComposerFile = useCallback((fileId) => {
+    setAgentComposerFiles((prev) => {
+      const target = prev.find((item) => item.id === fileId);
+      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((item) => item.id !== fileId);
+    });
+  }, []);
+
+  const composerQuickActions = [
+    { id: "script", label: "生成脚本", icon: Sparkles },
+    { id: "storyboard", label: "生成分镜", icon: Clapperboard },
+    { id: "video", label: "成片视频", icon: Film },
+    { id: "export", label: "导出渲染包", icon: Download },
+    { id: "help", label: "查看示例", icon: MessageSquare },
+  ];
 
   const handleAgentQuickAction = useCallback(
     (actionId) => {
+      setActiveComposerActionId(actionId);
       if (actionId === "script") {
         setAgentInput("帮我设计一个洗面奶的爆款脚本");
         agentInputRef.current?.focus();
@@ -5195,7 +5752,6 @@ const createConnectedImg2ImgBranch = useCallback(
                 } else {
                   const modelId = String(procNode.data.model || defaultImageModelId || "").trim();
                   if (!modelId) throw new Error("缺少图像模型ID");
-                  const resolvedParamPayload = {};
 
                   updateApiDebugStatus("aiChatImage", {
                     status: "loading",
@@ -5206,25 +5762,108 @@ const createConnectedImg2ImgBranch = useCallback(
                   const fallbackModelId = model4Option ? "4" : "";
                   let aiChatResponse = null;
                   let effectiveModelId = modelId;
-                  const requestAIChatImage = async (targetModelId) =>
-                    aiChatStream(
-                      apiFetch,
-                      {
-                        history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || undefined,
-                        module_enum: "1",
-                        part_enum: String(AI_CHAT_PART_ENUM_2),
-                        ai_chat_session_id: aiChatSessionIdRef.current || undefined,
-                        ai_chat_model_id: targetModelId,
-                        message: promptToUse,
-                        ...resolvedParamPayload,
+                  let effectiveParamCount = 0;
+                  const requestAIChatImage = async (targetModelId) => {
+                    const paramList = await resolveModelParamsForId(targetModelId);
+                    const resolvedParamPayload = buildAIChatParamPayload(paramList);
+                    const selectedTaskType = String(procNode.data.templates?.task_type || "").trim();
+                    const selectedSize = String(procNode.data.templates?.size || "").trim();
+                    const selectedRatio = String(procNode.data.templates?.aspect_ratio || "").trim();
+                    const matchedTaskTypeId = findAIChatParamValueId(paramList, ["task", "任务", "类型"], selectedTaskType);
+                    const matchedSizeId = findAIChatParamValueId(paramList, ["size", "尺寸"], selectedSize);
+                    const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比"], selectedRatio);
+                    if (selectedTaskType) {
+                      if (!matchedTaskTypeId) throw new Error(`未匹配到task参数ID: ${selectedTaskType}`);
+                      resolvedParamPayload.ai_image_param_task_type_id = matchedTaskTypeId;
+                    }
+                    if (selectedSize) {
+                      if (!matchedSizeId) throw new Error(`未匹配到size参数ID: ${selectedSize}`);
+                      resolvedParamPayload.ai_image_param_size_id = matchedSizeId;
+                    }
+                    if (selectedRatio) {
+                      if (!matchedRatioId) throw new Error(`未匹配到ratio参数ID: ${selectedRatio}`);
+                      resolvedParamPayload.ai_image_param_ratio_id = matchedRatioId;
+                    }
+                    effectiveParamCount = Object.keys(resolvedParamPayload).length;
+                    const authorizationInfo = resolveMemberAuthorizationInfo();
+                    const proxyPayload = {
+                      authorization: authorizationInfo?.value || "",
+                      history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
+                      module_enum: "1",
+                      part_enum: String(AI_CHAT_PART_ENUM_2),
+                      ai_chat_session_id: aiChatSessionIdRef.current || "",
+                      ai_chat_model_id: targetModelId,
+                      message: promptToUse,
+                      ...resolvedParamPayload,
+                    };
+                    if (!proxyPayload.authorization) {
+                      throw new Error("缺少 member authorization，无法调用后端curl代理");
+                    }
+                    pushApiDebugDetail("aiChatImage", {
+                      type: "start",
+                      path: "/api/ai_chat_image_via_curl",
+                      payload: {
+                        ...proxyPayload,
+                        authorization: `${proxyPayload.authorization.slice(0, 18)}...`,
                       },
-                      {
-                        onMeta: (meta) => {
-                          if (meta?.aiChatSessionId) aiChatSessionIdRef.current = meta.aiChatSessionId;
-                          if (meta?.historyAiChatRecordId) aiChatHistoryRecordIdRef.current = meta.historyAiChatRecordId;
+                      authorizationSource: authorizationInfo?.source || "none",
+                    });
+                    try {
+                      const proxyResp = await apiFetch("/api/ai_chat_image_via_curl", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(proxyPayload),
+                      });
+                      const proxyData = await proxyResp.json().catch(() => ({}));
+                      if (!proxyResp.ok) {
+                        const msg = proxyData?.detail || proxyData?.message || `HTTP ${proxyResp.status}`;
+                        throw new Error(msg);
+                      }
+                      if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
+                      if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
+                      pushApiDebugDetail("aiChatImage", {
+                        type: "success",
+                        path: "/api/ai_chat_image_via_curl",
+                        mode: "json",
+                        response: proxyData,
+                      });
+                      return {
+                        meta: {
+                          image_url: proxyData?.image_url || "",
+                          ai_chat_session_id: proxyData?.source_session_id || "",
+                          history_ai_chat_record_id: proxyData?.source_history_record_id || "",
                         },
-                      },
-                    );
+                        events: Array.isArray(proxyData?.events) ? proxyData.events.map((item) => item?.data ?? item).filter(Boolean) : EMPTY_LIST,
+                        data: proxyData,
+                        text: String(proxyData?.text || ""),
+                      };
+                    } catch (proxyError) {
+                      pushApiDebugDetail("aiChatImage", {
+                        type: "error",
+                        path: "/api/ai_chat_image_via_curl",
+                        message: proxyError instanceof Error ? proxyError.message : String(proxyError),
+                      });
+                      return aiChatStream(
+                        apiFetch,
+                        {
+                          history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || undefined,
+                          module_enum: "1",
+                          part_enum: String(AI_CHAT_PART_ENUM_2),
+                          ai_chat_session_id: aiChatSessionIdRef.current || undefined,
+                          ai_chat_model_id: targetModelId,
+                          message: promptToUse,
+                          ...resolvedParamPayload,
+                        },
+                        {
+                          onDebug: (event) => pushApiDebugDetail("aiChatImage", event),
+                          onMeta: (meta) => {
+                            if (meta?.aiChatSessionId) aiChatSessionIdRef.current = meta.aiChatSessionId;
+                            if (meta?.historyAiChatRecordId) aiChatHistoryRecordIdRef.current = meta.historyAiChatRecordId;
+                          },
+                        },
+                      );
+                    }
+                  };
                   try {
                     aiChatResponse = await requestAIChatImage(modelId);
                     const firstErrMsg = extractAIChatDoneError(aiChatResponse);
@@ -5282,7 +5921,7 @@ const createConnectedImg2ImgBranch = useCallback(
                   }
                   updateApiDebugStatus("aiChatImage", {
                     status: "success",
-                    message: `part=2 model=${effectiveModelId} params=${Object.keys(resolvedParamPayload).length}`,
+                    message: `part=2 model=${effectiveModelId} params=${effectiveParamCount}`,
                   });
                 }
               } else if (
@@ -5303,39 +5942,277 @@ const createConnectedImg2ImgBranch = useCallback(
                   fps: 24,
                   camera_fixed: isCameraFixed,
                   resolution: procNode.data.templates?.resolution || "1080p",
-                  ratio: procNode.data.templates?.ratio || "16:9",
                   generate_audio: true, // ✅ 仅 1.5
                   seed: 21,
+                  ...(String(procNode.data.templates?.ratio || "").trim()
+                    ? { ratio: String(procNode.data.templates?.ratio || "").trim() }
+                    : {}),
                 };
-
-                const resp = await apiFetch(procNode.data.mode === "local_img2video" ? `/api/local/img2video` : `/api/img2video`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify(payload),
-                });
-                const data = await resp.json();
-                if (!resp.ok) throw new Error(extractApiError(data));
-                resultUrl = data.image; // 若后端返回字段不同（例如 data.video），在这里改
+                if (procNode.data.mode === "local_img2video") {
+                  const resp = await apiFetch(`/api/local/img2video`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                  });
+                  const data = await resp.json();
+                  if (!resp.ok) throw new Error(extractApiError(data));
+                  resultUrl = data.image;
+                } else {
+                  updateApiDebugStatus("aiChatImage", {
+                    status: "loading",
+                    message: "POST /api/ai_chat_image_via_curl (img2video)",
+                  });
+                  try {
+                    const modelId = String(payload.model || "").trim();
+                    if (!modelId) throw new Error("缺少图生视频模型ID");
+                    const paramList = await resolveModelParamsForId(modelId);
+                    const resolvedParamPayload = buildAIChatParamPayload(paramList);
+                    const selectedResolution = String(payload.resolution || "").trim();
+                    const selectedRatio = String(procNode.data.templates?.ratio || "").trim();
+                    const selectedDuration = String(durationInt || "").trim();
+                    const matchedResolutionId = findAIChatParamValueId(paramList, ["resolution", "分辨率"], selectedResolution);
+                    const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比"], selectedRatio);
+                    const matchedDurationId = findAIChatParamValueId(paramList, ["duration", "时长"], selectedDuration);
+                    if (selectedResolution && !matchedResolutionId) {
+                      throw new Error(`未匹配到resolution参数ID: ${selectedResolution}`);
+                    }
+                    if (selectedDuration && !matchedDurationId) {
+                      throw new Error(`未匹配到duration参数ID: ${selectedDuration}`);
+                    }
+                    if (matchedResolutionId) {
+                      resolvedParamPayload.ai_video_param_resolution_id = matchedResolutionId;
+                    }
+                    if (selectedRatio) {
+                      if (!matchedRatioId) {
+                        throw new Error(`未匹配到ratio参数ID: ${selectedRatio}`);
+                      }
+                      resolvedParamPayload.ai_video_param_ratio_id = matchedRatioId;
+                    } else {
+                      delete resolvedParamPayload.ai_video_param_ratio_id;
+                    }
+                    if (matchedDurationId) {
+                      resolvedParamPayload.ai_video_param_duration_id = matchedDurationId;
+                    }
+                    const authorizationInfo = resolveMemberAuthorizationInfo();
+                    const imagesPayload = [payload.image, payload.last_frame_image].filter(Boolean);
+                    const proxyPayload = {
+                      authorization: authorizationInfo?.value || "",
+                      history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
+                      module_enum: "1",
+                      part_enum: String(AI_CHAT_PART_ENUM_3),
+                      ai_chat_session_id: aiChatSessionIdRef.current || "",
+                      ai_chat_model_id: modelId,
+                      message: payload.prompt || "natural motion",
+                      images: imagesPayload,
+                      ...resolvedParamPayload,
+                    };
+                    if (!proxyPayload.authorization) {
+                      throw new Error("缺少 member authorization，无法调用后端curl代理");
+                    }
+                    pushApiDebugDetail("aiChatImage", {
+                      type: "start",
+                      path: "/api/ai_chat_image_via_curl",
+                      payload: {
+                        ...proxyPayload,
+                        authorization: `${proxyPayload.authorization.slice(0, 18)}...`,
+                        images: [`count=${imagesPayload.length}`],
+                        param_mapping: {
+                          resolution: selectedResolution || "-",
+                          resolution_id: resolvedParamPayload.ai_video_param_resolution_id || "",
+                          ratio: selectedRatio || "-",
+                          ratio_id: resolvedParamPayload.ai_video_param_ratio_id || "",
+                          duration: selectedDuration || "-",
+                          duration_id: resolvedParamPayload.ai_video_param_duration_id || "",
+                        },
+                      },
+                      authorizationSource: authorizationInfo?.source || "none",
+                    });
+                    const proxyResp = await apiFetch("/api/ai_chat_image_via_curl", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify(proxyPayload),
+                    });
+                    const proxyData = await proxyResp.json().catch(() => ({}));
+                    if (!proxyResp.ok) {
+                      const msg = proxyData?.detail || proxyData?.message || `HTTP ${proxyResp.status}`;
+                      throw new Error(msg);
+                    }
+                    if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
+                    if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
+                    pushApiDebugDetail("aiChatImage", {
+                      type: "success",
+                      path: "/api/ai_chat_image_via_curl",
+                      mode: "json",
+                      response: proxyData,
+                    });
+                    resultUrl =
+                      pickFirstImageUrl(proxyData?.image_url) ||
+                      pickFirstImageUrl(proxyData?.events) ||
+                      pickFirstImageUrl(proxyData?.text) ||
+                      "";
+                    const doneErrMsg = String(proxyData?.done_error || "").trim();
+                    if (!resultUrl && doneErrMsg) throw new Error(`AI Chat 返回错误：${doneErrMsg}`);
+                    if (!resultUrl) {
+                      const summary = summarizeAIChatResponse(proxyData);
+                      throw new Error(`aiChat 图生视频未返回可解析URL${summary ? ` | 响应摘要: ${summary}` : ""}`);
+                    }
+                    updateApiDebugStatus("aiChatImage", {
+                      status: "success",
+                      message: `img2video model=${modelId} params=${Object.keys(resolvedParamPayload).length}`,
+                    });
+                  } catch (proxyError) {
+                    pushApiDebugDetail("aiChatImage", {
+                      type: "error",
+                      path: "/api/ai_chat_image_via_curl",
+                      message: proxyError instanceof Error ? proxyError.message : String(proxyError),
+                    });
+                    const proxyErrorMsg = proxyError instanceof Error ? proxyError.message : String(proxyError);
+                    const shouldSkipFallback =
+                      proxyErrorMsg.includes("缺少 member authorization") ||
+                      proxyErrorMsg.toLowerCase().includes("authorization 不能为空");
+                    if (shouldSkipFallback) {
+                      throw new Error(proxyErrorMsg);
+                    }
+                    updateApiDebugStatus("aiChatImage", {
+                      status: "loading",
+                      message: "img2video 代理失败，回退 /api/img2video",
+                    });
+                    try {
+                      const resp = await apiFetch(`/api/img2video`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(payload),
+                      });
+                      const data = await resp.json();
+                      if (!resp.ok) throw new Error(extractApiError(data));
+                      resultUrl = data.image;
+                    } catch (fallbackError) {
+                      const fallbackMsg = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+                      throw new Error(`img2video 代理失败: ${proxyErrorMsg}; 回退失败: ${fallbackMsg}`);
+                    }
+                  }
+                }
               } else if (procNode.data.mode === "multi_image_generate") {
-                const selectedAspectRatio = procNode.data.templates?.aspect_ratio;
-                const resp = await apiFetch(`/api/multi_image_generate`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    prompt: sourceText || procNode.data.prompt,
-                    images: inputImages,
-                    temperature: 0.7,
-                    ...(selectedAspectRatio
-                      ? {
-                          size: procNode.data.templates?.size || "1024x1024",
-                          aspect_ratio: selectedAspectRatio,
-                        }
-                      : {}),
-                  }),
+                const promptToUse = sourceText || procNode.data.prompt;
+                if (!promptToUse?.trim()) throw new Error("缺少图生图提示词");
+                if (!Array.isArray(inputImages) || !inputImages.length) throw new Error("缺少图生图输入图片");
+                const modelId = String(procNode.data.model || defaultImageModelId || "").trim();
+                if (!modelId) throw new Error("缺少图像模型ID");
+                updateApiDebugStatus("aiChatImage", {
+                  status: "loading",
+                  message: "POST /api/ai_chat_image_via_curl (img2img)",
                 });
-                const data = await resp.json();
-                if (!resp.ok) throw new Error(extractApiError(data));
-                resultUrl = data.image;
+                try {
+                  const paramList = await resolveModelParamsForId(modelId);
+                  const resolvedParamPayload = buildAIChatParamPayload(paramList);
+                  const selectedTaskType = String(procNode.data.templates?.task_type || "").trim();
+                  const selectedSize = String(procNode.data.templates?.size || "").trim();
+                  const selectedRatio = String(procNode.data.templates?.aspect_ratio || "").trim();
+                  const matchedTaskTypeId = findAIChatParamValueId(paramList, ["task", "任务", "类型"], selectedTaskType);
+                  const matchedSizeId = findAIChatParamValueId(paramList, ["size", "尺寸"], selectedSize);
+                  const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比"], selectedRatio);
+                  if (selectedTaskType) {
+                    if (!matchedTaskTypeId) throw new Error(`未匹配到task参数ID: ${selectedTaskType}`);
+                    resolvedParamPayload.ai_image_param_task_type_id = matchedTaskTypeId;
+                  }
+                  if (selectedSize) {
+                    if (!matchedSizeId) throw new Error(`未匹配到size参数ID: ${selectedSize}`);
+                    resolvedParamPayload.ai_image_param_size_id = matchedSizeId;
+                  }
+                  if (selectedRatio) {
+                    if (!matchedRatioId) throw new Error(`未匹配到ratio参数ID: ${selectedRatio}`);
+                    resolvedParamPayload.ai_image_param_ratio_id = matchedRatioId;
+                  } else {
+                    delete resolvedParamPayload.ai_image_param_ratio_id;
+                  }
+                  const authorizationInfo = resolveMemberAuthorizationInfo();
+                  const proxyPayload = {
+                    authorization: authorizationInfo?.value || "",
+                    history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
+                    module_enum: "1",
+                    part_enum: String(AI_CHAT_PART_ENUM_2),
+                    ai_chat_session_id: aiChatSessionIdRef.current || "",
+                    ai_chat_model_id: modelId,
+                    message: promptToUse,
+                    images: inputImages,
+                    ...resolvedParamPayload,
+                  };
+                  if (!proxyPayload.authorization) {
+                    throw new Error("缺少 member authorization，无法调用后端curl代理");
+                  }
+                  pushApiDebugDetail("aiChatImage", {
+                    type: "start",
+                    path: "/api/ai_chat_image_via_curl",
+                    payload: {
+                      ...proxyPayload,
+                      authorization: `${proxyPayload.authorization.slice(0, 18)}...`,
+                      images: Array.isArray(inputImages) ? [`count=${inputImages.length}`] : [],
+                    },
+                    authorizationSource: authorizationInfo?.source || "none",
+                  });
+                  const proxyResp = await apiFetch("/api/ai_chat_image_via_curl", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(proxyPayload),
+                  });
+                  const proxyData = await proxyResp.json().catch(() => ({}));
+                  if (!proxyResp.ok) {
+                    const msg = proxyData?.detail || proxyData?.message || `HTTP ${proxyResp.status}`;
+                    throw new Error(msg);
+                  }
+                  if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
+                  if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
+                  pushApiDebugDetail("aiChatImage", {
+                    type: "success",
+                    path: "/api/ai_chat_image_via_curl",
+                    mode: "json",
+                    response: proxyData,
+                  });
+                  resultUrl =
+                    pickFirstImageUrl(proxyData?.image_url) ||
+                    pickFirstImageUrl(proxyData?.events) ||
+                    pickFirstImageUrl(proxyData?.text) ||
+                    "";
+                  const doneErrMsg = String(proxyData?.done_error || "").trim();
+                  if (!resultUrl && doneErrMsg) throw new Error(`AI Chat 返回错误：${doneErrMsg}`);
+                  if (!resultUrl) {
+                    const summary = summarizeAIChatResponse(proxyData);
+                    throw new Error(`aiChat 图生图未返回可解析图片URL${summary ? ` | 响应摘要: ${summary}` : ""}`);
+                  }
+                  updateApiDebugStatus("aiChatImage", {
+                    status: "success",
+                    message: `img2img model=${modelId} params=${Object.keys(resolvedParamPayload).length}`,
+                  });
+                } catch (proxyError) {
+                  pushApiDebugDetail("aiChatImage", {
+                    type: "error",
+                    path: "/api/ai_chat_image_via_curl",
+                    message: proxyError instanceof Error ? proxyError.message : String(proxyError),
+                  });
+                  updateApiDebugStatus("aiChatImage", {
+                    status: "loading",
+                    message: "img2img 代理失败，回退 /api/multi_image_generate",
+                  });
+                  const selectedAspectRatio = procNode.data.templates?.aspect_ratio;
+                  const resp = await apiFetch(`/api/multi_image_generate`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      prompt: promptToUse,
+                      images: inputImages,
+                      temperature: 0.7,
+                      ...(selectedAspectRatio
+                        ? {
+                            size: procNode.data.templates?.size || "1024x1024",
+                            aspect_ratio: selectedAspectRatio,
+                          }
+                        : {}),
+                    }),
+                  });
+                  const data = await resp.json();
+                  if (!resp.ok) throw new Error(extractApiError(data));
+                  resultUrl = data.image;
+                }
               } else if (procNode.data.mode === "rmbg") {
                 const resp = await apiFetch(`/api/rmbg`, {
                   method: "POST",
@@ -5490,9 +6367,15 @@ const createConnectedImg2ImgBranch = useCallback(
       return (
         <g key={conn.id}>
           <path d={path} stroke="transparent" strokeWidth="10" fill="none" className="cursor-pointer" />
-          <path d={path} stroke={selectedConnectionIds.has(conn.id) ? "#fbbf24" : "#475569"} strokeWidth="2" fill="none" className="transition-colors duration-200" />
+          <path
+            d={path}
+            stroke={selectedConnectionIds.has(conn.id) ? "#67e8f9" : "rgba(100,116,139,0.72)"}
+            strokeWidth="2.2"
+            fill="none"
+            className="transition-colors duration-200"
+          />
           {isRunning && (
-            <circle r="3" fill="#fbbf24">
+            <circle r="3.5" fill="#67e8f9">
               <animateMotion dur="1.5s" repeatCount="indefinite" path={path} />
             </circle>
           )}
@@ -5520,8 +6403,8 @@ const createConnectedImg2ImgBranch = useCallback(
         items: [
           {
             id: "node_text_prompt",
-            icon: MousePointer2,
-            label: "Prompt 输入",
+            icon: Clipboard,
+            label: "提示词输入",
             desc: "纯文本提示词",
             color: "text-yellow-400",
             bg: "bg-yellow-500/10",
@@ -5529,7 +6412,7 @@ const createConnectedImg2ImgBranch = useCallback(
           },
           {
             id: "node_upload",
-            icon: Images,
+            icon: Upload,
             label: "图片/视频上传",
             desc: "主商品图/素材",
             color: "text-blue-400",
@@ -5538,7 +6421,7 @@ const createConnectedImg2ImgBranch = useCallback(
           },
           {
             id: "node_image_generate",
-            icon: Wand2,
+            icon: ImagePlus,
             label: "图片生成",
             desc: "背景/手势/生成",
             color: "text-purple-400",
@@ -5574,8 +6457,8 @@ const createConnectedImg2ImgBranch = useCallback(
             icon: Scissors,
             label: "背景移除",
             desc: "抠图去背景（可串联）",
-            color: "text-indigo-400",
-            bg: "bg-indigo-500/10",
+            color: "text-cyan-300",
+            bg: "bg-cyan-500/10",
             onClick: () => addNode(NODE_TYPES.PROCESSOR, "rmbg"),
           },
           {
@@ -5583,25 +6466,25 @@ const createConnectedImg2ImgBranch = useCallback(
             icon: Scan,
             label: "特征提取",
             desc: "面部/背景/服装首饰",
-            color: "text-lime-400",
-            bg: "bg-lime-500/10",
+            color: "text-cyan-300",
+            bg: "bg-cyan-500/10",
             onClick: () => addNode(NODE_TYPES.PROCESSOR, "feature_extract"),
           },
           {
             id: "skill_multi_angleshots",
-            icon: Clapperboard,
+            icon: LayoutGrid,
             label: "多角度镜头",
             desc: "单图扩展为 8 个机位",
-            color: "text-amber-400",
-            bg: "bg-amber-500/10",
+            color: "text-purple-300",
+            bg: "bg-purple-500/10",
             onClick: () => addNode(NODE_TYPES.PROCESSOR, "multi_angleshots"),
           },
           {
             id: "skill_video_upscale",
-            icon: Sparkles,
+            icon: TrendingUp,
             label: "超分辨率视频",
             desc: "3 秒切片后逐段超分",
-            color: "text-cyan-400",
+            color: "text-cyan-300",
             bg: "bg-cyan-500/10",
             onClick: () => addNode(NODE_TYPES.PROCESSOR, "video_upscale"),
           },
@@ -5616,13 +6499,13 @@ const createConnectedImg2ImgBranch = useCallback(
             icon: Layers,
             label: "三合一换图",
             desc: "换脸/换背景/换装",
-            color: "text-emerald-400",
-            bg: "bg-emerald-500/10",
+            color: "text-purple-300",
+            bg: "bg-purple-500/10",
             onClick: () => navigate("/app/swap"),
           },
           {
             id: "workflow_batch_video",
-            icon: Clapperboard,
+            icon: Film,
             label: "批量动图",
             desc: "单图生成短视频",
             color: "text-sky-400",
@@ -5631,11 +6514,11 @@ const createConnectedImg2ImgBranch = useCallback(
           },
           {
             id: "workflow_batch_wordart",
-            icon: MessageSquare,
+            icon: Palette,
             label: "批量花字",
             desc: "批量添加花字文案",
-            color: "text-fuchsia-400",
-            bg: "bg-fuchsia-500/10",
+            color: "text-cyan-300",
+            bg: "bg-cyan-500/10",
             onClick: () => navigate("/app/batch-wordart"),
           },
         ],
@@ -5646,16 +6529,16 @@ const createConnectedImg2ImgBranch = useCallback(
         items: [
           {
             id: "workflow_local_text2img",
-            icon: Server,
+            icon: ImagePlus,
             label: "本地：文生图",
             desc: "image_z_image_turbo 工作流",
-            color: "text-emerald-300",
-            bg: "bg-emerald-500/10",
+            color: "text-purple-300",
+            bg: "bg-purple-500/10",
             onClick: () => createLocalText2ImgTemplate(),
           },
           {
             id: "workflow_local_img2video",
-            icon: Server,
+            icon: Film,
             label: "本地：图生视频",
             desc: "Qwen_i2v 工作流",
             color: "text-sky-300",
@@ -5664,7 +6547,7 @@ const createConnectedImg2ImgBranch = useCallback(
           },
           {
             id: "workflow_pose_control",
-            icon: Film,
+            icon: Hand,
             label: "视频：姿态控制",
             desc: "参考图 + 姿态视频驱动",
             color: "text-rose-300",
@@ -5688,7 +6571,7 @@ const createConnectedImg2ImgBranch = useCallback(
 
     return (
       <>
-        {!leftSidebarCollapsed && (
+        {!isLeftSidebarCollapsed && (
           <div className="mb-2.5">
             <div className="relative">
               <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -5702,17 +6585,17 @@ const createConnectedImg2ImgBranch = useCallback(
           </div>
         )}
 
-        {visibleSections.length === 0 && !leftSidebarCollapsed ? (
+        {visibleSections.length === 0 && !isLeftSidebarCollapsed ? (
           <div className="rounded-md border border-slate-800/90 bg-slate-950/60 p-2.5 text-[11px] text-slate-400">
             未找到匹配项，请尝试其他关键词。
           </div>
         ) : (
-          <div className="space-y-2">
+          <div className="flex flex-col items-center space-y-2">
             {visibleSections.map((section, idx) => {
-              const sectionOpen = leftSidebarCollapsed ? true : !!leftSidebarSectionOpen[section.key];
+              const sectionOpen = isLeftSidebarCollapsed ? true : !!leftSidebarSectionOpen[section.key];
               return (
-                <div key={section.key} className={idx === 0 ? "" : "pt-1.5 border-t border-slate-800/70"}>
-                  {!leftSidebarCollapsed && (
+                <div key={section.key} className={`flex w-full flex-col items-center ${idx === 0 ? "" : "border-t border-slate-800/70 pt-1.5"}`}>
+                  {!isLeftSidebarCollapsed && (
                     <SidebarSectionHeader
                       title={section.title}
                       open={sectionOpen}
@@ -5720,7 +6603,7 @@ const createConnectedImg2ImgBranch = useCallback(
                     />
                   )}
                   {sectionOpen && (
-                    <div className="space-y-1">
+                    <div className="flex w-full flex-col items-center space-y-1.5">
                       {section.items.map((item) => (
                         <SidebarBtn
                           key={item.id}
@@ -5730,7 +6613,22 @@ const createConnectedImg2ImgBranch = useCallback(
                           color={item.color}
                           bg={item.bg}
                           active={activeSidebarItemKey === item.id}
-                          compact={leftSidebarCollapsed}
+                          compact={isLeftSidebarCollapsed}
+                          expanded={hoveredSidebarItemKey === item.id}
+                          onHoverChange={(isHovering, target) => {
+                            setHoveredSidebarItemKey(isHovering ? item.id : "");
+                            if (isHovering && target && workspaceShellRef.current) {
+                              const itemRect = target.getBoundingClientRect();
+                              const shellRect = workspaceShellRef.current.getBoundingClientRect();
+                              setHoveredSidebarPreview({
+                                ...item,
+                                active: activeSidebarItemKey === item.id,
+                                top: itemRect.top - shellRect.top + itemRect.height / 2,
+                              });
+                              return;
+                            }
+                            setHoveredSidebarPreview(null);
+                          }}
                           onClick={() => {
                             setActiveSidebarItemKey(item.id);
                             safeInvoke(item.onClick, item.label || "侧栏操作");
@@ -5770,44 +6668,31 @@ const createConnectedImg2ImgBranch = useCallback(
 
   return (
     <div className="h-screen w-screen bg-[var(--bf-bg)] text-[var(--bf-text)] overflow-hidden flex flex-col font-sans">
-      <header className="h-[68px] bg-[var(--bf-panel-strong)] border-b border-[var(--bf-border)] flex items-center justify-between px-4 z-50 select-none shadow-[var(--bf-shadow-md)]">
+      <header className="relative h-[68px] bg-[var(--bf-panel-strong)] border-b border-[var(--bf-border)] flex items-center justify-between px-4 z-50 select-none shadow-[var(--bf-shadow-md)]">
+        <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.03),transparent_45%)]" />
         <div className="flex items-center gap-2.5 min-w-0">
-          <button
-            type="button"
-            onClick={() => setLeftSidebarCollapsed((prev) => !prev)}
-            className="h-8 w-8 rounded-md border border-slate-700/90 bg-slate-900/70 text-slate-300 hover:border-yellow-500/35 hover:text-yellow-100 hover:bg-slate-800 transition-colors"
-            title={leftSidebarCollapsed ? "展开左侧栏" : "折叠左侧栏"}
-          >
-            {leftSidebarCollapsed ? <PanelLeftOpen className="w-4 h-4 mx-auto" /> : <PanelLeftClose className="w-4 h-4 mx-auto" />}
-          </button>
-          <div className="bg-yellow-500/10 p-1.5 rounded-lg border border-yellow-500/20">
-            <Zap className="text-yellow-400 w-5 h-5" />
-          </div>
           <div className="flex flex-col min-w-0">
-            <span className="font-bold text-lg leading-tight tracking-tight truncate">
-              BananaFlow <span className="text-yellow-400">Workbench</span>
+            <span className="truncate bg-[linear-gradient(135deg,rgba(248,250,252,0.94)_0%,rgba(203,213,225,0.86)_48%,rgba(148,163,184,0.72)_100%)] bg-clip-text text-[25px] font-normal leading-tight tracking-[0.10em] text-transparent [font-family:'STXingkai','Xingkai_SC','STKaiti','KaiTi','Georgia',serif] [text-shadow:0_0_14px_rgba(148,163,184,0.06)]">
+              Yu Canvas
             </span>
-            <span className="text-[10px] text-slate-400 font-medium truncate">电商智能图像工作台</span>
+            <span className="text-[10px] font-normal text-slate-400/90 tracking-[0.18em] truncate">AI小禹无限画布</span>
           </div>
         </div>
 
-        <div className="hidden lg:flex items-center gap-1 bg-slate-900/60 p-1 rounded-lg border border-slate-800/90">
-          <ToolIconBtn icon={Undo} onClick={undo} disabled={historyStep <= 0} title="Undo (Ctrl+Z)" />
-          <ToolIconBtn icon={Redo} onClick={redo} disabled={historyStep >= history.length - 1} title="Redo (Ctrl+Y)" />
-          <div className="w-px h-4 bg-slate-700/80 mx-1" />
-          <ToolIconBtn icon={Trash2} onClick={deleteSelection} title="Delete Selected" disabled={selectedNodeIds.size === 0 && selectedConnectionIds.size === 0} />
-          <ToolIconBtn icon={Layout} onClick={autoLayout} title="Auto Layout" />
-          <div className="ml-1 px-2 py-1 rounded border border-dashed border-slate-700 text-[10px] text-slate-500">工具位</div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <div className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] border transition-colors ${apiStatus === "online" ? "text-emerald-300 border-emerald-700/60 bg-emerald-900/20" : "text-rose-300 border-rose-700/50 bg-rose-900/20"}`}>
-            <Server className="w-3 h-3" /> {apiStatus === "online" ? "API Online" : "API Offline"}
-          </div>
+        <div className="relative flex items-center gap-2">
+          {agentDevMode && (
+            <div className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[10px] transition-colors ${
+              apiStatus === "online"
+                ? "text-emerald-200 border-emerald-500/20 bg-emerald-500/10"
+                : "text-rose-200 border-rose-500/20 bg-rose-500/10"
+            }`}>
+              <Server className="w-3 h-3" /> {apiStatus === "online" ? "API Online" : "API Offline"}
+            </div>
+          )}
 
           <button
             onClick={() => setShowHistoryPanel(true)}
-            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-[11px] border border-slate-700/90 bg-slate-900/65 text-slate-300 hover:border-slate-600 hover:text-slate-100"
+            className="inline-flex h-10 items-center gap-1.5 rounded-[18px] border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))] px-3.5 text-[11px] text-slate-300 shadow-[0_14px_28px_rgba(0,0,0,0.34),inset_0_1px_0_rgba(255,255,255,0.04)] transition-colors hover:border-slate-700 hover:bg-slate-950 hover:text-white"
           >
             <History className="w-3 h-3" /> 历史
           </button>
@@ -5817,29 +6702,348 @@ const createConnectedImg2ImgBranch = useCallback(
               setPreferencesPanelPrefill(null);
               setShowPreferencesPanel(true);
             }}
-            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-[11px] border border-slate-700/90 bg-slate-900/65 text-slate-300 hover:border-slate-600 hover:text-slate-100"
+            className="inline-flex h-10 items-center gap-1.5 rounded-[18px] border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))] px-3.5 text-[11px] text-slate-300 shadow-[0_14px_28px_rgba(0,0,0,0.34),inset_0_1px_0_rgba(255,255,255,0.04)] transition-colors hover:border-slate-700 hover:bg-slate-950 hover:text-white"
           >
             <Sliders className="w-3 h-3" /> 设置
           </button>
 
-          <div className="flex rounded-md shadow-lg shadow-purple-900/45">
+          <div className="flex overflow-hidden rounded-[20px] border border-slate-800/90 shadow-[0_16px_32px_rgba(0,0,0,0.36),inset_0_1px_0_rgba(255,255,255,0.04)]">
             <button
               onClick={() => safeInvoke(handleRunClick, "运行工作流")}
               disabled={isRunning}
-              className={`flex items-center gap-2 px-4 py-2 rounded-l-md font-bold text-sm transition-all min-w-[112px] justify-center ${isRunning ? "bg-slate-700 cursor-not-allowed text-slate-300" : "bg-purple-600 hover:bg-purple-500 text-white"}`}
+              className={`flex min-w-[118px] items-center justify-center gap-2 px-4 py-2.5 text-sm font-bold transition-all ${
+                isRunning
+                  ? "cursor-not-allowed bg-slate-700 text-slate-300"
+                  : "bg-[linear-gradient(180deg,rgba(28,28,32,0.98),rgba(10,10,12,0.98))] text-white hover:bg-[linear-gradient(180deg,rgba(36,36,40,0.98),rgba(12,12,14,0.98))]"
+              }`}
             >
               {isRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />} <span className="truncate max-w-[150px]">{isRunning ? loadingTip : "运行"}</span>
             </button>
             <div className="relative group">
-              <button className="px-2 py-2 bg-purple-700 rounded-r-md h-full hover:bg-purple-600 border-l border-purple-800">
-                <ChevronDown className="w-4 h-4 text-purple-200" />
+              <button className="h-full border-l border-slate-800/90 bg-[linear-gradient(180deg,rgba(28,28,32,0.98),rgba(10,10,12,0.98))] px-3 hover:bg-[linear-gradient(180deg,rgba(36,36,40,0.98),rgba(12,12,14,0.98))]">
+                <ChevronDown className="w-4 h-4 text-slate-200" />
               </button>
-              <div className="absolute right-0 top-full mt-1 w-32 bg-slate-900 border border-slate-700 rounded-lg shadow-xl overflow-hidden hidden group-hover:block z-50">
-                <button onClick={() => setRunScope("all")} className={`w-full text-left px-3 py-2 text-xs hover:bg-slate-800 ${runScope === "all" ? "text-purple-300" : "text-slate-300"}`}>运行全部</button>
-                <button onClick={() => setRunScope("selected")} className={`w-full text-left px-3 py-2 text-xs hover:bg-slate-800 ${runScope === "selected" ? "text-purple-300" : "text-slate-300"}`}>运行选中</button>
-                <button onClick={() => setRunScope("selected_downstream")} className={`w-full text-left px-3 py-2 text-xs hover:bg-slate-800 ${runScope === "selected_downstream" ? "text-purple-300" : "text-slate-300"}`}>选中 → 下游</button>
+              <div className="absolute right-0 top-full z-50 mt-2 hidden w-36 overflow-hidden rounded-[20px] border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.98)_55%,rgba(8,8,11,0.98))] shadow-[0_18px_36px_rgba(0,0,0,0.42)] group-hover:block">
+                <button onClick={() => setRunScope("all")} className={`w-full px-3 py-2 text-left text-xs hover:bg-white/6 ${runScope === "all" ? "text-slate-100" : "text-slate-300"}`}>运行全部</button>
+                <button onClick={() => setRunScope("selected")} className={`w-full px-3 py-2 text-left text-xs hover:bg-white/6 ${runScope === "selected" ? "text-slate-100" : "text-slate-300"}`}>运行选中</button>
+                <button onClick={() => setRunScope("selected_downstream")} className={`w-full px-3 py-2 text-left text-xs hover:bg-white/6 ${runScope === "selected_downstream" ? "text-slate-100" : "text-slate-300"}`}>选中 → 下游</button>
               </div>
             </div>
+          </div>
+
+          <div className="relative">
+            <button
+              type="button"
+              onClick={toggleAgentHistoryPanel}
+              title={agentHistoryCollapsed ? "展开对话（Ctrl+Shift+E）" : "收起对话（Ctrl+Shift+E）"}
+              aria-label={agentHistoryCollapsed ? "展开对话（Ctrl+Shift+E）" : "收起对话（Ctrl+Shift+E）"}
+              className={`inline-flex h-10 items-center gap-2 rounded-[18px] border px-3.5 text-[11px] transition-colors ${
+                agentHistoryCollapsed
+                  ? "border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))] text-slate-200 hover:border-slate-700 hover:bg-slate-950 hover:text-white"
+                  : "border-slate-700 bg-[linear-gradient(180deg,rgba(28,28,32,0.96),rgba(10,10,12,0.98))] text-white shadow-[0_10px_24px_rgba(0,0,0,0.26)]"
+              }`}
+            >
+              <History className="w-3.5 h-3.5 text-yellow-400" />
+              <span className="font-medium">对话流</span>
+              <ChevronRight
+                className={`w-3.5 h-3.5 transition-transform duration-300 ${
+                  agentHistoryCollapsed ? "rotate-0" : "rotate-90"
+                }`}
+              />
+            </button>
+
+            {!agentHistoryCollapsed && (
+              <div
+                className="absolute right-0 top-full mt-3 z-[95] pointer-events-auto"
+                style={rightPanelContainerStyle}
+                onMouseDown={(e) => e.stopPropagation()}
+                onWheel={(e) => e.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  onMouseDown={handleRightPanelResizeStart}
+                  className="absolute -left-2 top-0 bottom-0 w-2 rounded-md cursor-col-resize text-slate-700 hover:text-slate-300"
+                  title="拖拽调整对话栏宽度"
+                  aria-label="拖拽调整对话栏宽度"
+                >
+                  <GripVertical className="w-3.5 h-3.5 absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none" />
+                </button>
+                <div
+                  className="relative h-full overflow-hidden rounded-[28px] border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))]"
+                  style={{ boxShadow: "0 24px 60px rgba(0,0,0,0.48), inset 0 1px 0 rgba(255,255,255,0.05)" }}
+                >
+              <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.03),transparent_24%),linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.008)_34%,transparent_100%)]" />
+              <div className="pointer-events-none absolute inset-x-6 top-0 h-px bg-white/18" />
+              <div className="relative h-[54px] px-4 flex items-center justify-between border-b border-white/10 bg-black/10">
+                <div className="inline-flex min-w-0 items-center gap-1.5 text-xs">
+                  <History className="w-3.5 h-3.5 text-yellow-400" />
+                  <span className="font-medium truncate text-slate-200">对话流</span>
+                </div>
+                <div className="ml-auto flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={createAgentSession}
+                    className="h-8 inline-flex items-center gap-1 px-2.5 rounded-full border border-white/10 bg-white/5 text-[11px] text-slate-200 hover:bg-white/8 hover:border-cyan-400/25 hover:text-white transition-colors"
+                    title="新建会话"
+                  >
+                    <Plus className="w-3 h-3" />
+                    新建
+                  </button>
+                  <button
+                    type="button"
+                    onClick={clearActiveAgentConversation}
+                    disabled={!hasActiveAgentConversation || isAgentMissionRunning}
+                    className={`h-8 inline-flex items-center gap-1 px-2.5 rounded-full border text-[11px] transition-colors ${
+                      !hasActiveAgentConversation || isAgentMissionRunning
+                        ? "border-white/5 bg-white/[0.03] text-slate-600 cursor-not-allowed"
+                        : "border-white/10 bg-white/5 text-slate-300 hover:bg-rose-500/12 hover:border-rose-500/35 hover:text-rose-100"
+                    }`}
+                    title="清除当前会话对话记录"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    清除
+                  </button>
+                  <button
+                    type="button"
+                    onClick={toggleAgentHistoryPanel}
+                    title="收起对话（Ctrl+Shift+E）"
+                    aria-label="收起对话（Ctrl+Shift+E）"
+                    className="p-2 rounded-full border border-white/10 bg-white/5 text-slate-300 hover:bg-white/8 hover:border-cyan-400/25 hover:text-white transition-colors"
+                  >
+                    <ChevronRight className="w-3.5 h-3.5 rotate-90" />
+                  </button>
+                </div>
+              </div>
+              <div className="h-[calc(100%-50px)] flex flex-col">
+                <div className="relative border-b border-white/10 p-3 bg-black/10">
+                  <select
+                    value={activeAgentSession?.id || ""}
+                    onChange={(e) => setActiveAgentSession(e.target.value)}
+                    className="w-full rounded-[18px] border border-white/10 bg-black/20 px-3 py-2 text-[11px] text-slate-100 outline-none focus:border-cyan-400/35"
+                  >
+                    {agentSessions.map((session) => (
+                      <option key={session.id} value={session.id}>
+                        {session.title || "新会话"} ({(session.turns || []).length})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {minimizedAgentCards.length > 0 && (
+                  <div className="relative border-b border-white/10 p-3 space-y-2 bg-black/10">
+                    <div className="text-[10px] uppercase tracking-wider text-slate-400">已最小化结果</div>
+                    {minimizedAgentCards.map((card) => {
+                      const turn = agentTurns.find((item) => item.id === card.turnId);
+                      if (!turn) return null;
+                      return (
+                        <button
+                          key={card.id}
+                          type="button"
+                          onClick={() => focusAgentResultCard(turn.id)}
+                          className="w-full rounded-[16px] border border-white/10 bg-white/5 px-3 py-2 text-left text-[11px] text-slate-200 hover:bg-white/8 hover:border-cyan-400/25 transition-colors"
+                        >
+                          恢复 · {turn.extractedProduct || "result"}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                <div className="relative flex-1 overflow-y-auto p-3 space-y-3 custom-scrollbar bg-black/10">
+                  {agentTurns.length === 0 && (
+                    <div className="space-y-2 rounded-[20px] border border-white/10 bg-white/[0.04] px-3 py-3">
+                      <div className="text-[11px] text-slate-400">暂无对话，先试一个 Mission 或快速打开模板。</div>
+                      <div className="flex flex-wrap gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => void sendAgentMissionFromText("帮我设计一个洗面奶的爆款脚本")}
+                          className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1.5 text-[10px] text-slate-200 hover:bg-white/8 hover:border-cyan-400/25 hover:text-white transition-colors"
+                        >
+                          发送 Mission 示例
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => safeInvoke(createText2ImgTemplate, "打开文生图模板")}
+                          className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1.5 text-[10px] text-slate-200 hover:bg-white/8 hover:border-cyan-400/25 hover:text-white transition-colors"
+                        >
+                          打开模板
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {agentTurns.map((turn) => {
+                    const relatedCard = agentResultCards.find((item) => item.turnId === turn.id);
+                    const quickActions = Array.isArray(turn.quickActions) ? turn.quickActions : [];
+                    const productChips = Array.isArray(turn.productChips) ? turn.productChips : [];
+                    const memorySuggestions = Array.isArray(turn.memorySuggestions) ? turn.memorySuggestions : [];
+                    const routeDebug = turn.routeDebug || null;
+                    return (
+                    <div key={turn.id} className="space-y-1.5">
+                      {turn.userText ? (
+                        <div className="flex justify-end">
+                          <div className="max-w-[92%] space-y-1">
+                            <div className="rounded-[20px] border border-cyan-400/20 bg-[linear-gradient(180deg,rgba(14,116,144,0.24),rgba(21,94,117,0.18))] px-3 py-2.5 text-[11px] text-slate-50 whitespace-pre-wrap break-words shadow-[0_10px_24px_rgba(8,145,178,0.12)]">
+                              {turn.userText}
+                            </div>
+                            {agentDevMode && routeDebug && (
+                              <div className="rounded-[16px] border border-amber-500/20 bg-amber-500/10 px-2.5 py-1.5 text-[10px] text-amber-100">
+                                intent={routeDebug.intent || "-"} | product={routeDebug.product || "-"} | reason={routeDebug.reason || "-"} | backend_call={routeDebug.backendCalled ? "Y" : "N"}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ) : null}
+                      <div className="flex justify-start">
+                        <div className="max-w-[92%] rounded-[22px] border border-white/10 bg-[linear-gradient(180deg,rgba(15,23,42,0.92),rgba(15,23,42,0.80))] px-3 py-2.5 text-[11px] text-slate-200 shadow-[0_10px_24px_rgba(2,6,23,0.22)]">
+                          {turn.status === "running" && (
+                            <div className="inline-flex items-center gap-1.5 text-slate-300">
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              {AGENT_RUN_STEPS[Math.min(turn.stepIndex || 0, AGENT_RUN_STEPS.length - 1)]}
+                            </div>
+                          )}
+                          {(turn.status === "assistant" || turn.status === "clarify") && (
+                            <div className="space-y-1.5">
+                              <div>{turn.assistantText || "你想做哪个产品/品类？"}</div>
+                              {memorySuggestions.length > 0 && (
+                                <div className="space-y-1.5">
+                                  {memorySuggestions.map((suggestion) => (
+                                    <PreferenceSuggestionCard
+                                      key={`${turn.id}_${suggestion.id}`}
+                                      suggestion={suggestion}
+                                      disabled={
+                                        savingSuggestionId === suggestion.id ||
+                                        savingFeedbackTargetId === `suggest_${suggestion.id}`
+                                      }
+                                      onConfirm={() => handleSuggestionConfirm(turn.id, suggestion)}
+                                      onIgnore={() => handleSuggestionIgnore(turn.id, suggestion)}
+                                      onEdit={() => handleSuggestionEdit(suggestion)}
+                                      showRegressionAction={HITL_FEEDBACK_UI_ENABLED}
+                                      regressionTooltip="将该建议对应会话加入回归评估集，帮助后续质量修复"
+                                      onMarkRegression={() => handleSuggestionMarkRegression(turn.id, suggestion)}
+                                    />
+                                  ))}
+                                </div>
+                              )}
+                              {quickActions.length > 0 && (
+                                <div className="flex flex-wrap gap-1">
+                                  {quickActions.map((actionId) => {
+                                    const action = AGENT_QUICK_ACTIONS.find((item) => item.id === actionId);
+                                    if (!action) return null;
+                                    return (
+                                    <button
+                                      key={`${turn.id}_${actionId}`}
+                                      type="button"
+                                      onClick={() => handleAgentQuickAction(actionId)}
+                                        className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1.5 text-[10px] text-slate-200 hover:bg-white/8 hover:border-cyan-400/25 hover:text-white transition-colors"
+                                      >
+                                        {action.label}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                              {turn.showCancelPending && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleAgentQuickAction("cancel_pending")}
+                                  className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1.5 text-[10px] text-slate-200 hover:bg-white/8 hover:border-cyan-400/25 hover:text-white transition-colors"
+                                >
+                                  取消
+                                </button>
+                              )}
+                              {productChips.length > 0 && (
+                                <div className="flex flex-wrap gap-1">
+                                  {productChips.map((product) => (
+                                    <button
+                                      key={`${turn.id}_product_${product}`}
+                                      type="button"
+                                      onClick={() => handleAgentProductChip(product)}
+                                      className="rounded-full border border-cyan-400/25 bg-cyan-400/10 px-2.5 py-1.5 text-[10px] text-cyan-50 hover:bg-cyan-400/15"
+                                    >
+                                      {product}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          {turn.status === "error" && (
+                            <div className="space-y-1.5">
+                              <div className="text-red-300">{turn.error || "请求失败"}</div>
+                              <div className="flex flex-wrap gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => retryAgentTurn(turn.id)}
+                                  className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1.5 text-[10px] text-slate-200 hover:bg-white/8 hover:border-cyan-400/25 hover:text-white transition-colors"
+                                >
+                                  重试
+                                </button>
+                                {HITL_FEEDBACK_UI_ENABLED && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleTurnMarkRegression(turn)}
+                                    disabled={savingFeedbackTargetId === `turn_${turn.id}`}
+                                    title="将当前会话标记为回归用例，进入评估集用于后续改进"
+                                    className={`rounded-full border px-2.5 py-1.5 text-[10px] ${
+                                      savingFeedbackTargetId === `turn_${turn.id}`
+                                        ? "bg-white/[0.04] border-white/5 text-slate-500 cursor-not-allowed"
+                                        : "bg-fuchsia-600/20 border-fuchsia-500/60 text-fuchsia-100 hover:bg-fuchsia-600/30"
+                                    }`}
+                                  >
+                                    标记为回归用例
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                          {turn.status === "done" && (
+                            <div className="space-y-1.5">
+                              <div className="text-slate-300">
+                                已生成 {(turn.response?.topics || []).length} 个 topic / {(turn.response?.edit_plans || []).length} 个 plan
+                              </div>
+                              <div className="flex gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => focusAgentResultCard(turn.id)}
+                                  className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1.5 text-[10px] text-slate-200 hover:bg-white/8 hover:border-cyan-400/25 hover:text-white transition-colors"
+                                >
+                                  {relatedCard?.minimized ? "恢复结果卡片" : "定位结果卡片"}
+                                </button>
+                                {relatedCard && !relatedCard.minimized && (
+                                  <button
+                                    type="button"
+                                    onClick={() => minimizeAgentResultCard(relatedCard.id)}
+                                    className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1.5 text-[10px] text-slate-200 hover:bg-white/8 hover:border-cyan-400/25 hover:text-white transition-colors"
+                                  >
+                                    最小化到对话流
+                                  </button>
+                                )}
+                                {HITL_FEEDBACK_UI_ENABLED && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleTurnMarkRegression(turn)}
+                                    disabled={savingFeedbackTargetId === `turn_${turn.id}`}
+                                    title="将当前会话标记为回归用例，进入评估集用于后续改进"
+                                    className={`rounded-full border px-2.5 py-1.5 text-[10px] ${
+                                      savingFeedbackTargetId === `turn_${turn.id}`
+                                        ? "bg-white/[0.04] border-white/5 text-slate-500 cursor-not-allowed"
+                                        : "bg-fuchsia-600/20 border-fuchsia-500/60 text-fuchsia-100 hover:bg-fuchsia-600/30"
+                                    }`}
+                                  >
+                                    标记为回归用例
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )})}
+                  <div ref={agentConversationBottomRef} />
+                </div>
+              </div>
+            </div>
+              </div>
+            )}
           </div>
         </div>
       </header>
@@ -5872,48 +7076,59 @@ const createConnectedImg2ImgBranch = useCallback(
         </div>
       )}
 
-      <div className="fixed right-4 bottom-4 z-[92] w-[320px] max-w-[calc(100vw-1rem)] rounded-xl border border-slate-700/80 bg-slate-950/95 shadow-2xl backdrop-blur-sm">
-        <button
-          type="button"
-          onClick={() => setApiDebugOpen((prev) => !prev)}
-          className="flex w-full items-center justify-between px-3 py-2 text-left border-b border-slate-800/80"
-        >
-          <span className="text-xs font-semibold text-slate-100">新接口状态</span>
-          <span className="text-[10px] text-slate-400">{apiDebugOpen ? "收起" : "展开"}</span>
-        </button>
-        {apiDebugOpen ? (
-          <div className="space-y-1.5 p-2.5">
-            {apiDebugItems.map((item) => {
-              const state = apiDebugStatus[item.key] || { status: "idle", message: "", updatedAt: 0 };
-              return (
-                <div key={item.key} className={`rounded-md border px-2 py-1.5 ${getApiDebugStatusClass(state.status)}`}>
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-[10px] font-semibold truncate">{item.label}</span>
-                    <span className="text-[10px] opacity-90">{API_DEBUG_STATUS_LABEL[state.status] || state.status}</span>
+      {agentDevMode ? (
+        <div className="fixed right-4 bottom-4 z-[92] w-[320px] max-w-[calc(100vw-1rem)] overflow-hidden rounded-[28px] border border-white/10 bg-[linear-gradient(145deg,rgba(9,15,28,0.96),rgba(14,25,45,0.90)_55%,rgba(10,18,34,0.94))] shadow-[0_24px_60px_rgba(2,6,23,0.45),inset_0_1px_0_rgba(255,255,255,0.14)]">
+          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.14),transparent_26%),radial-gradient(circle_at_top,rgba(255,255,255,0.06),transparent_35%),linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.01)_34%,transparent_100%)]" />
+          <div className="pointer-events-none absolute inset-x-6 top-0 h-px bg-white/18" />
+          <button
+            type="button"
+            onClick={() => setApiDebugOpen((prev) => !prev)}
+            className="relative flex w-full items-center justify-between border-b border-white/10 px-4 py-3 text-left"
+          >
+            <span className="text-xs font-semibold text-slate-100">新接口状态</span>
+            <span className="text-[10px] text-slate-400">{apiDebugOpen ? "收起" : "展开"}</span>
+          </button>
+          {apiDebugOpen ? (
+            <div className="relative space-y-2 p-3">
+              {apiDebugItems.map((item) => {
+                const state = apiDebugStatus[item.key] || { status: "idle", message: "", detail: "", updatedAt: 0 };
+                return (
+                  <div key={item.key} className={`rounded-[18px] border px-3 py-2 ${getApiDebugStatusClass(state.status)}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-semibold truncate">{item.label}</span>
+                      <span className="text-[10px] opacity-90">{API_DEBUG_STATUS_LABEL[state.status] || state.status}</span>
+                    </div>
+                    <div className="mt-0.5 flex items-center justify-between gap-2">
+                      <span className="text-[10px] opacity-85 truncate">{state.message || "--"}</span>
+                      <span className="text-[10px] opacity-70 shrink-0">{formatDebugTime(state.updatedAt)}</span>
+                    </div>
+                    {API_DEBUG_DETAIL_KEYS.has(item.key) && state.detail ? (
+                      <pre className="mt-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-[14px] bg-black/20 px-2 py-1.5 text-[9px] leading-4 text-slate-100/90">
+                        {state.detail}
+                      </pre>
+                    ) : null}
                   </div>
-                  <div className="mt-0.5 flex items-center justify-between gap-2">
-                    <span className="text-[10px] opacity-85 truncate">{state.message || "--"}</span>
-                    <span className="text-[10px] opacity-70 shrink-0">{formatDebugTime(state.updatedAt)}</span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        ) : null}
-      </div>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
-      <div className="flex-1 flex relative min-h-0 overflow-hidden">
+      <div ref={workspaceShellRef} className="flex-1 flex relative min-h-0 overflow-hidden">
         {/* Sidebar */}
-        <div
-          className={`z-40 flex flex-col select-none shrink-0 h-full min-h-0 border-r border-[var(--bf-border)] bg-gradient-to-b from-slate-900/96 via-slate-900/92 to-slate-950/96 ${leftSidebarCollapsed ? "px-1.5 py-2" : "px-2.5 py-3"} shadow-[var(--bf-shadow-md)] ${leftSidebarCollapsed ? "items-center" : "items-stretch"}`}
-          style={{ WebkitOverflowScrolling: "touch", width: leftSidebarCollapsed ? 70 : 270 }}
-        >
-          <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar [scrollbar-gutter:stable] overscroll-contain">
-            {!leftSidebarCollapsed && <div className="mb-2.5 h-px w-full bg-gradient-to-r from-yellow-500/45 via-purple-500/20 to-transparent" />}
+        <div className="z-40 my-4 flex h-[calc(100%-2rem)] shrink-0 flex-col justify-between self-start">
+          <div
+            className={`flex min-h-0 flex-1 flex-col items-center self-start px-2 py-3 select-none`}
+            style={{ WebkitOverflowScrolling: "touch", width: 76 }}
+          >
+            <div className="flex min-h-0 w-full flex-1 justify-center overflow-y-auto overflow-x-visible custom-scrollbar [scrollbar-gutter:stable] overscroll-contain">
+            {!isLeftSidebarCollapsed && <div className="mb-2.5 h-px w-full bg-gradient-to-r from-slate-500/40 via-slate-700/20 to-transparent" />}
             {renderSidebarContent()}
           </div>
-          <div className={`shrink-0 border-t border-slate-800/80 ${leftSidebarCollapsed ? "mt-2 pt-2 w-full" : "mt-3 pt-3"}`}>
-            {leftSidebarCollapsed ? (
+          </div>
+          <div className="mt-3 w-[76px] shrink-0 p-2">
+            {isLeftSidebarCollapsed ? (
               <details className="relative group">
                 <summary
                   className="list-none mx-auto flex h-10 w-10 cursor-pointer items-center justify-center rounded-xl border border-slate-700/90 bg-slate-900/80 text-slate-200 hover:border-yellow-500/35 hover:text-yellow-100 [&::-webkit-details-marker]:hidden"
@@ -6021,10 +7236,39 @@ const createConnectedImg2ImgBranch = useCallback(
           </div>
         </div>
 
+        {hoveredSidebarPreview ? (
+          <div
+            className="pointer-events-none absolute z-[55] w-72 -translate-y-1/2 rounded-2xl border border-slate-800/90 bg-[linear-gradient(180deg,rgba(5,5,7,0.98),rgba(12,12,16,0.94))] px-3.5 py-3.5 text-left shadow-2xl"
+            style={{ left: 82, top: hoveredSidebarPreview.top }}
+          >
+            <div className="absolute left-[-6px] top-1/2 h-3 w-3 -translate-y-1/2 rotate-45 border-l border-t border-slate-800/90 bg-[#070709]" />
+            <div className="flex items-start gap-3">
+              <div
+                className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${hoveredSidebarPreview.bg} ${hoveredSidebarPreview.color} ring-1 ${
+                  hoveredSidebarPreview.active ? "ring-cyan-400/35" : "ring-slate-700/70"
+                }`}
+              >
+                {hoveredSidebarPreview.icon
+                  ? React.createElement(hoveredSidebarPreview.icon, { className: "w-4 h-4" })
+                  : null}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className={`text-[13px] font-medium leading-5 ${hoveredSidebarPreview.active ? "text-white" : "text-slate-100"}`}>
+                  {hoveredSidebarPreview.label}
+                </div>
+                <div className="mt-1.5 text-[11px] leading-5 text-slate-400 whitespace-normal break-words">
+                  {hoveredSidebarPreview.desc}
+                </div>
+                <div className="mt-2 text-[10px] text-slate-500">点击后会直接创建对应组件或进入对应工作流。</div>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         {/* Canvas */}
         <div
           ref={canvasRef}
-          className="flex-1 relative bg-slate-950 overflow-hidden"
+          className="flex-1 relative overflow-hidden bg-[#020203]"
           style={{ cursor: getCursor() }}
           onMouseDown={handleCanvasMouseDown}
           onMouseMove={handleMouseMove}
@@ -6053,33 +7297,60 @@ const createConnectedImg2ImgBranch = useCallback(
 
           {nodes.length === 0 && !hasAgentResultCards && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
-              <div className="bg-slate-900/80 border border-slate-700 p-8 rounded-2xl shadow-2xl backdrop-blur-sm text-center max-w-lg pointer-events-auto" onMouseDown={(e) => e.stopPropagation()}>
-                <div className="flex justify-center mb-4">
-                  <Zap className="w-12 h-12 text-yellow-400 bg-yellow-500/10 p-2 rounded-xl" />
+              <div
+                className="pointer-events-auto relative max-w-2xl overflow-hidden rounded-[32px] border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))] px-8 py-8 text-center shadow-[0_24px_60px_rgba(0,0,0,0.48),inset_0_1px_0_rgba(255,255,255,0.05)]"
+                onMouseDown={(e) => e.stopPropagation()}
+              >
+                <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.03),transparent_24%),linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.008)_34%,transparent_100%)]" />
+                <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-white/18" />
+                <div className="relative">
+                  <h2 className="mb-2 truncate bg-[linear-gradient(135deg,rgba(248,250,252,0.94)_0%,rgba(203,213,225,0.86)_48%,rgba(148,163,184,0.72)_100%)] bg-clip-text text-[30px] font-normal leading-tight tracking-[0.10em] text-transparent [font-family:'STXingkai','Xingkai_SC','STKaiti','KaiTi','Georgia',serif] [text-shadow:0_0_14px_rgba(148,163,184,0.06)]">
+                    Yu Canvas
+                  </h2>
+                  <div className="mb-3 text-[11px] font-normal tracking-[0.18em] text-slate-400/90">AI小禹无限画布</div>
+                  <p className="mx-auto mb-8 max-w-xl text-sm leading-6 text-slate-400">
+                    选择下方模版快速开始，或者直接使用下方 Agent 输入框生成脚本、分镜和工作流。
+                  </p>
                 </div>
-                <h2 className="text-xl font-bold text-white mb-2">欢迎来到 FlowStudio</h2>
-                <p className="text-sm text-slate-400 mb-8">选择下方模版，或直接使用下方 AI 输入框：</p>
 
-                <div className="grid grid-cols-3 gap-4">
-                  <button onClick={() => safeInvoke(createText2ImgTemplate, "打开文生图模板")} className="group flex flex-col items-center gap-3 p-4 bg-slate-800/50 hover:bg-slate-800 border border-slate-700 hover:border-purple-500/50 rounded-xl transition-all hover:-translate-y-1">
-                    <div className="p-3 bg-purple-500/10 rounded-lg group-hover:bg-purple-500/20 transition-colors">
-                      <Wand2 className="w-6 h-6 text-purple-400" />
+                <div className="relative grid grid-cols-1 gap-4 md:grid-cols-3">
+                  <button
+                    onClick={() => safeInvoke(createText2ImgTemplate, "打开文生图模板")}
+                    className="group flex flex-col items-center gap-3 rounded-[28px] border border-slate-800/90 bg-[linear-gradient(180deg,rgba(12,12,16,0.88),rgba(5,5,7,0.82))] px-5 py-5 transition-all hover:-translate-y-1 hover:border-slate-700 hover:bg-black"
+                  >
+                    <div className="flex h-14 w-14 items-center justify-center rounded-[18px] bg-white/[0.03] ring-1 ring-white/5 transition-colors group-hover:bg-white/[0.05]">
+                      <Wand2 className="w-6 h-6 text-slate-200" />
                     </div>
-                    <span className="text-xs font-bold text-slate-300 group-hover:text-white">文生图</span>
+                    <div>
+                      <div className="text-sm font-semibold text-slate-100">文生图</div>
+                      <div className="mt-1 text-[11px] leading-5 text-slate-500">从文字描述快速创建图像生成流程</div>
+                    </div>
                   </button>
 
-                  <button onClick={() => safeInvoke(createImg2ImgTemplate, "打开图生图模板")} className="group flex flex-col items-center gap-3 p-4 bg-slate-800/50 hover:bg-slate-800 border border-slate-700 hover:border-blue-500/50 rounded-xl transition-all hover:-translate-y-1">
-                    <div className="p-3 bg-blue-500/10 rounded-lg group-hover:bg-blue-500/20 transition-colors">
-                      <Images className="w-6 h-6 text-blue-400" />
+                  <button
+                    onClick={() => safeInvoke(createImg2ImgTemplate, "打开图生图模板")}
+                    className="group flex flex-col items-center gap-3 rounded-[28px] border border-slate-800/90 bg-[linear-gradient(180deg,rgba(12,12,16,0.88),rgba(5,5,7,0.82))] px-5 py-5 transition-all hover:-translate-y-1 hover:border-slate-700 hover:bg-black"
+                  >
+                    <div className="flex h-14 w-14 items-center justify-center rounded-[18px] bg-white/[0.03] ring-1 ring-white/5 transition-colors group-hover:bg-white/[0.05]">
+                      <Images className="w-6 h-6 text-slate-200" />
                     </div>
-                    <span className="text-xs font-bold text-slate-300 group-hover:text-white">图生图</span>
+                    <div>
+                      <div className="text-sm font-semibold text-slate-100">图生图</div>
+                      <div className="mt-1 text-[11px] leading-5 text-slate-500">基于已有素材继续扩展、重绘和变体生成</div>
+                    </div>
                   </button>
 
-                  <button onClick={() => safeInvoke(createImg2VideoTemplate, "打开图生视频模板")} className="group flex flex-col items-center gap-3 p-4 bg-slate-800/50 hover:bg-slate-800 border border-slate-700 hover:border-rose-500/50 rounded-xl transition-all hover:-translate-y-1">
-                    <div className="p-3 bg-rose-500/10 rounded-lg group-hover:bg-rose-500/20 transition-colors">
-                      <Clapperboard className="w-6 h-6 text-rose-400" />
+                  <button
+                    onClick={() => safeInvoke(createImg2VideoTemplate, "打开图生视频模板")}
+                    className="group flex flex-col items-center gap-3 rounded-[28px] border border-slate-800/90 bg-[linear-gradient(180deg,rgba(12,12,16,0.88),rgba(5,5,7,0.82))] px-5 py-5 transition-all hover:-translate-y-1 hover:border-slate-700 hover:bg-black"
+                  >
+                    <div className="flex h-14 w-14 items-center justify-center rounded-[18px] bg-white/[0.03] ring-1 ring-white/5 transition-colors group-hover:bg-white/[0.05]">
+                      <Clapperboard className="w-6 h-6 text-slate-200" />
                     </div>
-                    <span className="text-xs font-bold text-slate-300 group-hover:text-white">图生视频</span>
+                    <div>
+                      <div className="text-sm font-semibold text-slate-100">图生视频</div>
+                      <div className="mt-1 text-[11px] leading-5 text-slate-500">从单张图片出发，生成可直接继续编辑的视频流程</div>
+                    </div>
                   </button>
                 </div>
               </div>
@@ -6088,18 +7359,15 @@ const createConnectedImg2ImgBranch = useCallback(
 
           {/* Controls */}
           <div className="absolute bottom-6 left-6 z-50 flex gap-2 select-none">
-            <div className="bg-slate-800 border border-slate-700 rounded-lg flex items-center p-1 shadow-xl text-slate-500">
-              <button onClick={() => zoomCanvas(-0.2)} className="p-2 hover:bg-slate-700 hover:text-slate-200 rounded transition-colors"><Minus className="w-4 h-4" /></button>
-              <span className="w-12 text-center text-xs font-mono text-slate-400">{Math.round(viewport.zoom * 100)}%</span>
-              <button onClick={() => zoomCanvas(0.2)} className="p-2 hover:bg-slate-700 hover:text-slate-200 rounded transition-colors"><Plus className="w-4 h-4" /></button>
+            <div className="relative flex items-center rounded-[16px] border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))] p-0.5 shadow-[0_18px_36px_rgba(0,0,0,0.36),inset_0_1px_0_rgba(255,255,255,0.05)] text-slate-400">
+              <div className="pointer-events-none absolute inset-0 rounded-[16px] bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.008)_34%,transparent_100%)]" />
+              <button onClick={() => zoomCanvas(-0.2)} className="relative rounded-[12px] p-1.5 transition-colors hover:bg-white/8 hover:text-slate-100"><Minus className="w-3 h-3" /></button>
+              <span className="relative w-9 text-center text-[10px] font-mono text-slate-300">{Math.round(viewport.zoom * 100)}%</span>
+              <button onClick={() => zoomCanvas(0.2)} className="relative rounded-[12px] p-1.5 transition-colors hover:bg-white/8 hover:text-slate-100"><Plus className="w-3 h-3" /></button>
             </div>
-            <button onClick={() => setViewport({ x: 0, y: 0, zoom: 1 })} className="bg-slate-800 border border-slate-700 rounded-lg p-2 hover:bg-slate-700 hover:text-slate-200 shadow-xl text-slate-500" title="Reset View">
-              <Maximize className="w-4 h-4" />
+            <button onClick={() => setViewport({ x: 0, y: 0, zoom: 1 })} className="relative rounded-[16px] border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))] p-2 text-slate-400 shadow-[0_18px_36px_rgba(0,0,0,0.36),inset_0_1px_0_rgba(255,255,255,0.05)] transition-colors hover:bg-slate-950 hover:text-slate-100" title="Reset View">
+              <Maximize className="w-3 h-3" />
             </button>
-            <div className="bg-slate-800 border border-slate-700 rounded-lg p-2 flex items-center gap-2 text-[10px] text-slate-500 shadow-xl">
-              <Keyboard className="w-3 h-3" />
-              <span>空格拖拽 | Delete 删除 | Ctrl+Z 撤销</span>
-            </div>
           </div>
 
           <div className="absolute inset-0 origin-top-left" style={{ transform: `translate(${viewport.x}px,${viewport.y}px) scale(${viewport.zoom})` }}>
@@ -6250,365 +7518,148 @@ const createConnectedImg2ImgBranch = useCallback(
           </div>
 
           <div
-            className="absolute right-4 top-4 z-[95] pointer-events-auto"
-            style={rightPanelContainerStyle}
+            ref={agentComposerRef}
+            className={`absolute left-1/2 -translate-x-1/2 bottom-10 z-40 pointer-events-auto transition-all duration-200 ${
+              agentInputFocused || agentInput.trim()
+                ? "w-[min(100%-2rem,860px)]"
+                : "w-[min(100%-2rem,680px)]"
+            }`}
             onMouseDown={(e) => e.stopPropagation()}
             onWheel={(e) => e.stopPropagation()}
           >
-            {!agentHistoryCollapsed && (
-              <button
-                type="button"
-                onMouseDown={handleRightPanelResizeStart}
-                className="absolute -left-2 top-0 bottom-0 w-2 rounded-md cursor-col-resize text-slate-600 hover:text-yellow-400"
-                title="拖拽调整对话栏宽度"
-                aria-label="拖拽调整对话栏宽度"
-              >
-                <GripVertical className="w-3.5 h-3.5 absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none" />
-              </button>
-            )}
             <div
-              className={`h-full border overflow-hidden backdrop-blur-sm transition-[border-radius,background] duration-300 ${
-                agentHistoryCollapsed
-                  ? "rounded-[4px] border-[var(--bf-border)] bg-gradient-to-b from-slate-900/92 via-slate-900/88 to-slate-950/92"
-                  : "rounded-xl border-[var(--bf-border)] bg-gradient-to-b from-slate-900/94 via-slate-900/92 to-slate-950/95"
+              className={`relative overflow-hidden border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))] shadow-[0_24px_60px_rgba(0,0,0,0.48),inset_0_1px_0_rgba(255,255,255,0.05)] transition-all duration-200 ${
+                agentInputFocused || agentInput.trim()
+                  ? "rounded-[32px] px-5 py-5"
+                  : "rounded-[40px] px-4 py-3"
               }`}
-              style={{ boxShadow: agentHistoryCollapsed ? "0 0 8px rgba(2, 6, 23, 0.45)" : "var(--bf-shadow-md)" }}
             >
-              <div
-                className={`h-[50px] px-3 flex items-center justify-between ${
-                  agentHistoryCollapsed ? "border-b border-slate-700/80 bg-slate-950/35" : "border-b border-slate-800/90 bg-slate-950/35"
-                }`}
-              >
-                <div className="inline-flex min-w-0 items-center gap-1.5 text-xs">
-                  <History className={`w-3.5 h-3.5 ${agentHistoryCollapsed ? "text-yellow-300" : "text-yellow-400"}`} />
-                  <span className={`font-medium truncate ${agentHistoryCollapsed ? "text-slate-100" : "text-slate-200"}`}>
-                    {agentHistoryCollapsed ? "对话" : "对话流"}
-                  </span>
-                </div>
-                <div className="ml-auto flex items-center gap-1.5 shrink-0">
-                  {!agentHistoryCollapsed ? (
-                    <>
-                      <button
-                        type="button"
-                        onClick={createAgentSession}
-                        className="h-7 inline-flex items-center gap-1 px-2 rounded-md border border-slate-700/90 bg-slate-900/70 text-[11px] text-slate-200 hover:bg-slate-800 hover:border-yellow-500/35 hover:text-yellow-100 transition-colors"
-                        title="新建会话"
-                      >
-                        <Plus className="w-3 h-3" />
-                        新建
-                      </button>
-                      <button
-                        type="button"
-                        onClick={clearActiveAgentConversation}
-                        disabled={!hasActiveAgentConversation || isAgentMissionRunning}
-                        className={`h-7 inline-flex items-center gap-1 px-2 rounded-md border text-[11px] transition-colors ${
-                          !hasActiveAgentConversation || isAgentMissionRunning
-                            ? "border-slate-800 bg-slate-900/60 text-slate-600 cursor-not-allowed"
-                            : "border-slate-700/90 bg-slate-900/70 text-slate-300 hover:bg-rose-500/12 hover:border-rose-500/35 hover:text-rose-100"
-                        }`}
-                        title="清除当前会话对话记录"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                        清除
-                      </button>
-                    </>
-                  ) : null}
+              <input
+                ref={agentUploadInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={handleAgentComposerUpload}
+              />
+              <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.03),transparent_24%),linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.008)_34%,transparent_100%)]" />
+              <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-white/18" />
+              <div className="relative flex gap-4">
+                <button
+                  type="button"
+                  title="上传参考图片"
+                  onClick={() => agentUploadInputRef.current?.click()}
+                  className={`mt-1 flex shrink-0 items-center justify-center rounded-[20px] border border-slate-800/90 bg-[linear-gradient(180deg,rgba(26,26,30,0.96),rgba(10,10,12,0.98))] text-slate-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition-all disabled:cursor-not-allowed disabled:opacity-90 ${
+                    agentInputFocused || agentInput.trim() ? "h-[84px] w-[68px] -rotate-6" : "h-8 w-8 -rotate-[8deg] rounded-[12px]"
+                  }`}
+                >
+                  <Plus className={`${agentInputFocused || agentInput.trim() ? "h-5 w-5" : "h-4 w-4"}`} />
+                </button>
+                <div className="relative min-w-0 flex-1 pr-16">
+                  <textarea
+                    ref={agentInputRef}
+                    value={agentInput}
+                    onChange={(e) => setAgentInput(e.target.value)}
+                    onFocus={() => setAgentInputFocused(true)}
+                    onMouseDown={() => setAgentInputFocused(true)}
+                    rows={1}
+                    placeholder="输入你的需求，让 Agent 帮你生成脚本、分镜、成片方案或渲染包。"
+                    className={`w-full resize-none overflow-y-auto bg-transparent text-[15px] leading-7 text-slate-100 outline-none placeholder:text-slate-500 ${
+                      agentInputFocused || agentInput.trim() ? "min-h-[120px]" : "h-9 min-h-9 pt-[2px] text-[14px] leading-8"
+                    }`}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        sendAgentMission();
+                      }
+                    }}
+                  />
                   <button
                     type="button"
-                    onClick={toggleAgentHistoryPanel}
-                    title={agentHistoryCollapsed ? "展开对话（Ctrl+Shift+E）" : "收起对话（Ctrl+Shift+E）"}
-                    aria-label={agentHistoryCollapsed ? "展开对话（Ctrl+Shift+E）" : "收起对话（Ctrl+Shift+E）"}
-                    className="p-1.5 rounded border border-slate-700/90 bg-slate-900/60 text-slate-300 hover:bg-slate-800 hover:border-yellow-500/35 hover:text-yellow-100 transition-colors"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={sendAgentMission}
+                    disabled={(!agentInput.trim() && agentComposerFiles.length === 0) || isAgentMissionRunning}
+                    className={`absolute bottom-0 right-0 flex h-12 w-12 items-center justify-center rounded-full border transition-all ${
+                      ((!agentInput.trim() && agentComposerFiles.length === 0) || isAgentMissionRunning)
+                        ? "cursor-not-allowed border-slate-800/90 bg-[linear-gradient(180deg,rgba(32,32,36,0.92),rgba(10,10,12,0.98))] text-slate-500"
+                        : "border-slate-700 bg-[linear-gradient(180deg,rgba(36,36,40,0.96),rgba(8,8,10,0.98))] text-white shadow-[0_10px_24px_rgba(0,0,0,0.34)] hover:translate-y-[-1px]"
+                    } ${agentInputFocused || agentInput.trim() ? "" : "h-9 w-9 bottom-0.5"}`}
                   >
-                    <ChevronRight
-                      className={`w-3.5 h-3.5 transition-transform duration-300 ${
-                        agentHistoryCollapsed ? "rotate-180 scale-[1.03]" : "rotate-0"
-                      }`}
-                    />
+                    {isAgentMissionRunning ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <ChevronUp className={`${agentInputFocused || agentInput.trim() ? "h-4 w-4" : "h-3.5 w-3.5"}`} />
+                    )}
                   </button>
                 </div>
               </div>
               <div
-                className={`h-[calc(100%-50px)] flex flex-col transition-[opacity,transform] duration-300 ${
-                  agentHistoryCollapsed ? "opacity-0 translate-x-4 pointer-events-none" : "opacity-100 translate-x-0"
+                className={`relative flex flex-wrap gap-2 transition-all duration-200 ${
+                  agentComposerFiles.length > 0 ? "mt-3 max-h-24 opacity-100" : "max-h-0 overflow-hidden opacity-0"
                 }`}
               >
-                <div className="border-b border-slate-800/90 p-2 bg-slate-950/25">
-                  <select
-                    value={activeAgentSession?.id || ""}
-                    onChange={(e) => setActiveAgentSession(e.target.value)}
-                    className="w-full bg-slate-950/95 border border-slate-700/90 rounded-lg px-2.5 py-1.5 text-[11px] text-slate-100 outline-none focus:border-yellow-500/45"
+                {agentComposerFiles.map((file) => (
+                  <div
+                    key={file.id}
+                    className="group flex items-center gap-2 rounded-2xl border border-slate-800/90 bg-white/[0.03] px-2 py-1.5"
                   >
-                    {agentSessions.map((session) => (
-                      <option key={session.id} value={session.id}>
-                        {session.title || "新会话"} ({(session.turns || []).length})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                {minimizedAgentCards.length > 0 && (
-                  <div className="border-b border-slate-800/90 p-2 space-y-1.5 bg-slate-950/20">
-                    <div className="text-[10px] uppercase tracking-wider text-slate-400">已最小化结果</div>
-                    {minimizedAgentCards.map((card) => {
-                      const turn = agentTurns.find((item) => item.id === card.turnId);
-                      if (!turn) return null;
-                      return (
-                        <button
-                          key={card.id}
-                          type="button"
-                          onClick={() => focusAgentResultCard(turn.id)}
-                          className="w-full text-left px-2 py-1.5 rounded-lg border border-slate-700/90 bg-slate-950/80 text-[11px] text-slate-200 hover:bg-slate-800 hover:border-yellow-500/30 transition-colors"
-                        >
-                          恢复 · {turn.extractedProduct || "result"}
-                        </button>
-                      );
-                    })}
+                    <img
+                      src={file.previewUrl}
+                      alt={file.name}
+                      className="h-10 w-10 rounded-xl object-cover"
+                    />
+                    <div className="max-w-32 truncate text-[11px] text-slate-300">{file.name}</div>
+                    <button
+                      type="button"
+                      onClick={() => removeAgentComposerFile(file.id)}
+                      className="rounded-full p-1 text-slate-500 transition-colors hover:bg-white/[0.06] hover:text-white"
+                      title="移除图片"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
                   </div>
-                )}
-                <div className="flex-1 overflow-y-auto p-2.5 space-y-2.5 custom-scrollbar bg-slate-950/20">
-                  {agentTurns.length === 0 && (
-                    <div className="px-2 py-2.5 rounded-lg border border-slate-800/80 bg-slate-950/55 space-y-2">
-                      <div className="text-[11px] text-slate-400">暂无对话，先试一个 Mission 或快速打开模板。</div>
-                      <div className="flex flex-wrap gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => void sendAgentMissionFromText("帮我设计一个洗面奶的爆款脚本")}
-                          className="px-2 py-1 rounded border border-slate-700/90 bg-slate-900/85 text-[10px] text-slate-200 hover:bg-slate-800 hover:border-yellow-500/35 hover:text-yellow-100 transition-colors"
-                        >
-                          发送 Mission 示例
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => safeInvoke(createText2ImgTemplate, "打开文生图模板")}
-                          className="px-2 py-1 rounded border border-slate-700/90 bg-slate-900/85 text-[10px] text-slate-200 hover:bg-slate-800 hover:border-yellow-500/35 hover:text-yellow-100 transition-colors"
-                        >
-                          打开模板
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  {agentTurns.map((turn) => {
-                    const relatedCard = agentResultCards.find((item) => item.turnId === turn.id);
-                    const quickActions = Array.isArray(turn.quickActions) ? turn.quickActions : [];
-                    const productChips = Array.isArray(turn.productChips) ? turn.productChips : [];
-                    const memorySuggestions = Array.isArray(turn.memorySuggestions) ? turn.memorySuggestions : [];
-                    const routeDebug = turn.routeDebug || null;
-                    return (
-                    <div key={turn.id} className="space-y-1.5">
-                      {turn.userText ? (
-                        <div className="flex justify-end">
-                          <div className="max-w-[92%] space-y-1">
-                            <div className="rounded-xl border border-purple-500/35 bg-gradient-to-r from-purple-600/20 to-yellow-500/10 px-2.5 py-2 text-[11px] text-purple-50 whitespace-pre-wrap break-words shadow-sm">
-                              {turn.userText}
-                            </div>
-                            {agentDevMode && routeDebug && (
-                              <div className="text-[10px] text-amber-100 bg-amber-500/10 border border-amber-500/25 rounded px-2 py-1">
-                                intent={routeDebug.intent || "-"} | product={routeDebug.product || "-"} | reason={routeDebug.reason || "-"} | backend_call={routeDebug.backendCalled ? "Y" : "N"}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      ) : null}
-                      <div className="flex justify-start">
-                        <div className="max-w-[92%] rounded-xl border border-slate-700/90 bg-slate-950/90 px-2.5 py-2 text-[11px] text-slate-200 shadow-sm">
-                          {turn.status === "running" && (
-                            <div className="inline-flex items-center gap-1.5 text-slate-300">
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                              {AGENT_RUN_STEPS[Math.min(turn.stepIndex || 0, AGENT_RUN_STEPS.length - 1)]}
-                            </div>
-                          )}
-                          {(turn.status === "assistant" || turn.status === "clarify") && (
-                            <div className="space-y-1.5">
-                              <div>{turn.assistantText || "你想做哪个产品/品类？"}</div>
-                              {memorySuggestions.length > 0 && (
-                                <div className="space-y-1.5">
-                                  {memorySuggestions.map((suggestion) => (
-                                    <PreferenceSuggestionCard
-                                      key={`${turn.id}_${suggestion.id}`}
-                                      suggestion={suggestion}
-                                      disabled={
-                                        savingSuggestionId === suggestion.id ||
-                                        savingFeedbackTargetId === `suggest_${suggestion.id}`
-                                      }
-                                      onConfirm={() => handleSuggestionConfirm(turn.id, suggestion)}
-                                      onIgnore={() => handleSuggestionIgnore(turn.id, suggestion)}
-                                      onEdit={() => handleSuggestionEdit(suggestion)}
-                                      showRegressionAction={HITL_FEEDBACK_UI_ENABLED}
-                                      regressionTooltip="将该建议对应会话加入回归评估集，帮助后续质量修复"
-                                      onMarkRegression={() => handleSuggestionMarkRegression(turn.id, suggestion)}
-                                    />
-                                  ))}
-                                </div>
-                              )}
-                              {quickActions.length > 0 && (
-                                <div className="flex flex-wrap gap-1">
-                                  {quickActions.map((actionId) => {
-                                    const action = AGENT_QUICK_ACTIONS.find((item) => item.id === actionId);
-                                    if (!action) return null;
-                                    return (
-                                      <button
-                                        key={`${turn.id}_${actionId}`}
-                                        type="button"
-                                        onClick={() => handleAgentQuickAction(actionId)}
-                                        className="px-2 py-1 rounded border border-slate-700/90 bg-slate-900/85 text-[10px] text-slate-200 hover:bg-slate-800 hover:border-yellow-500/35 hover:text-yellow-100 transition-colors"
-                                      >
-                                        {action.label}
-                                      </button>
-                                    );
-                                  })}
-                                </div>
-                              )}
-                              {turn.showCancelPending && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleAgentQuickAction("cancel_pending")}
-                                  className="px-2 py-1 rounded border border-slate-700/90 bg-slate-900/85 text-[10px] text-slate-200 hover:bg-slate-800 hover:border-yellow-500/35 hover:text-yellow-100 transition-colors"
-                                >
-                                  取消
-                                </button>
-                              )}
-                              {productChips.length > 0 && (
-                                <div className="flex flex-wrap gap-1">
-                                  {productChips.map((product) => (
-                                    <button
-                                      key={`${turn.id}_product_${product}`}
-                                      type="button"
-                                      onClick={() => handleAgentProductChip(product)}
-                                      className="px-2 py-1 rounded-full border border-yellow-500/45 bg-yellow-500/10 text-[10px] text-yellow-100 hover:bg-yellow-500/20"
-                                    >
-                                      {product}
-                                    </button>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          )}
-                          {turn.status === "error" && (
-                            <div className="space-y-1.5">
-                              <div className="text-red-300">{turn.error || "请求失败"}</div>
-                              <div className="flex flex-wrap gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() => retryAgentTurn(turn.id)}
-                                  className="px-2 py-1 rounded border border-slate-700/90 text-[10px] text-slate-200 hover:bg-slate-800 hover:border-yellow-500/35 hover:text-yellow-100 transition-colors"
-                                >
-                                  重试
-                                </button>
-                                {HITL_FEEDBACK_UI_ENABLED && (
-                                  <button
-                                    type="button"
-                                    onClick={() => handleTurnMarkRegression(turn)}
-                                    disabled={savingFeedbackTargetId === `turn_${turn.id}`}
-                                    title="将当前会话标记为回归用例，进入评估集用于后续改进"
-                                    className={`px-2 py-1 rounded border text-[10px] ${
-                                      savingFeedbackTargetId === `turn_${turn.id}`
-                                        ? "bg-slate-800 border-slate-700 text-slate-500 cursor-not-allowed"
-                                        : "bg-fuchsia-600/20 border-fuchsia-500/60 text-fuchsia-100 hover:bg-fuchsia-600/30"
-                                    }`}
-                                  >
-                                    标记为回归用例
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          )}
-                          {turn.status === "done" && (
-                            <div className="space-y-1.5">
-                              <div className="text-slate-300">
-                                已生成 {(turn.response?.topics || []).length} 个 topic / {(turn.response?.edit_plans || []).length} 个 plan
-                              </div>
-                              <div className="flex gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() => focusAgentResultCard(turn.id)}
-                                  className="px-2 py-1 rounded border border-slate-700/90 text-[10px] text-slate-200 hover:bg-slate-800 hover:border-yellow-500/35 hover:text-yellow-100 transition-colors"
-                                >
-                                  {relatedCard?.minimized ? "恢复结果卡片" : "定位结果卡片"}
-                                </button>
-                                {relatedCard && !relatedCard.minimized && (
-                                  <button
-                                    type="button"
-                                    onClick={() => minimizeAgentResultCard(relatedCard.id)}
-                                    className="px-2 py-1 rounded border border-slate-700/90 text-[10px] text-slate-200 hover:bg-slate-800 hover:border-yellow-500/35 hover:text-yellow-100 transition-colors"
-                                  >
-                                    最小化到对话流
-                                  </button>
-                                )}
-                                {HITL_FEEDBACK_UI_ENABLED && (
-                                  <button
-                                    type="button"
-                                    onClick={() => handleTurnMarkRegression(turn)}
-                                    disabled={savingFeedbackTargetId === `turn_${turn.id}`}
-                                    title="将当前会话标记为回归用例，进入评估集用于后续改进"
-                                    className={`px-2 py-1 rounded border text-[10px] ${
-                                      savingFeedbackTargetId === `turn_${turn.id}`
-                                        ? "bg-slate-800 border-slate-700 text-slate-500 cursor-not-allowed"
-                                        : "bg-fuchsia-600/20 border-fuchsia-500/60 text-fuchsia-100 hover:bg-fuchsia-600/30"
-                                    }`}
-                                  >
-                                    标记为回归用例
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )})}
-                  <div ref={agentConversationBottomRef} />
-                </div>
+                ))}
               </div>
-            </div>
-          </div>
-
-          <div
-            className="absolute left-1/2 -translate-x-1/2 bottom-4 z-40 w-[min(100%-2rem,640px)] pointer-events-auto"
-            onMouseDown={(e) => e.stopPropagation()}
-            onWheel={(e) => e.stopPropagation()}
-          >
-            <div className="rounded-xl border border-[var(--bf-border)] bg-gradient-to-r from-slate-900/95 via-slate-900/92 to-slate-950/95 shadow-[var(--bf-shadow-md)] backdrop-blur-md px-2.5 py-2">
-              <div className="mb-2 h-px w-full bg-gradient-to-r from-yellow-500/45 via-purple-500/25 to-transparent" />
-              <div className="flex items-end gap-1.5">
-                <textarea
-                  ref={agentInputRef}
-                  value={agentInput}
-                  onChange={(e) => setAgentInput(e.target.value)}
-                  rows={1}
-                  placeholder="输入 Mission，例如：帮我设计一个洗面奶的爆款脚本"
-                  className="flex-1 min-h-[38px] max-h-24 rounded-lg border border-slate-700/85 bg-slate-950/95 px-3 py-2 text-xs text-slate-100 outline-none focus:border-yellow-500/45 focus:ring-1 focus:ring-yellow-500/30 resize-y placeholder:text-slate-500"
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      sendAgentMission();
-                    }
-                  }}
-                />
-                <button
-                  type="button"
-                  onClick={sendAgentMission}
-                  disabled={!agentInput.trim() || isAgentMissionRunning}
-                  className={`h-9 px-3 rounded-md text-white inline-flex items-center gap-1 text-xs font-semibold ${
-                    !agentInput.trim() || isAgentMissionRunning
-                      ? "bg-slate-800 border border-slate-700 text-slate-500 cursor-not-allowed"
-                      : "bg-gradient-to-r from-purple-600 to-violet-600 border border-purple-500/45 hover:from-purple-500 hover:to-violet-500 shadow-lg shadow-purple-900/35"
-                  }`}
-                >
-                  {isAgentMissionRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
-                  发送
-                </button>
-              </div>
-              <div className="mt-1.5 flex items-center justify-between text-[10px] text-slate-400">
-                <span>Enter 发送，Shift+Enter 换行</span>
-                <label className="inline-flex items-center gap-1 cursor-pointer select-none">
+              <div
+                className={`relative flex flex-wrap items-center gap-2 pr-16 transition-all duration-200 ${
+                  agentInputFocused || agentInput.trim() ? "mt-4 max-h-32 opacity-100" : "mt-0 max-h-0 overflow-hidden opacity-0"
+                }`}
+              >
+                {composerQuickActions.map((action) => {
+                  const Icon = action.icon;
+                  const isActive = activeComposerActionId === action.id;
+                  return (
+                    <button
+                      key={action.id}
+                      type="button"
+                      onClick={() => handleAgentQuickAction(action.id)}
+                      className={`inline-flex items-center gap-2 rounded-full border px-3.5 py-2 text-[12px] transition-all ${
+                        isActive
+                          ? "border-slate-700 bg-[linear-gradient(180deg,rgba(30,30,34,0.96),rgba(10,10,12,0.98))] text-white shadow-[0_8px_20px_rgba(0,0,0,0.28)]"
+                          : "border-slate-800/90 bg-white/[0.03] text-slate-300 hover:bg-white/[0.05]"
+                      }`}
+                    >
+                      <Icon className="h-3.5 w-3.5" />
+                      {action.label}
+                    </button>
+                  );
+                })}
+                <label className="ml-auto inline-flex cursor-pointer select-none items-center gap-2 rounded-full border border-slate-800/90 bg-white/[0.03] px-3 py-2 text-[12px] text-slate-300">
                   <input
                     type="checkbox"
                     checked={agentDevMode}
                     onChange={(e) => setAgentDevMode(e.target.checked)}
-                    className="h-3 w-3 accent-yellow-500"
+                    className="h-3.5 w-3.5 accent-slate-300"
                   />
                   Dev Mode
                 </label>
+              </div>
+              <div
+                className={`text-[11px] text-slate-500 transition-all duration-200 ${
+                  agentInputFocused || agentInput.trim() ? "mt-3 max-h-8 opacity-100" : "max-h-0 overflow-hidden opacity-0"
+                }`}
+              >
+                Enter 发送，Shift+Enter 换行
               </div>
               {preferenceNotice && (
                 <div className="mt-2 rounded border border-yellow-500/35 bg-yellow-500/10 p-2 text-[10px] text-yellow-100 flex items-center justify-between gap-2">
@@ -6739,6 +7790,7 @@ const createConnectedImg2ImgBranch = useCallback(
           onClose={() => setActiveNodeId(null)}
           imageModelOptions={imageModelOptions}
           videoModelOptions={videoModelOptions}
+          resolveModelParamsForId={resolveModelParamsForId}
         />
       </div>
 
