@@ -20,6 +20,8 @@ from .tool_asset_match import (
     MATCH_ASSETS_TOOL_VERSION,
 )
 
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 class MCPClientError(RuntimeError):
     pass
@@ -43,8 +45,8 @@ class MCPStdioClient:
     ) -> None:
         self.server_cmd = server_cmd or [sys.executable, "-m", str(server_module).strip()]
         self.timeout_sec = timeout_sec
-        self.cwd = cwd
-        self.env = dict(env or {}) or None
+        self.cwd = cwd or (os.getenv("BANANAFLOW_MCP_CWD") or "").strip() or _PROJECT_ROOT
+        self.env = dict(env or {})
         self._proc: Optional[subprocess.Popen[str]] = None
         self._stderr_buffer: list[str] = []
         self._stderr_thread: Optional[threading.Thread] = None
@@ -99,10 +101,22 @@ class MCPStdioClient:
             text=True,
             bufsize=1,
             cwd=self.cwd,
-            env=self.env,
+            env=self._build_subprocess_env(),
         )
         self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
         self._stderr_thread.start()
+
+    def _build_subprocess_env(self) -> Dict[str, str]:
+        env = dict(os.environ)
+        env.update({str(k): str(v) for k, v in self.env.items()})
+
+        project_root = str(self.cwd or _PROJECT_ROOT).strip() or _PROJECT_ROOT
+        existing = str(env.get("PYTHONPATH") or "").strip()
+        parts = [part for part in existing.split(os.pathsep) if part]
+        if project_root not in parts:
+            parts.insert(0, project_root)
+        env["PYTHONPATH"] = os.pathsep.join(parts)
+        return env
 
     def stop(self) -> None:
         proc = self._proc

@@ -27,11 +27,12 @@ export function AuthProvider({ children }) {
 
   const apiFetch = useCallback(
     async (path, options = {}) => {
-      const requestHeaders = new Headers(options.headers || {});
-      if (token) requestHeaders.set("Authorization", `Bearer ${token}`);
+      const { skipAuth = false, ...fetchOptions } = options;
+      const requestHeaders = new Headers(fetchOptions.headers || {});
+      if (token && !skipAuth) requestHeaders.set("Authorization", `Bearer ${token}`);
 
       // ✅ 仅在“你确实传 JSON 字符串 body”时设置 Content-Type
-      const body = options.body;
+      const body = fetchOptions.body;
       const isFormData = typeof FormData !== "undefined" && body instanceof FormData;
       const isBlob = typeof Blob !== "undefined" && body instanceof Blob;
 
@@ -39,10 +40,10 @@ export function AuthProvider({ children }) {
         if (typeof body === "string") requestHeaders.set("Content-Type", "application/json");
       }
 
-      const resp = await fetch(buildUrl(path), { ...options, headers: requestHeaders });
+      const resp = await fetch(buildUrl(path), { ...fetchOptions, headers: requestHeaders });
 
-      // ✅ 全局 401：清 session，避免“过期 token 还在跑请求”
-      if (resp.status === 401) {
+      // ✅ 仅对需要 app 鉴权的请求处理 401，避免 skipAuth 请求误清登录态
+      if (resp.status === 401 && !skipAuth) {
         clearSession();
         const now = Date.now();
         if (now - lastSessionNoticeAtRef.current > 8000) {

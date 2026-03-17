@@ -15,6 +15,8 @@ import {
 } from "lucide-react";
 import { Link } from "../router";
 import { useAuth } from "../auth/AuthProvider";
+import { resolveMemberAuthorizationInfo, viewAIChatModelParams, viewAIChatModels } from "../api/aiChat";
+import { API_BASE } from "../config";
 
 const FUNCTION_META = {
   face: {
@@ -67,6 +69,7 @@ const DEFAULT_VIDEO_PROMPT =
   "画面轻微晃动，镜头产生呼吸感；画面中不出现任何额外元素，商品保持静止。";
 const DEFAULT_VIDEO_DURATION = 3;
 const DEFAULT_VIDEO_MODEL = "Doubao-Seedance-1.0-pro";
+const AI_CHAT_I2V_MODEL_ID = "6";
 const DEFAULT_VIDEO_SEED = 21;
 const MAX_CONCURRENT = 2;
 
@@ -120,6 +123,100 @@ const extractApiError = (data) => {
   return String(d);
 };
 
+const normalizeText = (value) => String(value || "").trim().toLowerCase();
+
+const pickModelField = (record, keys) => {
+  if (!record || typeof record !== "object") return "";
+  for (const key of keys) {
+    const value = record?.[key];
+    const text = String(value ?? "").trim();
+    if (text) return text;
+  }
+  return "";
+};
+
+const pickImageModelId = (list) => {
+  const items = Array.isArray(list) ? list : [];
+  if (!items.length) return "";
+  const pickId = (item) =>
+    pickModelField(item, ["ai_chat_model_id", "model_id", "id", "aiChatModelId", "ai_chat_model"]);
+  const pickName = (item) =>
+    pickModelField(item, ["ai_chat_model_name", "model_name", "name", "label", "title"]).toLowerCase();
+  const nano = items.find((item) => {
+    const n = pickName(item);
+    return n.includes("nano") || n.includes("banana");
+  });
+  return pickId(nano || items[0]);
+};
+
+const sortParamValues = (values) => {
+  const list = Array.isArray(values) ? values.slice() : [];
+  list.sort((a, b) => {
+    const ai = Number(a?.order_index ?? Number.MAX_SAFE_INTEGER);
+    const bi = Number(b?.order_index ?? Number.MAX_SAFE_INTEGER);
+    return ai - bi;
+  });
+  return list;
+};
+
+const findAIChatParamItem = (paramList, aliases = []) => {
+  const keywords = aliases.map((item) => String(item || "").toLowerCase()).filter(Boolean);
+  if (!keywords.length) return null;
+  for (const item of Array.isArray(paramList) ? paramList : []) {
+    const name = String(item?.param_name || item?.name || item?.desc || "").toLowerCase();
+    if (!name) continue;
+    if (keywords.some((keyword) => name.includes(keyword))) return item;
+  }
+  return null;
+};
+
+const findAIChatParamValueId = (paramList, aliases = [], selectedValue = "") => {
+  const target = normalizeText(selectedValue);
+  if (!target) return "";
+  const item = findAIChatParamItem(paramList, aliases);
+  if (!item) return "";
+  const values = sortParamValues(item?.param_values || []);
+  for (const paramValue of values) {
+    const candidates = [
+      String(paramValue?.param_value || "").trim().toLowerCase(),
+      String(paramValue?.remark || "").trim().toLowerCase(),
+    ].filter(Boolean);
+    if (candidates.includes(target)) {
+      const id = paramValue?.param_value_id;
+      if (id === undefined || id === null || id === "") return "";
+      return String(id);
+    }
+  }
+  return "";
+};
+
+const pickFirstImageUrl = (payload) => {
+  if (!payload) return "";
+  if (typeof payload === "string") {
+    const matched = payload.match(/https?:\/\/[^\s"'<>]+/i);
+    return matched?.[0] || "";
+  }
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const found = pickFirstImageUrl(item);
+      if (found) return found;
+    }
+    return "";
+  }
+  if (typeof payload === "object") {
+    const directKeys = ["image_url", "imageUrl", "url", "image", "output_url", "outputUrl", "result_url", "resultUrl"];
+    for (const key of directKeys) {
+      const found = pickFirstImageUrl(payload[key]);
+      if (found) return found;
+    }
+    for (const value of Object.values(payload)) {
+      const found = pickFirstImageUrl(value);
+      if (found) return found;
+    }
+  }
+  return "";
+};
+
 const readFileAsDataUrl = (file) =>
   new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -127,6 +224,24 @@ const readFileAsDataUrl = (file) =>
     reader.onerror = () => reject(new Error("文件读取失败"));
     reader.readAsDataURL(file);
   });
+
+const ensureImageDataUrl = async (imageValue, signal) => {
+  const text = String(imageValue || "").trim();
+  if (!text) throw new Error("图片内容为空");
+  if (text.startsWith("data:image/")) return text;
+  const resp = await fetch(text, { signal });
+  if (!resp.ok) throw new Error(`下载图片失败: HTTP ${resp.status}`);
+  const blob = await resp.blob();
+  return await readFileAsDataUrl(blob);
+};
+
+const buildApiUrl = (path) => {
+  const root = String(API_BASE || "").replace(/\/+$/, "");
+  if (!path) return root;
+  if (String(path).startsWith("http")) return path;
+  if (!root) return path.startsWith("/") ? path : `/${path}`;
+  return path.startsWith("/") ? `${root}${path}` : `${root}/${path}`;
+};
 
 const buildResultsSeed = (mainItems, refItems, refMode) => {
   if (refMode === "reference") {
@@ -208,8 +323,12 @@ const PipelineBatchVideo = () => {
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [previewImage, setPreviewImage] = useState(null);
   const [previewVideo, setPreviewVideo] = useState(null);
+  const [aiChatImageModelId, setAiChatImageModelId] = useState("");
 
   const resultsSeedRef = useRef([]);
+  const aiChatModelParamsCacheRef = useRef(new Map());
+  const aiChatSessionIdRef = useRef("");
+  const aiChatHistoryRecordIdRef = useRef("");
   const abortControllerRef = useRef(null);
   const mainInputRef = useRef(null);
   const refInputRef = useRef(null);
@@ -280,6 +399,28 @@ const PipelineBatchVideo = () => {
   useEffect(() => {
     setSelectedResultIds((prev) => prev.filter((id) => imageResultIds.includes(id)));
   }, [imageResultIds]);
+
+  useEffect(() => {
+    let active = true;
+    const loadImageModel = async () => {
+      try {
+        const data = await viewAIChatModels(
+          apiFetch,
+          { module_enum: 1, part_enum: 2 },
+          { preferApiFetchFirst: true },
+        );
+        const list = Array.isArray(data?.list) ? data.list : Array.isArray(data?.data?.list) ? data.data.list : [];
+        const modelId = pickImageModelId(list);
+        if (active && modelId) setAiChatImageModelId(String(modelId));
+      } catch {
+        if (active) setAiChatImageModelId("");
+      }
+    };
+    loadImageModel();
+    return () => {
+      active = false;
+    };
+  }, [apiFetch]);
 
   const updateResult = useCallback((id, patch) => {
     setResults((prev) => {
@@ -415,16 +556,17 @@ const PipelineBatchVideo = () => {
   const applyOverlayText = useCallback(
     async (imageDataUrl, signal) => {
       if (!shouldApplyOverlay) return imageDataUrl;
+      const normalizedImageDataUrl = await ensureImageDataUrl(imageDataUrl, signal);
 
       const boldTextValues = boldTexts.map((val) => (val || "").trim());
       const highlightTextValues = highlightTexts.map((val) => (val || "").trim());
 
-      const overlayResp = await apiFetch(`/api/overlaytext`, {
+      const overlayResp = await fetch(buildApiUrl(`/api/overlaytext`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal,
         body: JSON.stringify({
-          image: imageDataUrl,
+          image: normalizedImageDataUrl,
           text: overlayText,
           font_name: fontName,
           font_size: fontSize,
@@ -539,22 +681,82 @@ const PipelineBatchVideo = () => {
             try {
               const prompt = buildTaskPrompt();
               const images = task.refUrl ? [task.inputUrl, task.refUrl] : [task.inputUrl];
-              const editResp = await apiFetch(`/api/multi_image_generate`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                signal: controller.signal,
-                body: JSON.stringify({
-                  prompt,
-                  images,
-                  temperature: 0.7,
-                  aspect_ratio: aspectRatio,
-                }),
-              });
+              const memberAuth = resolveMemberAuthorizationInfo()?.value || "";
+              let generatedImage = "";
 
-              const editData = await editResp.json().catch(() => ({}));
-              if (!editResp.ok) throw new Error(`图片生成失败：${extractApiError(editData)}`);
+              if (memberAuth && aiChatImageModelId) {
+                try {
+                  let paramList = aiChatModelParamsCacheRef.current.get(aiChatImageModelId);
+                  if (!Array.isArray(paramList)) {
+                    const paramsData = await viewAIChatModelParams(
+                      apiFetch,
+                      { ai_chat_model_id: Number(aiChatImageModelId) || aiChatImageModelId },
+                      { preferApiFetchFirst: true },
+                    );
+                    paramList = Array.isArray(paramsData?.list)
+                      ? paramsData.list
+                      : Array.isArray(paramsData?.data?.list)
+                        ? paramsData.data.list
+                        : [];
+                    aiChatModelParamsCacheRef.current.set(aiChatImageModelId, paramList);
+                  }
 
-              const generatedImage = editData.image || editData.images?.[0];
+                  const proxyPayload = {
+                    authorization: memberAuth,
+                    history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
+                    module_enum: "1",
+                    part_enum: "2",
+                    message: prompt,
+                    ai_chat_session_id: aiChatSessionIdRef.current || "",
+                    ai_chat_model_id: aiChatImageModelId,
+                    ai_image_param_size_id: findAIChatParamValueId(paramList, ["size", "尺寸"], "1024x1024"),
+                    ai_image_param_ratio_id: findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比"], aspectRatio),
+                    images,
+                  };
+
+                  const proxyResp = await apiFetch(`/api/ai_chat_image_via_curl`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    signal: controller.signal,
+                    body: JSON.stringify(proxyPayload),
+                  });
+                  const proxyData = await proxyResp.json().catch(() => ({}));
+                  if (!proxyResp.ok) throw new Error(extractApiError(proxyData));
+                  if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
+                  if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
+                  generatedImage =
+                    pickFirstImageUrl(proxyData?.image_url) ||
+                    pickFirstImageUrl(proxyData?.events) ||
+                    pickFirstImageUrl(proxyData?.text) ||
+                    "";
+                  const doneErr = String(proxyData?.done_error || "").trim();
+                  if (!generatedImage && doneErr) throw new Error(doneErr);
+                } catch {
+                  generatedImage = "";
+                }
+              }
+
+              if (!generatedImage) {
+                const editResp = await apiFetch(`/api/multi_image_generate`, {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    ...(memberAuth ? { "X-AI-Chat-Authorization": memberAuth } : {}),
+                  },
+                  signal: controller.signal,
+                  body: JSON.stringify({
+                    prompt,
+                    images,
+                    temperature: 0.7,
+                    aspect_ratio: aspectRatio,
+                  }),
+                });
+
+                const editData = await editResp.json().catch(() => ({}));
+                if (!editResp.ok) throw new Error(`图片生成失败：${extractApiError(editData)}`);
+                generatedImage = editData.image || editData.images?.[0];
+              }
+
               if (!generatedImage) throw new Error("图片生成未返回结果");
 
               const finalImage = await applyOverlayText(generatedImage, controller.signal);
@@ -584,7 +786,7 @@ const PipelineBatchVideo = () => {
       abortControllerRef.current = null;
       setIsRunning(false);
     },
-    [apiFetch, applyOverlayText, aspectRatio, buildTaskPrompt, isRunning, updateResult],
+    [aiChatImageModelId, apiFetch, applyOverlayText, aspectRatio, buildTaskPrompt, isRunning, updateResult],
   );
 
   const handleRun = useCallback(async () => {
@@ -638,27 +840,97 @@ const PipelineBatchVideo = () => {
       updateResult(item.id, { videoStatus: "running", videoError: null });
 
       try {
-        const resp = await apiFetch(`/api/img2video`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model: DEFAULT_VIDEO_MODEL,
-            image: item.outputUrl,
-            last_frame_image: null,
-            prompt: DEFAULT_VIDEO_PROMPT,
-            duration: DEFAULT_VIDEO_DURATION,
-            fps: 24,
-            camera_fixed: false,
-            resolution: videoResolution,
-            ratio: aspectRatio,
-            seed: DEFAULT_VIDEO_SEED,
-          }),
-        });
+        const memberAuth = resolveMemberAuthorizationInfo()?.value || "";
+        const selectedRatio = String(aspectRatio || "1:1").trim() || "1:1";
+        let outputUrl = "";
 
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok) throw new Error(extractApiError(data));
+        if (memberAuth) {
+          try {
+            let paramList = aiChatModelParamsCacheRef.current.get(AI_CHAT_I2V_MODEL_ID);
+            if (!Array.isArray(paramList)) {
+              const paramsData = await viewAIChatModelParams(
+                apiFetch,
+                { ai_chat_model_id: Number(AI_CHAT_I2V_MODEL_ID) || AI_CHAT_I2V_MODEL_ID },
+                { preferApiFetchFirst: true },
+              );
+              paramList = Array.isArray(paramsData?.list)
+                ? paramsData.list
+                : Array.isArray(paramsData?.data?.list)
+                  ? paramsData.data.list
+                  : [];
+              aiChatModelParamsCacheRef.current.set(AI_CHAT_I2V_MODEL_ID, paramList);
+            }
+            if (!Array.isArray(paramList) || paramList.length === 0) {
+              throw new Error("viewAIChatModelParams 未返回有效参数，无法提交图生视频请求");
+            }
 
-        const outputUrl = data.video || data.image || data.images?.[0];
+            const matchedResolutionId = findAIChatParamValueId(paramList, ["resolution", "分辨率"], videoResolution);
+            const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比"], selectedRatio);
+            const matchedDurationId = findAIChatParamValueId(paramList, ["duration", "时长"], String(DEFAULT_VIDEO_DURATION));
+            if (!matchedResolutionId) throw new Error(`未从模型参数中匹配到分辨率: ${videoResolution}`);
+            if (!matchedDurationId) throw new Error(`未从模型参数中匹配到时长: ${DEFAULT_VIDEO_DURATION}`);
+            if (!matchedRatioId) throw new Error(`未从模型参数中匹配到比例: ${selectedRatio}`);
+
+            const proxyPayload = {
+              authorization: memberAuth,
+              history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
+              module_enum: "1",
+              part_enum: "3",
+              message: DEFAULT_VIDEO_PROMPT,
+              ai_chat_session_id: aiChatSessionIdRef.current || "",
+              ai_chat_model_id: AI_CHAT_I2V_MODEL_ID,
+              ai_video_param_resolution_id: matchedResolutionId,
+              ai_video_param_duration_id: matchedDurationId,
+              ai_video_param_ratio_id: matchedRatioId,
+              images: [item.outputUrl],
+            };
+
+            const proxyResp = await apiFetch(`/api/ai_chat_image_via_curl`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(proxyPayload),
+            });
+            const proxyData = await proxyResp.json().catch(() => ({}));
+            if (!proxyResp.ok) throw new Error(extractApiError(proxyData));
+            if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
+            if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
+            outputUrl =
+              pickFirstImageUrl(proxyData?.image_url) ||
+              pickFirstImageUrl(proxyData?.events) ||
+              pickFirstImageUrl(proxyData?.text) ||
+              "";
+            const doneErr = String(proxyData?.done_error || "").trim();
+            if (!outputUrl && doneErr) throw new Error(doneErr);
+          } catch {
+            outputUrl = "";
+          }
+        }
+
+        if (!outputUrl) {
+          const resp = await apiFetch(`/api/img2video`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(memberAuth ? { "X-AI-Chat-Authorization": memberAuth } : {}),
+            },
+            body: JSON.stringify({
+              model: DEFAULT_VIDEO_MODEL,
+              image: item.outputUrl,
+              last_frame_image: null,
+              prompt: DEFAULT_VIDEO_PROMPT,
+              duration: DEFAULT_VIDEO_DURATION,
+              fps: 24,
+              camera_fixed: false,
+              resolution: videoResolution,
+              ratio: selectedRatio,
+              seed: DEFAULT_VIDEO_SEED,
+            }),
+          });
+
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok) throw new Error(extractApiError(data));
+          outputUrl = data.video || data.image || data.images?.[0];
+        }
         if (!outputUrl) throw new Error("未返回动图结果");
         updateResult(item.id, { videoStatus: "success", videoUrl: outputUrl, videoError: null });
       } catch (err) {

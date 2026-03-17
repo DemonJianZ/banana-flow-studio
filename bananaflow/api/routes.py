@@ -6,11 +6,16 @@ import re
 import uuid
 import hashlib
 import threading
+import subprocess
+import tempfile
+import urllib.request
+import mimetypes
 from contextlib import contextmanager, nullcontext
 from typing import Dict, Any, Optional, List
 from urllib.parse import unquote
 
 from fastapi import APIRouter, HTTPException, Request, Depends, Query, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from google.genai import types
 
@@ -18,6 +23,9 @@ from google.genai import types
 from core.config import (
     MODEL_GEMINI,
     MODEL_DOUBAO,
+    MODEL_AGENT_CHAT,
+    AGENT_CHAT_HTTP_PROXY,
+    AGENT_CHAT_HTTPS_PROXY,
     MODEL_COMFYUI_OVERLAYTEXT,
     MODEL_COMFYUI_RMBG,
     MODEL_COMFYUI_MULTI_ANGLESHOTS,
@@ -42,10 +50,11 @@ from schemas.api import (
     EditRequest, EditResponse,
     Img2VideoRequest, Img2VideoResponse,
     AgentVideoGenerationRequest, AgentVideoGenerationResponse, AgentVideoShotArtifact,
+    AgentChitchatRequest, AgentChitchatResponse,
 )
 
 from storage.prompt_log import PromptLogger, LogAnalyzer
-from services.genai_client import call_genai_retry
+from services.genai_client import call_genai_retry, call_genai_retry_with_proxy
 from services.ark import call_doubao_image_gen
 from services.ark_video import generate_video_from_image, VideoGenError
 from services.comfyui import (
@@ -150,6 +159,42 @@ def _tenant_user_from_request(request: Request, current_user: Dict[str, Any]) ->
     return tenant_id, user_id
 
 
+def _get_current_user_optional(request: Request) -> Optional[Dict[str, Any]]:
+    try:
+        return get_current_user(request)
+    except HTTPException as e:
+        if int(getattr(e, "status_code", 0)) == 401:
+            return None
+        raise
+
+
+def _resolve_agent_actor(request: Request, current_user: Optional[Dict[str, Any]]) -> tuple[str, str]:
+    tenant_id = str(request.headers.get("X-Tenant-Id") or (current_user or {}).get("email_domain") or "public").strip() or "public"
+    user_id = str((current_user or {}).get("id") or "").strip()
+    if user_id:
+        return tenant_id, user_id
+
+    guest_key = (
+        str(request.headers.get("X-Guest-Id") or "").strip()
+        or str(request.headers.get("X-Agent-Session-Id") or "").strip()
+        or str(getattr(request.client, "host", "") or "").strip()
+        or "anonymous"
+    )
+    guest_hash = hashlib.sha1(guest_key.encode("utf-8")).hexdigest()[:12]
+    return tenant_id, f"guest:{guest_hash}"
+
+
+def _user_id_for_log(current_user: Optional[Dict[str, Any]]) -> str:
+    user_id = str((current_user or {}).get("id") or "").strip()
+    return user_id or "anonymous"
+
+
+def _record_usage_if_authed(current_user: Optional[Dict[str, Any]], model: str) -> None:
+    user_id = str((current_user or {}).get("id") or "").strip()
+    if user_id:
+        record_usage(user_id, model)
+
+
 def _safe_json_hash(data: Dict[str, Any]) -> str:
     encoded = json.dumps(dict(data or {}), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -161,6 +206,352 @@ _PREFERENCE_COMMAND_PATTERNS = [
     (re.compile(r"^\s*镜头偏好\s*[:=：]\s*(.+?)\s*$"), "camera_style"),
     (re.compile(r"^\s*风控偏好\s*[:=：]\s*(.+?)\s*$"), "risk_posture"),
 ]
+
+_MEMBER_API_BASE = os.getenv("MEMBER_API_BASE", "http://192.168.20.217:16313").rstrip("/")
+_MEMBER_API_AUTHORIZATION = str(os.getenv("MEMBER_API_AUTHORIZATION") or "").strip()
+_IDEA_SCRIPT_HTTP_PROXY = str(
+    os.getenv("IDEA_SCRIPT_HTTP_PROXY") or "http://szdayu:123456@124.243.168.90:16607"
+).strip()
+_IDEA_SCRIPT_HTTPS_PROXY = str(
+    os.getenv("IDEA_SCRIPT_HTTPS_PROXY") or "http://szdayu:123456@124.243.168.90:16607"
+).strip()
+_AI_CHAT_MODEL_ID_NANO_BANANA_PRO = str(os.getenv("AI_CHAT_MODEL_ID_NANO_BANANA_PRO") or "").strip()
+_AI_CHAT_MODEL_ID_SEEDANCE_1_0 = str(os.getenv("AI_CHAT_MODEL_ID_SEEDANCE_1_0") or "").strip()
+_AI_CHAT_IMAGE_SIZE_ID_MAP = {
+    "1024x1024": str(os.getenv("AI_CHAT_IMAGE_SIZE_ID_1024", "3")).strip(),
+}
+_AI_CHAT_IMAGE_RATIO_ID_MAP = {
+    "1:1": str(os.getenv("AI_CHAT_IMAGE_RATIO_ID_1_1", "4")).strip(),
+}
+_AI_CHAT_VIDEO_RESOLUTION_ID_MAP = {
+    "480p": str(os.getenv("AI_CHAT_VIDEO_RESOLUTION_ID_480P", "16")).strip(),
+    "720p": str(os.getenv("AI_CHAT_VIDEO_RESOLUTION_ID_720P", "17")).strip(),
+    "1080p": str(os.getenv("AI_CHAT_VIDEO_RESOLUTION_ID_1080P", "18")).strip(),
+}
+_AI_CHAT_VIDEO_RATIO_ID_MAP = {
+    "9:16": str(os.getenv("AI_CHAT_VIDEO_RATIO_ID_9_16", "23")).strip(),
+    "16:9": str(os.getenv("AI_CHAT_VIDEO_RATIO_ID_16_9", "71")).strip(),
+    "4:3": str(os.getenv("AI_CHAT_VIDEO_RATIO_ID_4_3", "20")).strip(),
+    "1:1": str(os.getenv("AI_CHAT_VIDEO_RATIO_ID_1_1", "21")).strip(),
+    "3:4": str(os.getenv("AI_CHAT_VIDEO_RATIO_ID_3_4", "22")).strip(),
+    "21:9": str(os.getenv("AI_CHAT_VIDEO_RATIO_ID_21_9", "24")).strip(),
+    "adaptive": str(os.getenv("AI_CHAT_VIDEO_RATIO_ID_ADAPTIVE", "25")).strip(),
+}
+_AI_CHAT_VIDEO_DURATION_ID_MAP = {
+    "3": str(os.getenv("AI_CHAT_VIDEO_DURATION_ID_3S", "26")).strip(),
+    "5": str(os.getenv("AI_CHAT_VIDEO_DURATION_ID_5S", "27")).strip(),
+}
+
+
+class AIChatCurlProxyRequest(BaseModel):
+    endpoint: Optional[str] = None
+    authorization: str = ""
+    history_ai_chat_record_id: Optional[str] = ""
+    module_enum: str = "1"
+    part_enum: str = "2"
+    message: str = ""
+    ai_chat_session_id: str = ""
+    ai_chat_model_id: str = ""
+    ai_image_param_task_type_id: Optional[str] = ""
+    ai_image_param_size_id: Optional[str] = ""
+    ai_image_param_ratio_id: Optional[str] = ""
+    ai_video_param_ratio_id: Optional[str] = ""
+    ai_video_param_resolution_id: Optional[str] = ""
+    ai_video_param_duration_id: Optional[str] = ""
+    tusd_file_remote_ids: Optional[List[str]] = Field(default_factory=list)
+    images: Optional[List[str]] = Field(default_factory=list)
+    timeout_seconds: Optional[int] = 120
+
+
+def _normalize_ai_chat_token(value: Optional[str]) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.lower().startswith("bearer "):
+        return text[7:].strip()
+    return text
+
+
+def _resolve_member_authorization(request: Request) -> str:
+    for header_name in ["X-AI-Chat-Authorization", "X-Member-Authorization", "Authorization"]:
+        token = _normalize_ai_chat_token(request.headers.get(header_name))
+        if token:
+            return token
+    return _normalize_ai_chat_token(_MEMBER_API_AUTHORIZATION)
+
+
+@contextmanager
+def _temporary_proxy_env(http_proxy: Optional[str] = None, https_proxy: Optional[str] = None):
+    keys = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")
+    old_env = {key: os.environ.get(key) for key in keys}
+    try:
+        if http_proxy:
+            os.environ["http_proxy"] = http_proxy
+            os.environ["HTTP_PROXY"] = http_proxy
+        if https_proxy:
+            os.environ["https_proxy"] = https_proxy
+            os.environ["HTTPS_PROXY"] = https_proxy
+        yield
+    finally:
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _map_param_id(id_map: Dict[str, str], raw_value: Any) -> str:
+    value = str(raw_value or "").strip().lower()
+    if not value:
+        return ""
+    for key, mapped in id_map.items():
+        if value == str(key).strip().lower() and str(mapped or "").strip():
+            return str(mapped).strip()
+    return ""
+
+
+def _build_ai_chat_curl_command(req_id: str, req: AIChatCurlProxyRequest) -> tuple[List[str], Dict[str, str], List[str], str, int]:
+    endpoint = str(req.endpoint or "").strip() or f"{_MEMBER_API_BASE}/ai/aiChat"
+    authorization = str(req.authorization or "").strip()
+    timeout_seconds = max(10, min(int(req.timeout_seconds or 120), 300))
+    if not authorization:
+        raise HTTPException(status_code=400, detail="authorization 不能为空")
+
+    form_pairs = [
+        ("history_ai_chat_record_id", req.history_ai_chat_record_id),
+        ("module_enum", req.module_enum),
+        ("part_enum", req.part_enum),
+        ("message", req.message),
+        ("ai_chat_session_id", req.ai_chat_session_id),
+        ("ai_chat_model_id", req.ai_chat_model_id),
+        ("ai_image_param_task_type_id", req.ai_image_param_task_type_id),
+        ("ai_image_param_size_id", req.ai_image_param_size_id),
+        ("ai_image_param_ratio_id", req.ai_image_param_ratio_id),
+        ("ai_video_param_ratio_id", req.ai_video_param_ratio_id),
+        ("ai_video_param_resolution_id", req.ai_video_param_resolution_id),
+        ("ai_video_param_duration_id", req.ai_video_param_duration_id),
+    ]
+
+    cmd: List[str] = [
+        "curl",
+        "-sS",
+        "-N",
+        "--location",
+        endpoint,
+        "--max-time",
+        str(timeout_seconds),
+        "--header",
+        f"authorization: {authorization}",
+    ]
+    request_form: Dict[str, str] = {}
+    for key, value in form_pairs:
+        quoted = _to_quoted_form_value(value)
+        if not quoted:
+            continue
+        request_form[key] = quoted
+        cmd.extend(["--form", f"{key}={quoted}"])
+    for item in req.tusd_file_remote_ids or []:
+        quoted = _to_quoted_form_value(item)
+        if not quoted:
+            continue
+        cmd.extend(["--form", f"tusd_file_remote_ids[]={quoted}"])
+
+    temp_files: List[str] = []
+    for idx, image_value in enumerate(req.images or []):
+        if not str(image_value or "").strip():
+            continue
+        temp_path = _materialize_image_to_temp_file(image_value, req_id, idx)
+        temp_files.append(temp_path)
+        cmd.extend(["--form", f"files=@{temp_path}"])
+    return cmd, request_form, temp_files, endpoint, timeout_seconds
+
+
+def _to_quoted_form_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+        return text
+    return f'"{text}"'
+
+
+def _pick_first_image_url(payload: Any) -> str:
+    if payload is None:
+        return ""
+    if isinstance(payload, str):
+        text = payload.strip()
+        if not text:
+            return ""
+        matched = re.search(r"https?://[^\s\"'<>]+", text, re.IGNORECASE)
+        return matched.group(0) if matched else ""
+    if isinstance(payload, list):
+        for item in payload:
+            found = _pick_first_image_url(item)
+            if found:
+                return found
+        return ""
+    if isinstance(payload, dict):
+        for key in ["url", "image", "image_url", "imageUrl", "output_url", "outputUrl", "result_url", "resultUrl"]:
+            found = _pick_first_image_url(payload.get(key))
+            if found:
+                return found
+        for value in payload.values():
+            found = _pick_first_image_url(value)
+            if found:
+                return found
+    return ""
+
+
+def _extract_done_error(events: List[Dict[str, Any]]) -> str:
+    for item in reversed(events):
+        data = item.get("data", item)
+        if isinstance(data, dict):
+            for key in ["errMsg", "error", "message", "detail"]:
+                msg = str(data.get(key) or "").strip()
+                if msg:
+                    return msg
+    return ""
+
+
+def _extract_image_url_from_events(events: List[Dict[str, Any]]) -> str:
+    for item in reversed(events):
+        payload = item.get("data", item)
+        if isinstance(payload, dict):
+            content = payload.get("content")
+            if isinstance(content, list):
+                for content_item in content:
+                    if not isinstance(content_item, dict):
+                        continue
+                    direct_url = str(content_item.get("url") or content_item.get("image_url") or content_item.get("imageUrl") or "").strip()
+                    if direct_url:
+                        return direct_url
+    return ""
+
+
+def _extract_session_meta_from_events(events: List[Dict[str, Any]]) -> Dict[str, str]:
+    for item in events:
+        payload = item.get("data", item)
+        if not isinstance(payload, dict):
+            continue
+        session_id = str(
+            payload.get("ai_chat_session_id")
+            or payload.get("aiChatSessionId")
+            or payload.get("session_id")
+            or payload.get("sessionId")
+            or ""
+        ).strip()
+        history_id = str(
+            payload.get("history_ai_chat_record_id")
+            or payload.get("historyAiChatRecordId")
+            or payload.get("ai_chat_record_id")
+            or payload.get("record_id")
+            or payload.get("recordId")
+            or ""
+        ).strip()
+        if session_id or history_id:
+            return {
+                "source_session_id": session_id,
+                "source_history_record_id": history_id,
+            }
+    return {
+        "source_session_id": "",
+        "source_history_record_id": "",
+    }
+
+
+def _parse_sse_output(raw_text: str) -> Dict[str, Any]:
+    events: List[Dict[str, Any]] = []
+    pending_event = ""
+    content_parts: List[str] = []
+    saw_sse = False
+
+    for line in str(raw_text or "").splitlines():
+        trimmed = str(line or "").strip()
+        if not trimmed:
+            continue
+        if trimmed.startswith("event:"):
+            pending_event = trimmed[6:].strip()
+            saw_sse = True
+            continue
+        if trimmed.startswith("id:"):
+            saw_sse = True
+            continue
+        if trimmed.startswith("data:"):
+            saw_sse = True
+            payload_text = trimmed[5:].strip()
+            if not payload_text or payload_text == "[DONE]":
+                continue
+            event_payload: Any = payload_text
+            try:
+                event_payload = json.loads(payload_text)
+            except Exception:
+                event_payload = payload_text
+            events.append({"event": pending_event or "message", "data": event_payload})
+            if isinstance(event_payload, str):
+                content_parts.append(event_payload)
+            elif isinstance(event_payload, dict):
+                delta = event_payload.get("delta")
+                if isinstance(delta, str) and delta:
+                    content_parts.append(delta)
+                elif isinstance(event_payload.get("content"), str):
+                    content_parts.append(event_payload["content"])
+                elif isinstance(event_payload.get("message"), str):
+                    content_parts.append(event_payload["message"])
+            continue
+        if not saw_sse:
+            content_parts.append(trimmed)
+
+    text = "".join(content_parts)
+    done_error = _extract_done_error(events)
+    image_url = (
+        _extract_image_url_from_events(events)
+        or _pick_first_image_url(events)
+        or _pick_first_image_url(text)
+    )
+    meta = _extract_session_meta_from_events(events)
+    return {
+        "mode": "stream" if saw_sse else "text",
+        "text": text,
+        "events": events,
+        "done_error": done_error,
+        "image_url": image_url,
+        **meta,
+    }
+
+
+def _guess_suffix_from_mime(mime_type: str) -> str:
+    text = str(mime_type or "").strip().lower()
+    if not text:
+        return ".bin"
+    ext = mimetypes.guess_extension(text)
+    if ext:
+        return ext
+    if "jpeg" in text or "jpg" in text:
+        return ".jpg"
+    if "png" in text:
+        return ".png"
+    if "webp" in text:
+        return ".webp"
+    return ".bin"
+
+
+def _materialize_image_to_temp_file(image_value: str, req_id: str, index: int) -> str:
+    text = str(image_value or "").strip()
+    if not text:
+        raise ValueError(f"image[{index}] 为空")
+    if text.startswith("data:"):
+        mime_type, image_bytes = parse_data_url(text)
+    else:
+        with urllib.request.urlopen(text, timeout=20) as resp:
+            image_bytes = resp.read()
+            mime_type = resp.headers.get("Content-Type", "")
+    if not image_bytes:
+        raise ValueError(f"image[{index}] 内容为空")
+    suffix = _guess_suffix_from_mime(mime_type)
+    fd, path = tempfile.mkstemp(prefix=f"ai_chat_{req_id}_{index}_", suffix=suffix)
+    with os.fdopen(fd, "wb") as f:
+        f.write(image_bytes)
+    return path
 
 
 def _parse_preference_command(text: str) -> Optional[Dict[str, str]]:
@@ -181,10 +572,10 @@ def _parse_preference_command(text: str) -> Optional[Dict[str, str]]:
 def _resolve_agent_session(
     request: Request,
     response: Response,
-    current_user: Dict[str, Any],
+    current_user: Optional[Dict[str, Any]],
     requested_session_id: Optional[str] = None,
 ) -> tuple[str, str, str, bool]:
-    tenant_id, user_id = _tenant_user_from_request(request, current_user)
+    tenant_id, user_id = _resolve_agent_actor(request, current_user)
     session = create_or_get_session(tenant_id=tenant_id, user_id=user_id, session_id=requested_session_id)
     session_id = str(session.get("session_id") or "")
     summary_present = bool(str(session.get("summary_text") or "").strip())
@@ -490,11 +881,48 @@ def text_to_image(req: Text2ImgRequest, request: Request, current_user=Depends(g
 
 
 @router.post("/api/multi_image_generate", response_model=MultiImageResponse)
-def multi_image_generate(req: MultiImageRequest, request: Request, current_user=Depends(get_current_user)):
+def multi_image_generate(req: MultiImageRequest, request: Request, current_user=Depends(_get_current_user_optional)):
     req_id = request.state.req_id
     t0 = time.time()
 
     try:
+        # Prefer aiChat(new) for swap-like image editing, fallback to existing Gemini flow.
+        member_authorization = _resolve_member_authorization(request)
+        if member_authorization and _AI_CHAT_MODEL_ID_NANO_BANANA_PRO:
+            try:
+                proxy_req = AIChatCurlProxyRequest(
+                    authorization=member_authorization,
+                    module_enum="1",
+                    part_enum="2",
+                    message=req.prompt or "",
+                    ai_chat_session_id="0",
+                    ai_chat_model_id=_AI_CHAT_MODEL_ID_NANO_BANANA_PRO,
+                    ai_image_param_size_id=_map_param_id(_AI_CHAT_IMAGE_SIZE_ID_MAP, req.size),
+                    ai_image_param_ratio_id=_map_param_id(_AI_CHAT_IMAGE_RATIO_ID_MAP, req.aspect_ratio),
+                    images=list(req.images or []),
+                    timeout_seconds=120,
+                )
+                proxy_data = _call_ai_chat_image_via_curl(req_id=req_id, req=proxy_req)
+                done_error = str(proxy_data.get("done_error") or "").strip()
+                image_url = str(proxy_data.get("image_url") or "").strip()
+                if image_url and not done_error:
+                    prompt_logger.log(
+                        req_id,
+                        "multi_image_generate",
+                        req.model_dump(),
+                        req.prompt,
+                        {"model": "ai_chat_nano_banana_pro", "temperature": req.temperature, "ar": req.aspect_ratio},
+                        {"file": "mem"},
+                        time.time() - t0,
+                        user_id=_user_id_for_log(current_user),
+                        inputs_full=req.model_dump(),
+                        output_full={"images": [image_url]},
+                    )
+                    return MultiImageResponse(image=image_url)
+                raise RuntimeError(done_error or "aiChat 未返回图片URL")
+            except Exception as ai_chat_err:
+                sys_logger.warning(f"[{req_id}] multi_image_generate aiChat fallback: {ai_chat_err}")
+
         contents = [types.Part(text=req.prompt)]
         for img_str in req.images:
             m, b = parse_data_url(img_str)
@@ -532,11 +960,11 @@ def multi_image_generate(req: MultiImageRequest, request: Request, current_user=
             {"temperature": req.temperature, "ar": req.aspect_ratio},
             {"file": "mem"},
             time.time() - t0,
-            user_id=current_user["id"],
+            user_id=_user_id_for_log(current_user),
             inputs_full=req.model_dump(),
             output_full={"images": [output_data_url]},
         )
-        record_usage(current_user["id"], MODEL_GEMINI)
+        _record_usage_if_authed(current_user, MODEL_GEMINI)
         return MultiImageResponse(image=output_data_url)
 
     except Exception as e:
@@ -549,15 +977,179 @@ def multi_image_generate(req: MultiImageRequest, request: Request, current_user=
             {"temperature": req.temperature, "ar": req.aspect_ratio},
             {"file": "mem"},
             time.time() - t0,
-            user_id=current_user["id"],
+            user_id=_user_id_for_log(current_user),
             inputs_full=req.model_dump(),
             error=str(e),
         )
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _call_ai_chat_image_via_curl(req_id: str, req: AIChatCurlProxyRequest) -> Dict[str, Any]:
+    cmd, request_form, temp_files, endpoint, timeout_seconds = _build_ai_chat_curl_command(req_id, req)
+    started_at = time.time()
+    process = None
+    stdout_text = ""
+    stderr_text = ""
+    try:
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+            assert process.stdout is not None
+            deadline = time.time() + timeout_seconds + 5
+            while True:
+                if time.time() > deadline:
+                    raise HTTPException(status_code=504, detail=f"curl 请求超时({timeout_seconds}s)")
+                chunk = process.stdout.readline()
+                if chunk:
+                    stdout_text += chunk
+                    parsed = _parse_sse_output(stdout_text)
+                    done_error = str(parsed.get("done_error") or "").strip()
+                    image_url = str(parsed.get("image_url") or "").strip()
+                    if image_url or done_error:
+                        break
+                elif process.poll() is not None:
+                    break
+        except HTTPException:
+            raise
+        except FileNotFoundError:
+            raise HTTPException(status_code=500, detail="服务器未安装 curl")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"curl 执行失败: {e}")
+    finally:
+        if process is not None:
+            try:
+                if process.poll() is None:
+                    process.kill()
+            except Exception:
+                pass
+            try:
+                if process.stderr is not None:
+                    stderr_text = str(process.stderr.read() or "")
+            except Exception:
+                pass
+        for path in temp_files:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+    elapsed_ms = int((time.time() - started_at) * 1000)
+    return_code = process.returncode if process is not None else 0
+    if return_code not in (0, None) and not stdout_text:
+        sys_logger.error(f"[{req_id}] ai_chat_image_via_curl error: code={return_code}, stderr={stderr_text[:500]}")
+        raise HTTPException(status_code=500, detail=f"curl 请求失败(code={return_code}): {stderr_text[:300]}")
+
+    parsed = _parse_sse_output(stdout_text)
+    done_error = str(parsed.get("done_error") or "").strip()
+    image_url = str(parsed.get("image_url") or "").strip()
+    ok = bool(image_url) and not done_error
+
+    return {
+        "ok": ok,
+        "endpoint": endpoint,
+        "duration_ms": elapsed_ms,
+        "request_form": request_form,
+        "request_files_count": len(temp_files),
+        "mode": parsed.get("mode", "text"),
+        "image_url": image_url,
+        "done_error": done_error,
+        "source_session_id": parsed.get("source_session_id", ""),
+        "source_history_record_id": parsed.get("source_history_record_id", ""),
+        "events": parsed.get("events", []),
+        "text": parsed.get("text", ""),
+        "stderr": stderr_text[-2000:],
+    }
+
+
+@router.post("/api/ai_chat_stream_via_curl")
+def ai_chat_stream_via_curl(req: AIChatCurlProxyRequest, request: Request):
+    req_id = getattr(request.state, "req_id", uuid.uuid4().hex[:8])
+    cmd, _, temp_files, _, timeout_seconds = _build_ai_chat_curl_command(req_id, req)
+
+    def _cleanup() -> None:
+        for path in temp_files:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+    def _stream():
+        process = None
+        current_event = ""
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+            assert process.stdout is not None
+            deadline = time.time() + timeout_seconds + 5
+            while True:
+                if time.time() > deadline:
+                    raise TimeoutError(f"curl 请求超时({timeout_seconds}s)")
+                chunk = process.stdout.readline()
+                if not chunk:
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                    continue
+                stripped = chunk.strip()
+                if stripped.startswith("event:"):
+                    current_event = stripped[6:].strip().lower()
+                yield chunk.encode("utf-8")
+                if stripped.startswith("data:"):
+                    payload_text = stripped[5:].strip()
+                    if payload_text and payload_text != "[DONE]":
+                        try:
+                            payload_obj = json.loads(payload_text)
+                        except Exception:
+                            payload_obj = None
+                        if current_event == "done" and isinstance(payload_obj, dict) and bool(payload_obj.get("finish")):
+                            break
+            return_code = process.wait(timeout=timeout_seconds + 5)
+            stderr_text = ""
+            if process.stderr is not None:
+                stderr_text = str(process.stderr.read() or "")[:500]
+            if return_code != 0:
+                sys_logger.error(f"[{req_id}] ai_chat_stream_via_curl error: code={return_code}, stderr={stderr_text}")
+                yield f'event: error\ndata: {json.dumps({"message": f"curl 请求失败(code={return_code}): {stderr_text}"}, ensure_ascii=False)}\n\n'.encode("utf-8")
+        except Exception as e:
+            sys_logger.error(f"[{req_id}] ai_chat_stream_via_curl exception: {e}")
+            yield f'event: error\ndata: {json.dumps({"message": str(e)}, ensure_ascii=False)}\n\n'.encode("utf-8")
+        finally:
+            if process is not None and process.poll() is None:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+            _cleanup()
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/api/ai_chat_image_via_curl", response_model=Dict[str, Any])
+def ai_chat_image_via_curl(req: AIChatCurlProxyRequest, request: Request):
+    req_id = getattr(request.state, "req_id", uuid.uuid4().hex[:8])
+    return _call_ai_chat_image_via_curl(req_id=req_id, req=req)
+
+
 @router.post("/api/local/text2img", response_model=Text2ImgResponse)
-def local_text_to_image(req: Text2ImgRequest, request: Request, current_user=Depends(get_current_user)):
+def local_text_to_image(req: Text2ImgRequest, request: Request, current_user=Depends(_get_current_user_optional)):
     req_id = request.state.req_id
     t0 = time.time()
     try:
@@ -583,11 +1175,11 @@ def local_text_to_image(req: Text2ImgRequest, request: Request, current_user=Dep
             {"model": MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO, "width": width, "height": height},
             {"file": "mem"},
             time.time() - t0,
-            user_id=current_user["id"],
+            user_id=_user_id_for_log(current_user),
             inputs_full=req.model_dump(),
             output_full={"images": [output_data_url]},
         )
-        record_usage(current_user["id"], MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO)
+        _record_usage_if_authed(current_user, MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO)
         return Text2ImgResponse(images=[output_data_url])
     except Exception as e:
         sys_logger.error(f"[{req_id}] Local Text2Img Error: {e}")
@@ -599,7 +1191,7 @@ def local_text_to_image(req: Text2ImgRequest, request: Request, current_user=Dep
             {"model": MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO},
             {"file": "mem"},
             time.time() - t0,
-            user_id=current_user["id"],
+            user_id=_user_id_for_log(current_user),
             inputs_full=req.model_dump(),
             error=str(e),
         )
@@ -607,7 +1199,7 @@ def local_text_to_image(req: Text2ImgRequest, request: Request, current_user=Dep
 
 
 @router.post("/api/local/img2video", response_model=Img2VideoResponse)
-def local_img_to_video(req: Img2VideoRequest, request: Request, current_user=Depends(get_current_user)):
+def local_img_to_video(req: Img2VideoRequest, request: Request, current_user=Depends(_get_current_user_optional)):
     req_id = request.state.req_id
     t0 = time.time()
     try:
@@ -646,11 +1238,11 @@ def local_img_to_video(req: Img2VideoRequest, request: Request, current_user=Dep
             },
             {"file": "mem"},
             time.time() - t0,
-            user_id=current_user["id"],
+            user_id=_user_id_for_log(current_user),
             inputs_full=req.model_dump(),
             output_full={"videos": [output_data_url]},
         )
-        record_usage(current_user["id"], MODEL_COMFYUI_QWEN_I2V)
+        _record_usage_if_authed(current_user, MODEL_COMFYUI_QWEN_I2V)
         return Img2VideoResponse(image=output_data_url)
     except Exception as e:
         sys_logger.error(f"[{req_id}] Local Img2Video Error: {e}")
@@ -662,7 +1254,7 @@ def local_img_to_video(req: Img2VideoRequest, request: Request, current_user=Dep
             {"model": MODEL_COMFYUI_QWEN_I2V},
             {"file": "mem"},
             time.time() - t0,
-            user_id=current_user["id"],
+            user_id=_user_id_for_log(current_user),
             inputs_full=req.model_dump(),
             error=str(e),
         )
@@ -670,7 +1262,7 @@ def local_img_to_video(req: Img2VideoRequest, request: Request, current_user=Dep
 
 
 @router.post("/api/overlaytext", response_model=OverlayTextResponse)
-def overlay_text(req: OverlayTextRequest, request: Request, current_user=Depends(get_current_user)):
+def overlay_text(req: OverlayTextRequest, request: Request, current_user=Depends(_get_current_user_optional)):
     req_id = request.state.req_id
     t0 = time.time()
 
@@ -741,11 +1333,11 @@ def overlay_text(req: OverlayTextRequest, request: Request, current_user=Depends
             },
             {"file": "mem"},
             time.time() - t0,
-            user_id=current_user["id"],
+            user_id=_user_id_for_log(current_user),
             inputs_full=req.model_dump(),
             output_full={"images": [output_data_url]},
         )
-        record_usage(current_user["id"], MODEL_COMFYUI_OVERLAYTEXT)
+        _record_usage_if_authed(current_user, MODEL_COMFYUI_OVERLAYTEXT)
         return OverlayTextResponse(image=output_data_url)
 
     except Exception as e:
@@ -758,7 +1350,7 @@ def overlay_text(req: OverlayTextRequest, request: Request, current_user=Depends
             {"model": MODEL_COMFYUI_OVERLAYTEXT},
             {"file": "mem"},
             time.time() - t0,
-            user_id=current_user["id"],
+            user_id=_user_id_for_log(current_user),
             inputs_full=req.model_dump(),
             error=str(e),
         )
@@ -766,7 +1358,7 @@ def overlay_text(req: OverlayTextRequest, request: Request, current_user=Depends
 
 
 @router.post("/api/rmbg", response_model=RmbgResponse)
-def remove_background(req: RmbgRequest, request: Request, current_user=Depends(get_current_user)):
+def remove_background(req: RmbgRequest, request: Request, current_user=Depends(_get_current_user_optional)):
     req_id = request.state.req_id
     t0 = time.time()
 
@@ -790,11 +1382,11 @@ def remove_background(req: RmbgRequest, request: Request, current_user=Depends(g
             {"model": MODEL_COMFYUI_RMBG, "size": req.size, "ar": req.aspect_ratio},
             {"file": "mem"},
             time.time() - t0,
-            user_id=current_user["id"],
+            user_id=_user_id_for_log(current_user),
             inputs_full=req.model_dump(),
             output_full={"images": [output_data_url]},
         )
-        record_usage(current_user["id"], MODEL_COMFYUI_RMBG)
+        _record_usage_if_authed(current_user, MODEL_COMFYUI_RMBG)
         return RmbgResponse(image=output_data_url)
 
     except Exception as e:
@@ -807,7 +1399,7 @@ def remove_background(req: RmbgRequest, request: Request, current_user=Depends(g
             {"model": MODEL_COMFYUI_RMBG},
             {"file": "mem"},
             time.time() - t0,
-            user_id=current_user["id"],
+            user_id=_user_id_for_log(current_user),
             inputs_full=req.model_dump(),
             error=str(e),
         )
@@ -815,7 +1407,7 @@ def remove_background(req: RmbgRequest, request: Request, current_user=Depends(g
 
 
 @router.post("/api/multi_angleshots", response_model=MultiAngleShotsResponse)
-def multi_angleshots(req: MultiAngleShotsRequest, request: Request, current_user=Depends(get_current_user)):
+def multi_angleshots(req: MultiAngleShotsRequest, request: Request, current_user=Depends(_get_current_user_optional)):
     req_id = request.state.req_id
     t0 = time.time()
 
@@ -840,11 +1432,11 @@ def multi_angleshots(req: MultiAngleShotsRequest, request: Request, current_user
             {"model": MODEL_COMFYUI_MULTI_ANGLESHOTS},
             {"file": "mem"},
             time.time() - t0,
-            user_id=current_user["id"],
+            user_id=_user_id_for_log(current_user),
             inputs_full=req.model_dump(),
             output_full={"images": output_images},
         )
-        record_usage(current_user["id"], MODEL_COMFYUI_MULTI_ANGLESHOTS)
+        _record_usage_if_authed(current_user, MODEL_COMFYUI_MULTI_ANGLESHOTS)
         return MultiAngleShotsResponse(images=output_images)
 
     except Exception as e:
@@ -857,7 +1449,7 @@ def multi_angleshots(req: MultiAngleShotsRequest, request: Request, current_user
             {"model": MODEL_COMFYUI_MULTI_ANGLESHOTS},
             {"file": "mem"},
             time.time() - t0,
-            user_id=current_user["id"],
+            user_id=_user_id_for_log(current_user),
             inputs_full=req.model_dump(),
             error=str(e),
         )
@@ -865,7 +1457,7 @@ def multi_angleshots(req: MultiAngleShotsRequest, request: Request, current_user
 
 
 @router.post("/api/controlnet_pose_video", response_model=ControlnetPoseVideoResponse)
-def controlnet_pose_video(req: ControlnetPoseVideoRequest, request: Request, current_user=Depends(get_current_user)):
+def controlnet_pose_video(req: ControlnetPoseVideoRequest, request: Request, current_user=Depends(_get_current_user_optional)):
     req_id = request.state.req_id
     t0 = time.time()
 
@@ -895,11 +1487,11 @@ def controlnet_pose_video(req: ControlnetPoseVideoRequest, request: Request, cur
             {"model": MODEL_COMFYUI_CONTROLNET, "width": req.width, "height": req.height, "length": req.length, "fps": req.fps},
             {"file": "mem"},
             time.time() - t0,
-            user_id=current_user["id"],
+            user_id=_user_id_for_log(current_user),
             inputs_full=req.model_dump(),
             output_full={"videos": [output_data_url]},
         )
-        record_usage(current_user["id"], MODEL_COMFYUI_CONTROLNET)
+        _record_usage_if_authed(current_user, MODEL_COMFYUI_CONTROLNET)
         return ControlnetPoseVideoResponse(video=output_data_url)
     except Exception as e:
         sys_logger.error(f"[{req_id}] ControlnetPoseVideo Error: {e}")
@@ -911,14 +1503,14 @@ def controlnet_pose_video(req: ControlnetPoseVideoRequest, request: Request, cur
             {"model": MODEL_COMFYUI_CONTROLNET},
             {"file": "mem"},
             time.time() - t0,
-            user_id=current_user["id"],
+            user_id=_user_id_for_log(current_user),
             inputs_full=req.model_dump(),
             error=str(e),
         )
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _run_video_upscale_task(task_id: str, req_id: str, user_id: str, payload: Dict[str, Any]) -> None:
+def _run_video_upscale_task(task_id: str, req_id: str, user_id: Optional[str], payload: Dict[str, Any]) -> None:
     t0 = time.time()
     segment_seconds = max(1, int(payload.get("segment_seconds") or 3))
     output_resolution = _normalize_video_upscale_resolution(payload.get("output_resolution"))
@@ -973,11 +1565,12 @@ def _run_video_upscale_task(task_id: str, req_id: str, user_id: str, payload: Di
             },
             {"file": "mem"},
             time.time() - t0,
-            user_id=user_id,
+            user_id=(str(user_id).strip() or "anonymous"),
             inputs_full=payload,
             output_full={"videos": [output_data_url]},
         )
-        record_usage(user_id, MODEL_COMFYUI_VIDEO_UPSCALE)
+        if str(user_id or "").strip():
+            record_usage(str(user_id), MODEL_COMFYUI_VIDEO_UPSCALE)
     except Exception as e:
         _set_video_upscale_task(
             task_id,
@@ -999,14 +1592,14 @@ def _run_video_upscale_task(task_id: str, req_id: str, user_id: str, payload: Di
             },
             {"file": "mem"},
             time.time() - t0,
-            user_id=user_id,
+            user_id=(str(user_id).strip() or "anonymous"),
             inputs_full=payload,
             error=str(e),
         )
 
 
 @router.post("/api/video_upscale/start", response_model=VideoUpscaleTaskStartResponse)
-def video_upscale_start(req: VideoUpscaleRequest, request: Request, current_user=Depends(get_current_user)):
+def video_upscale_start(req: VideoUpscaleRequest, request: Request, current_user=Depends(_get_current_user_optional)):
     req_id = request.state.req_id
     payload = req.model_dump()
     task_id = uuid.uuid4().hex
@@ -1016,9 +1609,10 @@ def video_upscale_start(req: VideoUpscaleRequest, request: Request, current_user
     payload["output_resolution"] = output_resolution
     payload["workflow_batch_size"] = workflow_batch_size
 
+    user_id = str((current_user or {}).get("id") or "").strip()
     _set_video_upscale_task(
         task_id,
-        user_id=current_user["id"],
+        user_id=user_id,
         status="queued",
         completed_chunks=0,
         total_chunks=0,
@@ -1032,7 +1626,7 @@ def video_upscale_start(req: VideoUpscaleRequest, request: Request, current_user
 
     worker = threading.Thread(
         target=_run_video_upscale_task,
-        args=(task_id, req_id, current_user["id"], payload),
+        args=(task_id, req_id, user_id, payload),
         daemon=True,
     )
     worker.start()
@@ -1040,11 +1634,9 @@ def video_upscale_start(req: VideoUpscaleRequest, request: Request, current_user
 
 
 @router.get("/api/video_upscale/status/{task_id}", response_model=VideoUpscaleTaskStatusResponse)
-def video_upscale_status(task_id: str, current_user=Depends(get_current_user)):
+def video_upscale_status(task_id: str):
     task = _get_video_upscale_task(task_id)
     if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    if str(task.get("user_id")) != str(current_user["id"]):
         raise HTTPException(status_code=404, detail="Task not found")
 
     return VideoUpscaleTaskStatusResponse(
@@ -1059,7 +1651,7 @@ def video_upscale_status(task_id: str, current_user=Depends(get_current_user)):
 
 
 @router.post("/api/video_upscale", response_model=VideoUpscaleResponse)
-def video_upscale(req: VideoUpscaleRequest, request: Request, current_user=Depends(get_current_user)):
+def video_upscale(req: VideoUpscaleRequest, request: Request, current_user=Depends(_get_current_user_optional)):
     req_id = request.state.req_id
     t0 = time.time()
     segment_seconds = max(1, int(req.segment_seconds or 3))
@@ -1091,11 +1683,11 @@ def video_upscale(req: VideoUpscaleRequest, request: Request, current_user=Depen
             },
             {"file": "mem"},
             time.time() - t0,
-            user_id=current_user["id"],
+            user_id=_user_id_for_log(current_user),
             inputs_full=req.model_dump(),
             output_full={"videos": [output_data_url]},
         )
-        record_usage(current_user["id"], MODEL_COMFYUI_VIDEO_UPSCALE)
+        _record_usage_if_authed(current_user, MODEL_COMFYUI_VIDEO_UPSCALE)
         return VideoUpscaleResponse(video=output_data_url)
 
     except Exception as e:
@@ -1113,7 +1705,7 @@ def video_upscale(req: VideoUpscaleRequest, request: Request, current_user=Depen
             },
             {"file": "mem"},
             time.time() - t0,
-            user_id=current_user["id"],
+            user_id=_user_id_for_log(current_user),
             inputs_full=req.model_dump(),
             error=str(e),
         )
@@ -1127,11 +1719,53 @@ def edit_image(req: EditRequest, request: Request, current_user=Depends(get_curr
 
     final_ref_image = req.ref_image or req.background_image
     has_ref = bool(final_ref_image)
-    selected_model = req.model or MODEL_GEMINI
+    selected_model = req.model or "ai_chat_nano_banana_pro"
+    fallback_model = req.model if req.model in {MODEL_DOUBAO, MODEL_GEMINI} else MODEL_GEMINI
     final_prompt = build_business_prompt(req.mode, req.prompt, has_ref)
     
 
     try:
+        member_authorization = _resolve_member_authorization(request)
+        if member_authorization and _AI_CHAT_MODEL_ID_NANO_BANANA_PRO:
+            try:
+                images = [req.image]
+                if has_ref and final_ref_image:
+                    images.append(final_ref_image)
+                proxy_req = AIChatCurlProxyRequest(
+                    authorization=member_authorization,
+                    module_enum="1",
+                    part_enum="2",
+                    message=final_prompt,
+                    ai_chat_session_id="0",
+                    ai_chat_model_id=_AI_CHAT_MODEL_ID_NANO_BANANA_PRO,
+                    ai_image_param_size_id=_map_param_id(_AI_CHAT_IMAGE_SIZE_ID_MAP, req.size),
+                    ai_image_param_ratio_id=_map_param_id(_AI_CHAT_IMAGE_RATIO_ID_MAP, req.aspect_ratio),
+                    images=images,
+                    timeout_seconds=120,
+                )
+                proxy_data = _call_ai_chat_image_via_curl(req_id=req_id, req=proxy_req)
+                done_error = str(proxy_data.get("done_error") or "").strip()
+                image_url = str(proxy_data.get("image_url") or "").strip()
+                if image_url and not done_error:
+                    prompt_logger.log(
+                        req_id,
+                        req.mode,
+                        req.model_dump(),
+                        final_prompt,
+                        {"model": "ai_chat_nano_banana_pro", "has_ref": has_ref},
+                        {"file": "mem"},
+                        time.time() - t0,
+                        user_id=current_user["id"],
+                        inputs_full=req.model_dump(),
+                        output_full={"images": [image_url]},
+                    )
+                    record_usage(current_user["id"], "ai_chat_nano_banana_pro")
+                    return EditResponse(image=image_url)
+                raise RuntimeError(done_error or "aiChat 未返回图片URL")
+            except Exception as ai_chat_err:
+                sys_logger.warning(f"[{req_id}] edit aiChat fallback: {ai_chat_err}")
+
+        selected_model = fallback_model
         img_bytes = None
 
         if selected_model == MODEL_DOUBAO:
@@ -1201,14 +1835,53 @@ def img_to_video(req: Img2VideoRequest, request: Request, current_user=Depends(g
     t0 = time.time()
     try:
         selected_model = req.model or "Doubao-Seedance-1.0-pro"
-        print("--------选择的模型-------：", selected_model)
         if selected_model not in ALLOWED_VIDEO_MODELS:
-            raise HTTPException(status_code=400, detail=f"Unsupported video model: {selected_model}")
-        
-        print("--------提示词-------：", req.prompt)
+            selected_model = "Doubao-Seedance-1.0-pro"
+
+        member_authorization = _resolve_member_authorization(request)
+        if member_authorization and _AI_CHAT_MODEL_ID_SEEDANCE_1_0:
+            try:
+                image_inputs = [req.image]
+                if str(req.last_frame_image or "").strip():
+                    image_inputs.append(str(req.last_frame_image))
+                proxy_req = AIChatCurlProxyRequest(
+                    authorization=member_authorization,
+                    module_enum="1",
+                    part_enum="2",
+                    message=req.prompt or "",
+                    ai_chat_session_id="0",
+                    ai_chat_model_id=_AI_CHAT_MODEL_ID_SEEDANCE_1_0,
+                    ai_video_param_resolution_id=_map_param_id(_AI_CHAT_VIDEO_RESOLUTION_ID_MAP, req.resolution),
+                    ai_video_param_ratio_id=_map_param_id(_AI_CHAT_VIDEO_RATIO_ID_MAP, req.ratio),
+                    ai_video_param_duration_id=_map_param_id(_AI_CHAT_VIDEO_DURATION_ID_MAP, req.duration),
+                    images=image_inputs,
+                    timeout_seconds=180,
+                )
+                proxy_data = _call_ai_chat_image_via_curl(req_id=req_id, req=proxy_req)
+                done_error = str(proxy_data.get("done_error") or "").strip()
+                result_url = str(proxy_data.get("image_url") or "").strip()
+                if result_url and not done_error:
+                    prompt_logger.log(
+                        req_id,
+                        "img2video",
+                        req.model_dump(),
+                        req.prompt or "",
+                        {"model": "ai_chat_seedance_1_0", "duration": req.duration, "ratio": req.ratio},
+                        {"file": "mem"},
+                        time.time() - t0,
+                        user_id=current_user["id"],
+                        inputs_full=req.model_dump(),
+                        output_full={"videos": [result_url]},
+                    )
+                    record_usage(current_user["id"], "ai_chat_seedance_1_0")
+                    return Img2VideoResponse(image=result_url)
+                raise RuntimeError(done_error or "aiChat 未返回视频URL")
+            except Exception as ai_chat_err:
+                sys_logger.warning(f"[{req_id}] img2video aiChat fallback: {ai_chat_err}")
+
         result = generate_video_from_image(
             req_id=req_id,
-            model=req.model,   # ✅ 新增
+            model=selected_model,
             image_data_url=req.image,
             last_frame_data_url=req.last_frame_image,
             prompt=req.prompt or "",
@@ -1287,12 +1960,11 @@ def agent_idea_script_generate_video(
     req: AgentVideoGenerationRequest,
     request: Request,
     response: Response,
-    current_user=Depends(get_current_user),
+    current_user=Depends(_get_current_user_optional),
 ) -> AgentVideoGenerationResponse:
     req_id = getattr(request.state, "req_id", "noid")
     t0 = time.time()
-    tenant_id = str(request.headers.get("X-Tenant-Id") or current_user.get("email_domain") or "unknown")
-    user_id = str(current_user.get("id") or "")
+    tenant_id, user_id = _resolve_agent_actor(request, current_user)
     active_session_id = ""
     session_summary_present = False
     enable_video_generation = _as_bool(os.getenv("BANANAFLOW_ENABLE_VIDEO_GENERATION"), default=False)
@@ -1454,11 +2126,12 @@ def agent_idea_script_generate_video(
             },
             payload.model_dump(mode="json"),
             time.time() - t0,
-            user_id=current_user.get("id"),
+            user_id=user_id,
             inputs_full=req.model_dump(mode="json"),
             output_full=payload.model_dump(mode="json"),
         )
-        record_usage(current_user.get("id"), idea_script_orchestrator.default_llm_model)
+        if str(user_id or "").strip() and not str(user_id).startswith("guest:"):
+            record_usage(user_id, idea_script_orchestrator.default_llm_model)
         return payload
     except SessionAccessDeniedError:
         raise HTTPException(status_code=403, detail="Session access denied")
@@ -1485,17 +2158,52 @@ def agent_idea_script_generate_video(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/api/agent/chitchat", response_model=AgentChitchatResponse)
+def agent_chitchat(
+    req: AgentChitchatRequest,
+    request: Request,
+) -> AgentChitchatResponse:
+    req_id = getattr(request.state, "req_id", "noid")
+    message = str(req.message or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message 不能为空")
+
+    prompt = (
+        "你是 Banana Flow Studio 的中文创意助理。\n"
+        "请直接回答用户问题，保持简洁、自然、口语化。\n"
+        "如果用户在闲聊，也要正常回应，但不要编造能力。\n"
+        "如果用户表达了脚本、分镜、视频、导出等明确意图，可以顺带提示你也能继续帮助完成这些任务。\n"
+        f"用户消息：{message}"
+    )
+
+    try:
+        response = call_genai_retry_with_proxy(
+            contents=[types.Part(text=prompt)],
+            config=types.GenerateContentConfig(temperature=0.7),
+            req_id=f"agent_chitchat:{req_id}",
+            model=MODEL_AGENT_CHAT,
+            http_proxy=AGENT_CHAT_HTTP_PROXY,
+            https_proxy=AGENT_CHAT_HTTPS_PROXY,
+        )
+        text = str(getattr(response, "text", "") or "").strip()
+        if not text:
+            text = "我在。你可以继续告诉我你想聊什么，或者直接让我做脚本、分镜、导出。"
+        return AgentChitchatResponse(text=text, model=MODEL_AGENT_CHAT)
+    except Exception as e:
+        sys_logger.error(f"[{req_id}] /api/agent/chitchat error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/api/agent/idea_script", response_model=IdeaScriptResponse)
 def agent_idea_script(
     req: IdeaScriptRequest,
     request: Request,
     response: Response,
-    current_user=Depends(get_current_user),
+    current_user=Depends(_get_current_user_optional),
 ) -> IdeaScriptResponse:
     req_id = getattr(request.state, "req_id", "noid")
     t0 = time.time()
-    tenant_id = str(request.headers.get("X-Tenant-Id") or current_user.get("email_domain") or "unknown")
-    user_id = str(current_user.get("id") or "")
+    tenant_id, user_id = _resolve_agent_actor(request, current_user)
     agent_intent = (request.headers.get("X-Agent-Intent") or "").strip()
     agent_product = (request.headers.get("X-Agent-Product") or "").strip() or req.product
     requested_session_id = (request.headers.get("X-Agent-Session-Id") or "").strip() or None
@@ -1577,14 +2285,18 @@ def agent_idea_script(
         )
 
         trajectory_sink: list[Dict[str, Any]] = []
-        out = idea_script_orchestrator.run(
-            req,
-            session_id=active_session_id,
-            session_summary_present=session_summary_present,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            trajectory_sink=trajectory_sink,
-        )
+        with _temporary_proxy_env(
+            http_proxy=_IDEA_SCRIPT_HTTP_PROXY,
+            https_proxy=_IDEA_SCRIPT_HTTPS_PROXY,
+        ):
+            out = idea_script_orchestrator.run(
+                req,
+                session_id=active_session_id,
+                session_summary_present=session_summary_present,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                trajectory_sink=trajectory_sink,
+            )
         trajectory_payload = _emit_trajectory_event(
             session_id=active_session_id,
             tenant_id=tenant_id,
@@ -1735,11 +2447,12 @@ def agent_idea_script(
                 ),
             },
             time.time() - t0,
-            user_id=current_user.get("id"),
+            user_id=user_id,
             inputs_full=req.model_dump(),
             output_full=out.model_dump(),
         )
-        record_usage(current_user.get("id"), idea_script_orchestrator.default_llm_model)
+        if str(user_id or "").strip() and not str(user_id).startswith("guest:"):
+            record_usage(user_id, idea_script_orchestrator.default_llm_model)
         return out
 
     except SessionAccessDeniedError:
@@ -1773,7 +2486,7 @@ def agent_idea_script(
             {"pipeline": "idea_script_v1"},
             {"topics_count": 0},
             time.time() - t0,
-            user_id=current_user.get("id"),
+            user_id=user_id,
             inputs_full=req.model_dump(),
             error=str(e),
         )
@@ -1827,12 +2540,11 @@ def agent_idea_script_export_ffmpeg(
     req: IdeaScriptExportFfmpegRequest,
     request: Request,
     response: Response,
-    current_user=Depends(get_current_user),
+    current_user=Depends(_get_current_user_optional),
 ) -> Dict[str, Any]:
     req_id = getattr(request.state, "req_id", "noid")
     t0 = time.time()
-    tenant_id = str(request.headers.get("X-Tenant-Id") or current_user.get("email_domain") or "unknown")
-    user_id = str(current_user.get("id") or "")
+    tenant_id, user_id = _resolve_agent_actor(request, current_user)
     active_session_id = ""
     resolved_tool_version = EXPORT_FFMPEG_TOOL_VERSION
     resolved_tool_hash = EXPORT_FFMPEG_TOOL_HASH
@@ -2041,7 +2753,7 @@ def agent_idea_script_export_ffmpeg(
             {"pipeline": "idea_script_export_ffmpeg"},
             payload,
             time.time() - t0,
-            user_id=current_user.get("id"),
+            user_id=user_id,
             inputs_full=req.model_dump(mode="json"),
             output_full=payload,
         )
@@ -2078,7 +2790,7 @@ def agent_idea_script_export_ffmpeg(
             {"pipeline": "idea_script_export_ffmpeg", "mcp": True},
             {"ok": False},
             time.time() - t0,
-            user_id=current_user.get("id"),
+            user_id=user_id,
             inputs_full=req.model_dump(mode="json"),
             error=str(e),
         )
@@ -2112,7 +2824,7 @@ def agent_idea_script_export_ffmpeg(
             {"pipeline": "idea_script_export_ffmpeg"},
             {"ok": False},
             time.time() - t0,
-            user_id=current_user.get("id"),
+            user_id=user_id,
             inputs_full=req.model_dump(mode="json"),
             error=str(e),
         )

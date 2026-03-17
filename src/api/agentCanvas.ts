@@ -81,7 +81,7 @@ const extractApiError = (data) => {
 
 const createCaller = (apiFetch) => {
   if (apiFetch) {
-    return (path, options) => apiFetch(path, options);
+    return (path, options) => apiFetch(path, { ...options, skipAuth: true });
   }
   return async (path, options = {}) => {
     const headers = new Headers(options.headers || {});
@@ -163,6 +163,20 @@ export async function generateIdeaScriptMission(product, apiFetch, meta) {
   const resp = await call("/api/agent/idea_script", {
     method: "POST",
     body: JSON.stringify({ product: String(product || "").trim() }),
+    headers: buildAgentHeaders(meta),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(extractApiError(data));
+  }
+  return data;
+}
+
+export async function generateAgentChitchat(message, apiFetch, meta) {
+  const call = createCaller(apiFetch);
+  const resp = await call("/api/agent/chitchat", {
+    method: "POST",
+    body: JSON.stringify({ message: String(message || "").trim() }),
     headers: buildAgentHeaders(meta),
   });
   const data = await resp.json().catch(() => ({}));

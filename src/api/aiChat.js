@@ -36,12 +36,112 @@ const createApiError = (message, extras = {}) => {
   return error;
 };
 
+const emitDebug = (options, event) => {
+  if (typeof options?.onDebug === "function") options.onDebug(event);
+};
+
 const resolveMicroAppFetch = () => {
   try {
     return window.microApp?.getData?.()?.fetch;
   } catch {
     return undefined;
   }
+};
+
+const resolveLegacyCompatibleFetch = (apiFetch) => {
+  try {
+    return window.microApp?.getData?.()?.fetch || apiFetch; // 兼容老版本
+  } catch {
+    return apiFetch;
+  }
+};
+
+const createScopedSignal = (parentSignal) => {
+  const controller = new AbortController();
+
+  const abort = (reason) => {
+    if (!controller.signal.aborted) controller.abort(reason);
+  };
+
+  const handleParentAbort = () => {
+    abort(parentSignal?.reason || new DOMException("aiChat aborted", "AbortError"));
+  };
+
+  if (parentSignal) {
+    if (parentSignal.aborted) {
+      handleParentAbort();
+    } else {
+      parentSignal.addEventListener("abort", handleParentAbort, { once: true });
+    }
+  }
+
+  return {
+    signal: controller.signal,
+    abort,
+    cleanup: () => {
+      if (parentSignal) parentSignal.removeEventListener("abort", handleParentAbort);
+    },
+  };
+};
+
+const callWithLocalTimeout = async (candidate, requestUrl, requestInit, parentSignal) => {
+  const scope = createScopedSignal(parentSignal);
+  let timeoutId = 0;
+  try {
+    const targetUrl = candidate?.requestUrl || requestUrl;
+    const requestPromise = Promise.resolve(candidate.caller(targetUrl, { ...requestInit, signal: scope.signal }));
+    if (!candidate.timeoutMs) return await requestPromise;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = window.setTimeout(() => {
+        scope.abort(new DOMException("aiChat local timeout", "AbortError"));
+        reject(createApiError("aiChat local timeout", { code: "LOCAL_TIMEOUT", source: candidate.source }));
+      }, candidate.timeoutMs);
+    });
+    return await Promise.race([requestPromise, timeoutPromise]);
+  } finally {
+    if (timeoutId) window.clearTimeout(timeoutId);
+    scope.cleanup();
+  }
+};
+
+const buildRequestCandidates = (apiFetch, path, options = {}) => {
+  const compatApiFetch = resolveLegacyCompatibleFetch(apiFetch);
+  const requestPath = path.startsWith("/") ? path : `/${path}`;
+  const requestUrl = buildUrl(path);
+  const microAppFetch = resolveMicroAppFetch();
+  const candidates = [];
+  const apiFetchCandidate =
+    typeof compatApiFetch === "function" && compatApiFetch !== microAppFetch
+      ? {
+          source: "apiFetch(member-api-fallback)",
+          requestUrl: requestPath,
+          timeoutMs: 2500,
+          caller: (url, init) => compatApiFetch(url, { ...init, skipAuth: true }),
+        }
+      : null;
+  const microAppCandidate =
+    typeof microAppFetch === "function"
+      ? {
+          source: "microApp.fetch(member-api)",
+          requestUrl: requestPath,
+          timeoutMs: 2500,
+          caller: (url, init) => microAppFetch(url, init),
+        }
+      : null;
+  if (options.preferApiFetchFirst) {
+    if (apiFetchCandidate) candidates.push(apiFetchCandidate);
+    if (microAppCandidate) candidates.push(microAppCandidate);
+  } else {
+    if (microAppCandidate) candidates.push(microAppCandidate);
+    if (apiFetchCandidate) candidates.push(apiFetchCandidate);
+  }
+  candidates.push({
+    source: "window.fetch(member-api)",
+    requestUrl,
+    timeoutMs: 0,
+    caller: (url, init) => fetch(url, init),
+  });
+  return { requestUrl, candidates };
 };
 
 const readStorage = (storage, key) => {
@@ -55,6 +155,12 @@ const readStorage = (storage, key) => {
 const resolveMemberAuthorization = (options = {}) => {
   const direct = String(options?.authorization || "").trim();
   if (direct) return { value: direct, source: "options.authorization" };
+
+  const globalToken = String(window.__AI_CHAT_AUTHORIZATION__ || "").trim();
+  if (globalToken) return { value: globalToken, source: "window.__AI_CHAT_AUTHORIZATION__" };
+
+  const envToken = String(MEMBER_AUTHORIZATION || "").trim();
+  if (envToken) return { value: envToken, source: "VITE_MEMBER_AUTHORIZATION" };
 
   const microData = (() => {
     try {
@@ -75,12 +181,6 @@ const resolveMemberAuthorization = (options = {}) => {
     if (text) return { value: text, source };
   }
 
-  const globalToken = String(window.__AI_CHAT_AUTHORIZATION__ || "").trim();
-  if (globalToken) return { value: globalToken, source: "window.__AI_CHAT_AUTHORIZATION__" };
-
-  const envToken = String(MEMBER_AUTHORIZATION || "").trim();
-  if (envToken) return { value: envToken, source: "VITE_MEMBER_AUTHORIZATION" };
-
   const storageCandidates = [
     ["localStorage.ai_chat_authorization", readStorage(window.localStorage, "ai_chat_authorization")],
     ["localStorage.member_authorization", readStorage(window.localStorage, "member_authorization")],
@@ -99,18 +199,13 @@ const resolveMemberAuthorization = (options = {}) => {
   return { value: "", source: "" };
 };
 
-const isHostedWebOrigin = () => {
-  try {
-    const host = String(window.location?.hostname || "").toLowerCase();
-    return host.includes("dayukeji");
-  } catch {
-    return false;
-  }
-};
+export const resolveMemberAuthorizationInfo = (options = {}) => resolveMemberAuthorization(options);
 
-const isLoginRequiredError = (error) => {
+const LOGIN_REQUIRED_MESSAGE_PATTERN = /请登录后[再在]操作/;
+
+export const isLoginRequiredError = (error) => {
   const message = String(error?.message || error?.data?.message || "").toLowerCase();
-  return Number(error?.errNo) === 2 || message.includes("请登录后再操作");
+  return Number(error?.errNo) === 2 || LOGIN_REQUIRED_MESSAGE_PATTERN.test(message);
 };
 
 const isLikelyTransportError = (error) => {
@@ -140,77 +235,71 @@ const formatTransportErrorDetail = (error) => {
   return parts.join(" | ") || "unknown";
 };
 
-const resolveCaller = (apiFetch) => {
-  const microAppFetch = resolveMicroAppFetch();
-  const apiFetchCaller =
-    typeof apiFetch === "function"
-      ? { source: "apiFetch", caller: (path, init) => apiFetch(path, init) }
-      : null;
-  const directCaller = { source: "window.fetch(member-api)", caller: (path, init) => fetch(buildUrl(path), init) };
-
-  if (typeof microAppFetch === "function") {
-    return { source: "microApp.fetch", caller: (path, init) => microAppFetch(path, init) };
-  }
-  if (apiFetchCaller) return apiFetchCaller;
-  return directCaller;
-};
-
-const resolveStreamCaller = (apiFetch, forceSource = "") => {
-  const microAppFetch = resolveMicroAppFetch();
-  const apiFetchCaller =
-    typeof apiFetch === "function"
-      ? { source: "apiFetch", caller: (path, init) => apiFetch(path, init) }
-      : null;
-  const microCaller =
-    typeof microAppFetch === "function"
-      ? { source: "microApp.fetch", caller: (path, init) => microAppFetch(path, init) }
-      : null;
-  const microMemberCaller =
-    typeof microAppFetch === "function"
-      ? { source: "microApp.fetch(member-api)", caller: (path, init) => microAppFetch(buildUrl(path), init) }
-      : null;
-  const sameOriginCaller = { source: "window.fetch(same-origin)", caller: (path, init) => fetch(path, init) };
-  const directCaller = { source: "window.fetch(member-api)", caller: (path, init) => fetch(buildUrl(path), init) };
-
-  if (forceSource === "microApp.fetch") {
-    return microCaller || sameOriginCaller || microMemberCaller || apiFetchCaller || directCaller;
-  }
-  if (forceSource === "microApp.fetch(member-api)") {
-    return microMemberCaller || microCaller || sameOriginCaller || apiFetchCaller || directCaller;
-  }
-  if (forceSource === "window.fetch(same-origin)") {
-    return sameOriginCaller || microCaller || apiFetchCaller || directCaller;
-  }
-  if (forceSource === "window.fetch(member-api)") {
-    return directCaller || microCaller || sameOriginCaller || apiFetchCaller;
-  }
-  if (forceSource === "apiFetch") {
-    return apiFetchCaller || microCaller || sameOriginCaller || microMemberCaller || directCaller;
-  }
-
-  // 宿主存在时，强制优先走宿主链路，避免降级到无鉴权分支导致 err_no=2
-  if (microCaller) return microCaller;
-  return sameOriginCaller || microMemberCaller || apiFetchCaller || directCaller;
-};
-
 const postJson = async (apiFetch, path, payload = {}, options = {}) => {
-  const { source, caller } = resolveCaller(apiFetch);
   const auth = resolveMemberAuthorization(options);
+  const { requestUrl, candidates } = buildRequestCandidates(apiFetch, path, options);
   console.info("[aiChatApi] request:start", {
     path,
-    source,
+    url: requestUrl,
+    candidates: candidates.map((item) => item.source),
     payload: payload || {},
     authorization_source: auth.source || "none",
   });
-  const headers = new Headers({ "Content-Type": "application/json" });
-  if (auth.value) headers.set("authorization", auth.value);
-  const resp = await caller(path, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload || {}),
-    ...(source === "window.fetch(member-api)" ? {} : { credentials: "include" }),
-    signal: options.signal,
+  emitDebug(options, {
+    type: "start",
+    path,
+    url: requestUrl,
+    candidates: candidates.map((item) => item.source),
+    payload: payload || {},
+    authorizationSource: auth.source || "none",
   });
+  const baseRequestInit = {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+    signal: options.signal,
+  };
+  let resp = null;
+  let source = candidates[candidates.length - 1].source;
+  let lastError = null;
+
+  for (const candidate of candidates) {
+    try {
+      const headers = new Headers({ "Content-Type": "application/json" });
+      if (auth.value) {
+        headers.set("authorization", auth.value);
+      }
+      resp = await callWithLocalTimeout(
+        candidate,
+        requestUrl,
+        { ...baseRequestInit, headers },
+        options.signal,
+      );
+      source = candidate.source;
+      break;
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
+      lastError = error;
+      console.warn("[aiChatApi] request:fallback", {
+        path,
+        source: candidate.source,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      emitDebug(options, {
+        type: "fallback",
+        path,
+        source: candidate.source,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  if (!resp) {
+    throw createApiError(lastError?.message || "AI Chat 请求失败", {
+      source,
+      path,
+      data: lastError,
+    });
+  }
 
   const isFetchResponse = resp && typeof resp === "object" && typeof resp.json === "function";
   const rawData = isFetchResponse ? await resp.json().catch(() => ({})) : resp || {};
@@ -238,22 +327,31 @@ const postJson = async (apiFetch, path, payload = {}, options = {}) => {
   }
 
   console.info("[aiChatApi] request:success", { path, source, data });
+  emitDebug(options, {
+    type: "success",
+    path,
+    source,
+    response: data,
+  });
   return data;
 };
 
 export async function viewAIChatModelParams(apiFetch, payload = {}, options = {}) {
-  return postJson(apiFetch, "/ai/viewAIChatModelParams", payload, options);
+  const rawModelId = payload?.ai_chat_model_id;
+  const numericModelId = Number(rawModelId);
+  const normalizedPayload = {
+    ...payload,
+    ai_chat_model_id: Number.isFinite(numericModelId) ? numericModelId : rawModelId,
+  };
+  return postJson(apiFetch, "/ai/viewAIChatModelParams", normalizedPayload, {
+    ...options,
+    preferApiFetchFirst: true,
+  });
 }
 
 export async function viewAIChatModels(apiFetch, payload = {}, options = {}) {
   return postJson(apiFetch, "/ai/viewAIChatModels", payload, options);
 }
-
-const appendFormValue = (formData, key, value) => {
-  if (value === undefined || value === null) return;
-  if (typeof value === "string" && !value.trim()) return;
-  formData.append(key, String(value));
-};
 
 const appendQuotedFormValue = (formData, key, value) => {
   if (value === undefined || value === null) return;
@@ -321,24 +419,60 @@ const extractAIChatMeta = (payload) => {
 
 export async function aiChatStream(apiFetch, payload = {}, options = {}) {
   const auth = resolveMemberAuthorization(options);
-  const initialForceSource =
-    options.__forceStreamSource || (auth.value && !options.__triedSources?.length ? "window.fetch(member-api)" : "");
-  const { source, caller } = resolveStreamCaller(apiFetch, initialForceSource);
-  const triedSources = Array.isArray(options.__triedSources) ? options.__triedSources : [];
-  const requestMode = options.__requestMode === "axios" ? "axios" : "fetch";
-  const axiosWithCredentials = options.__axiosWithCredentials === true;
-  const isMicroSource = source.startsWith("microApp.fetch");
-  const requestHeaders = auth.value ? { authorization: auth.value } : undefined;
+  const useBackendCurlProxy = Boolean(options?.useBackendCurlProxy);
+  const memberRequest = buildRequestCandidates(apiFetch, "/ai/aiChat");
+  const requestUrl = useBackendCurlProxy ? "/api/ai_chat_stream_via_curl" : memberRequest.requestUrl;
+  const candidates = useBackendCurlProxy
+    ? [
+        {
+          source: "apiFetch(api-server-curl-proxy)",
+          timeoutMs: 0,
+          caller: (_url, init) =>
+            apiFetch("/api/ai_chat_stream_via_curl", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                ...payload,
+                authorization: auth.value || payload?.authorization || "",
+              }),
+              signal: init?.signal,
+            }),
+        },
+      ]
+    : memberRequest.candidates;
+  const files = Array.isArray(payload.files) ? payload.files : payload.files ? [payload.files] : [];
   console.info("[aiChatStream] request:start", {
     path: "/ai/aiChat",
-    source,
-    request_mode: requestMode,
-    with_credentials: requestMode === "axios" ? axiosWithCredentials : isMicroSource ? "fetch(omit)" : "fetch(include)",
+    url: requestUrl,
+    candidates: candidates.map((item) => item.source),
+    request_mode: "fetch",
     module_enum: payload?.module_enum,
     part_enum: payload?.part_enum,
     part_enum_form_value: toQuotedFormValue(payload?.part_enum),
     ai_chat_model_id: payload?.ai_chat_model_id,
     authorization_source: auth.source || "none",
+  });
+  emitDebug(options, {
+    type: "start",
+    path: "/ai/aiChat",
+    url: requestUrl,
+    candidates: candidates.map((item) => item.source),
+    payload: {
+      history_ai_chat_record_id: toQuotedFormValue(payload.history_ai_chat_record_id),
+      module_enum: toQuotedFormValue(payload.module_enum),
+      part_enum: toQuotedFormValue(payload.part_enum),
+      ai_chat_session_id: toQuotedFormValue(payload.ai_chat_session_id),
+      ai_chat_model_id: toQuotedFormValue(payload.ai_chat_model_id),
+      message: toQuotedFormValue(payload.message),
+      ai_image_param_task_type_id: toQuotedFormValue(payload.ai_image_param_task_type_id),
+      ai_image_param_size_id: toQuotedFormValue(payload.ai_image_param_size_id),
+      ai_image_param_ratio_id: toQuotedFormValue(payload.ai_image_param_ratio_id),
+      ai_video_param_ratio_id: toQuotedFormValue(payload.ai_video_param_ratio_id),
+      ai_video_param_resolution_id: toQuotedFormValue(payload.ai_video_param_resolution_id),
+      ai_video_param_duration_id: toQuotedFormValue(payload.ai_video_param_duration_id),
+      files_count: files.length,
+    },
+    authorizationSource: auth.source || "none",
   });
   const formData = new FormData();
   appendQuotedFormValue(formData, "history_ai_chat_record_id", payload.history_ai_chat_record_id);
@@ -349,87 +483,76 @@ export async function aiChatStream(apiFetch, payload = {}, options = {}) {
   appendQuotedFormValue(formData, "message", payload.message);
   appendQuotedFormValue(formData, "ai_image_param_task_type_id", payload.ai_image_param_task_type_id);
   appendQuotedFormValue(formData, "ai_image_param_size_id", payload.ai_image_param_size_id);
+  appendQuotedFormValue(formData, "ai_image_param_ratio_id", payload.ai_image_param_ratio_id);
   appendQuotedFormValue(formData, "ai_video_param_ratio_id", payload.ai_video_param_ratio_id);
   appendQuotedFormValue(formData, "ai_video_param_resolution_id", payload.ai_video_param_resolution_id);
   appendQuotedFormValue(formData, "ai_video_param_duration_id", payload.ai_video_param_duration_id);
 
-  const files = Array.isArray(payload.files) ? payload.files : payload.files ? [payload.files] : [];
   files.forEach((file) => {
     if (file) formData.append("files", file);
   });
   const hasFiles = files.some(Boolean);
   const bodyMode = hasFiles ? "multipart(with-files)" : "multipart";
 
-  try {
-    const requestInit =
-      requestMode === "axios"
-        ? {
-            method: "POST",
-            data: formData,
-            ...(requestHeaders ? { headers: requestHeaders } : {}),
-            withCredentials: axiosWithCredentials,
-            signal: options.signal,
-          }
-        : {
-            method: "POST",
-            body: formData,
-            ...(requestHeaders ? { headers: requestHeaders } : {}),
-            ...(!isMicroSource && source !== "window.fetch(member-api)" ? { credentials: "include" } : {}),
-            signal: options.signal,
-          };
-    console.info("[aiChatStream] request:payload", {
-      source,
-      request_mode: requestMode,
-      body_mode: bodyMode,
-      has_files: hasFiles,
-    });
-    const resp = await caller("/ai/aiChat", {
-      ...requestInit,
-    });
+  const baseRequestInit = {
+    method: "POST",
+    body: formData,
+    signal: options.signal,
+  };
+  let lastError = null;
 
-    const isFetchResponse = resp && typeof resp === "object" && typeof resp.json === "function";
-    if (!isFetchResponse) {
-      const data = normalizePayload(resp || {});
-      if (data?.err_no !== undefined && Number(data.err_no) !== 0) {
-        throw createApiError(extractApiError(data), {
+  for (const candidate of candidates) {
+    const source = candidate.source;
+    try {
+      const requestInit = {
+        ...baseRequestInit,
+        ...(auth.value ? { headers: { authorization: auth.value } } : {}),
+      };
+      console.info("[aiChatStream] request:payload", {
+        source,
+        request_mode: "fetch",
+        body_mode: bodyMode,
+        has_files: hasFiles,
+      });
+      const resp = await callWithLocalTimeout(candidate, requestUrl, requestInit, options.signal);
+
+      const isFetchResponse = resp && typeof resp === "object" && typeof resp.json === "function";
+      if (!isFetchResponse) {
+        const data = normalizePayload(resp || {});
+        if (data?.err_no !== undefined && Number(data.err_no) !== 0) {
+          throw createApiError(extractApiError(data), {
+            source,
+            path: "/ai/aiChat",
+            status: data?.status,
+            data,
+            errNo: data?.err_no,
+          });
+        }
+        const text = String(data?.message || data?.data?.message || data?.content || "");
+        const meta = extractAIChatMeta(data);
+        if (typeof options.onMeta === "function" && (meta.aiChatSessionId || meta.historyAiChatRecordId)) {
+          options.onMeta(meta);
+        }
+        if (text && typeof options.onChunk === "function") options.onChunk(text);
+        console.info("[aiChatStream] request:success", {
           source,
-          path: "/ai/aiChat",
-          status: data?.status,
-          data,
-          errNo: data?.err_no,
+          mode: "non_fetch_response",
+          request_mode: "fetch",
+          part_enum: payload?.part_enum,
+          ai_chat_model_id: payload?.ai_chat_model_id,
         });
+        emitDebug(options, {
+          type: "success",
+          path: "/ai/aiChat",
+          source,
+          mode: "non_fetch_response",
+          response: data,
+        });
+        return { text, meta, data };
       }
-      const text = String(data?.message || data?.data?.message || data?.content || "");
-      const meta = extractAIChatMeta(data);
-      if (typeof options.onMeta === "function" && (meta.aiChatSessionId || meta.historyAiChatRecordId)) {
-        options.onMeta(meta);
-      }
-      if (text && typeof options.onChunk === "function") options.onChunk(text);
-      console.info("[aiChatStream] request:success", {
-        source,
-        mode: "non_fetch_response",
-        request_mode: requestMode,
-        part_enum: payload?.part_enum,
-        ai_chat_model_id: payload?.ai_chat_model_id,
-      });
-      return { text, meta, data };
-    }
 
-    if (!resp.ok) {
-      const data = await resp.json().catch(() => ({}));
-      throw createApiError(extractApiError(data), {
-        source,
-        path: "/ai/aiChat",
-        status: resp?.status,
-        data,
-        errNo: data?.err_no,
-      });
-    }
-
-    const contentType = String(resp.headers?.get?.("content-type") || "").toLowerCase();
-    if (contentType.includes("application/json")) {
-      const data = await resp.json().catch(() => ({}));
-      if (data?.err_no !== undefined && Number(data.err_no) !== 0) {
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
         throw createApiError(extractApiError(data), {
           source,
           path: "/ai/aiChat",
@@ -438,303 +561,264 @@ export async function aiChatStream(apiFetch, payload = {}, options = {}) {
           errNo: data?.err_no,
         });
       }
-      const text = String(
-        data?.message ||
-          data?.data?.message ||
-          data?.text ||
-          data?.content ||
-          data?.data?.text ||
-          data?.data?.content ||
-          "",
-      );
-      const meta = extractAIChatMeta(data);
-      if (typeof options.onMeta === "function" && (meta.aiChatSessionId || meta.historyAiChatRecordId)) {
-        options.onMeta(meta);
+
+      const contentType = String(resp.headers?.get?.("content-type") || "").toLowerCase();
+      if (contentType.includes("application/json")) {
+        const data = await resp.json().catch(() => ({}));
+        if (data?.err_no !== undefined && Number(data.err_no) !== 0) {
+          throw createApiError(extractApiError(data), {
+            source,
+            path: "/ai/aiChat",
+            status: resp?.status,
+            data,
+            errNo: data?.err_no,
+          });
+        }
+        const text = String(
+          data?.message ||
+            data?.data?.message ||
+            data?.text ||
+            data?.content ||
+            data?.data?.text ||
+            data?.data?.content ||
+            "",
+        );
+        const meta = extractAIChatMeta(data);
+        if (typeof options.onMeta === "function" && (meta.aiChatSessionId || meta.historyAiChatRecordId)) {
+          options.onMeta(meta);
+        }
+        if (text && typeof options.onChunk === "function") options.onChunk(text);
+        console.info("[aiChatStream] request:success", {
+          source,
+          mode: "json",
+          request_mode: "fetch",
+          part_enum: payload?.part_enum,
+          ai_chat_model_id: payload?.ai_chat_model_id,
+        });
+        emitDebug(options, {
+          type: "success",
+          path: "/ai/aiChat",
+          source,
+          mode: "json",
+          response: data,
+        });
+        return { text, meta, data };
       }
-      if (text && typeof options.onChunk === "function") options.onChunk(text);
-      console.info("[aiChatStream] request:success", {
-        source,
-        mode: "json",
-        request_mode: requestMode,
-        part_enum: payload?.part_enum,
-        ai_chat_model_id: payload?.ai_chat_model_id,
-      });
-      return { text, meta, data };
-    }
 
-    const reader = resp.body?.getReader?.();
-    if (!reader) {
-      const data = await resp.json().catch(() => ({}));
-      const text = String(data?.message || data?.data?.message || "");
-      const meta = extractAIChatMeta(data);
-      if (typeof options.onMeta === "function" && (meta.aiChatSessionId || meta.historyAiChatRecordId)) {
-        options.onMeta(meta);
+      const reader = resp.body?.getReader?.();
+      if (!reader) {
+        const data = await resp.json().catch(() => ({}));
+        const text = String(data?.message || data?.data?.message || "");
+        const meta = extractAIChatMeta(data);
+        if (typeof options.onMeta === "function" && (meta.aiChatSessionId || meta.historyAiChatRecordId)) {
+          options.onMeta(meta);
+        }
+        if (text && typeof options.onChunk === "function") options.onChunk(text);
+        console.info("[aiChatStream] request:success", {
+          source,
+          mode: "reader_fallback_json",
+          request_mode: "fetch",
+          part_enum: payload?.part_enum,
+          ai_chat_model_id: payload?.ai_chat_model_id,
+        });
+        emitDebug(options, {
+          type: "success",
+          path: "/ai/aiChat",
+          source,
+          mode: "reader_fallback_json",
+          response: data,
+        });
+        return { text, meta, data };
       }
-      if (text && typeof options.onChunk === "function") options.onChunk(text);
-      console.info("[aiChatStream] request:success", {
-        source,
-        mode: "reader_fallback_json",
-        request_mode: requestMode,
-        part_enum: payload?.part_enum,
-        ai_chat_model_id: payload?.ai_chat_model_id,
-      });
-      return { text, meta, data };
-    }
 
-    const decoder = new TextDecoder("utf-8");
-    let buffer = "";
-    let content = "";
-    let sawSSE = false;
-    let metaState = {};
-    const eventRecords = [];
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+      let content = "";
+      let sawSSE = false;
+      let metaState = {};
+      const eventRecords = [];
 
-    const emitMeta = (meta) => {
-      const next = {
-        aiChatSessionId: meta?.aiChatSessionId || metaState.aiChatSessionId || "",
-        historyAiChatRecordId: meta?.historyAiChatRecordId || metaState.historyAiChatRecordId || "",
+      const emitMeta = (meta) => {
+        const next = {
+          aiChatSessionId: meta?.aiChatSessionId || metaState.aiChatSessionId || "",
+          historyAiChatRecordId: meta?.historyAiChatRecordId || metaState.historyAiChatRecordId || "",
+        };
+        metaState = next;
+        if (typeof options.onMeta === "function" && (next.aiChatSessionId || next.historyAiChatRecordId)) {
+          options.onMeta(next);
+        }
       };
-      metaState = next;
-      if (typeof options.onMeta === "function" && (next.aiChatSessionId || next.historyAiChatRecordId)) {
-        options.onMeta(next);
-      }
-    };
 
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      const chunk = decoder.decode(value, { stream: true });
-      if (!chunk) continue;
-      buffer += chunk;
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() || "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        if (!chunk) continue;
+        buffer += chunk;
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() || "";
 
-      for (const line of lines) {
-        const trimmed = String(line || "").trim();
-        if (!trimmed) continue;
-        if (trimmed.startsWith("event:") || trimmed.startsWith("id:")) {
-          sawSSE = true;
-          continue;
-        }
-        if (trimmed.startsWith("data:")) {
-          sawSSE = true;
-          const payloadText = trimmed.slice(5).trim();
-          if (!payloadText || payloadText === "[DONE]") continue;
-          let eventPayload = payloadText;
-          try {
-            eventPayload = JSON.parse(payloadText);
-          } catch {
-            // keep raw string
+        for (const line of lines) {
+          const trimmed = String(line || "").trim();
+          if (!trimmed) continue;
+          if (trimmed.startsWith("event:") || trimmed.startsWith("id:")) {
+            sawSSE = true;
+            continue;
           }
-          if (typeof options.onEvent === "function") options.onEvent(eventPayload);
-          eventRecords.push(eventPayload);
-          const meta = extractAIChatMeta(eventPayload);
-          if (meta.aiChatSessionId || meta.historyAiChatRecordId) emitMeta(meta);
+          if (trimmed.startsWith("data:")) {
+            sawSSE = true;
+            const payloadText = trimmed.slice(5).trim();
+            if (!payloadText || payloadText === "[DONE]") continue;
+            let eventPayload = payloadText;
+            try {
+              eventPayload = JSON.parse(payloadText);
+            } catch {
+              // keep raw string
+            }
+            if (typeof options.onEvent === "function") options.onEvent(eventPayload);
+            eventRecords.push(eventPayload);
+            const meta = extractAIChatMeta(eventPayload);
+            if (meta.aiChatSessionId || meta.historyAiChatRecordId) emitMeta(meta);
 
-          const delta =
-            typeof eventPayload === "string"
-              ? eventPayload
-              : eventPayload?.delta ??
-                (Array.isArray(eventPayload?.content)
-                  ? eventPayload.content
-                      .map((item) => item?.text ?? item?.content ?? item?.message ?? "")
-                      .filter(Boolean)
-                      .join("")
-                  : undefined) ??
-                eventPayload?.content ??
-                eventPayload?.text ??
-                eventPayload?.message ??
-                eventPayload?.data?.delta ??
-                (Array.isArray(eventPayload?.data?.content)
-                  ? eventPayload.data.content
-                      .map((item) => item?.text ?? item?.content ?? item?.message ?? "")
-                      .filter(Boolean)
-                      .join("")
-                  : undefined) ??
-                eventPayload?.data?.content ??
-                "";
-          if (typeof delta === "string" && delta && typeof options.onChunk === "function") {
-            const text = String(delta);
-            content += text;
-            options.onChunk(text);
+            const delta =
+              typeof eventPayload === "string"
+                ? eventPayload
+                : eventPayload?.delta ??
+                  (Array.isArray(eventPayload?.content)
+                    ? eventPayload.content
+                        .map((item) => item?.text ?? item?.content ?? item?.message ?? "")
+                        .filter(Boolean)
+                        .join("")
+                    : undefined) ??
+                  eventPayload?.content ??
+                  eventPayload?.text ??
+                  eventPayload?.message ??
+                  eventPayload?.data?.delta ??
+                  (Array.isArray(eventPayload?.data?.content)
+                    ? eventPayload.data.content
+                        .map((item) => item?.text ?? item?.content ?? item?.message ?? "")
+                        .filter(Boolean)
+                        .join("")
+                    : undefined) ??
+                  eventPayload?.data?.content ??
+                  "";
+            if (typeof delta === "string" && delta && typeof options.onChunk === "function") {
+              const text = String(delta);
+              content += text;
+              options.onChunk(text);
+            }
+            continue;
           }
-          continue;
-        }
-        if (!sawSSE) {
-          content += trimmed;
-          if (typeof options.onChunk === "function") options.onChunk(trimmed);
+          if (!sawSSE) {
+            content += trimmed;
+            if (typeof options.onChunk === "function") options.onChunk(trimmed);
+          }
         }
       }
-    }
 
-    const tail = decoder.decode();
-    if (tail) {
-      content += tail;
-      if (typeof options.onChunk === "function") options.onChunk(tail);
-    }
+      const tail = decoder.decode();
+      if (tail) {
+        content += tail;
+        if (typeof options.onChunk === "function") options.onChunk(tail);
+      }
 
-    if (!content && eventRecords.length === 0) {
-      throw createApiError("AI Chat 返回空流响应", {
+      if (!content && eventRecords.length === 0) {
+        throw createApiError("AI Chat 返回空流响应", {
+          source,
+          path: "/ai/aiChat",
+          status: resp?.status,
+          data: {
+            content_type: contentType || "",
+            empty_stream: true,
+          },
+        });
+      }
+
+      console.info("[aiChatStream] request:success", {
         source,
+        mode: "stream",
+        request_mode: "fetch",
+        part_enum: payload?.part_enum,
+        ai_chat_model_id: payload?.ai_chat_model_id,
+        has_events: eventRecords.length > 0,
+        text_length: content.length,
+      });
+      emitDebug(options, {
+        type: "success",
         path: "/ai/aiChat",
-        status: resp?.status,
-        data: {
-          content_type: contentType || "",
-          empty_stream: true,
+        source,
+        mode: "stream",
+        response: {
+          text_length: content.length,
+          event_count: eventRecords.length,
+          last_events: eventRecords.slice(-3),
         },
       });
-    }
-
-    console.info("[aiChatStream] request:success", {
-      source,
-      mode: "stream",
-      request_mode: requestMode,
-      part_enum: payload?.part_enum,
-      ai_chat_model_id: payload?.ai_chat_model_id,
-      has_events: eventRecords.length > 0,
-      text_length: content.length,
-    });
-    return { text: content, meta: metaState, events: eventRecords };
-  } catch (error) {
-    if (isLoginRequiredError(error)) {
-      console.error("[aiChatStream] request:error", {
-        source,
-        path: "/ai/aiChat",
-        part_enum: payload?.part_enum,
-        ai_chat_model_id: payload?.ai_chat_model_id,
-        status: error?.status,
-        err_no: error?.errNo,
-        message: error?.message,
-        data: error?.data,
-      });
-      throw error;
-    }
-
-    const nextTried = [...triedSources, source];
-    const hasTried = (name) => nextTried.includes(name);
-
-    const canRetryAxiosMode =
-      requestMode === "fetch" &&
-      source.startsWith("microApp.fetch") &&
-      !hasTried(`${source}(axios-mode)`) &&
-      isLikelyTransportError(error);
-    if (canRetryAxiosMode) {
-      console.warn("[aiChatStream] request:retry", {
-        from: `${source}(fetch-mode)`,
-        to: `${source}(axios-mode)`,
-        part_enum: payload?.part_enum,
-        ai_chat_model_id: payload?.ai_chat_model_id,
-        error: error?.message || String(error || ""),
-      });
-      return aiChatStream(apiFetch, payload, {
-        ...options,
-        __forceStreamSource: source,
-        __requestMode: "axios",
-        __axiosWithCredentials: false,
-        __triedSources: [...nextTried, `${source}(axios-mode)`],
-      });
-    }
-
-    const canRetryMicroMemberFetch =
-      source === "microApp.fetch" &&
-      requestMode === "axios" &&
-      !hasTried("microApp.fetch(member-api)") &&
-      isLikelyTransportError(error);
-    if (canRetryMicroMemberFetch) {
-      console.warn("[aiChatStream] request:retry", {
-        from: "microApp.fetch(axios-mode)",
-        to: "microApp.fetch(member-api)(fetch-mode)",
+      return { text: content, meta: metaState, events: eventRecords };
+    } catch (error) {
+      if (isLoginRequiredError(error)) {
+        console.error("[aiChatStream] request:error", {
+          source,
+          path: "/ai/aiChat",
+          part_enum: payload?.part_enum,
+          ai_chat_model_id: payload?.ai_chat_model_id,
+          status: error?.status,
+          err_no: error?.errNo,
+          message: error?.message,
+          data: error?.data,
+        });
+        throw error;
+      }
+      if (options.signal?.aborted) throw error;
+      lastError = error;
+      console.warn("[aiChatStream] request:fallback", {
+        from: source,
+        to: "next-candidate",
         part_enum: payload?.part_enum,
         ai_chat_model_id: payload?.ai_chat_model_id,
         error: formatTransportErrorDetail(error),
       });
-      return aiChatStream(apiFetch, payload, {
-        ...options,
-        __forceStreamSource: "microApp.fetch(member-api)",
-        __requestMode: "fetch",
-        __triedSources: [...nextTried, "microApp.fetch(member-api)"],
-      });
-    }
-
-    const canRetryMicroFetchFromDirect =
-      source === "window.fetch(member-api)" &&
-      requestMode === "fetch" &&
-      !hasTried("microApp.fetch") &&
-      isLikelyTransportError(error);
-    if (canRetryMicroFetchFromDirect) {
-      console.warn("[aiChatStream] request:retry", {
-        from: "window.fetch(member-api)(fetch-mode)",
-        to: "microApp.fetch(fetch-mode)",
-        part_enum: payload?.part_enum,
-        ai_chat_model_id: payload?.ai_chat_model_id,
-        error: formatTransportErrorDetail(error),
-      });
-      return aiChatStream(apiFetch, payload, {
-        ...options,
-        __forceStreamSource: "microApp.fetch",
-        __requestMode: "fetch",
-        __triedSources: [...nextTried, "microApp.fetch"],
-      });
-    }
-
-    const canRetrySameOriginFetch =
-      source === "microApp.fetch(member-api)" &&
-      requestMode === "axios" &&
-      isHostedWebOrigin() &&
-      !hasTried("window.fetch(same-origin)") &&
-      isLikelyTransportError(error);
-    if (canRetrySameOriginFetch) {
-      console.warn("[aiChatStream] request:retry", {
-        from: "microApp.fetch(member-api)(axios-mode)",
-        to: "window.fetch(same-origin)(fetch-mode)",
-        part_enum: payload?.part_enum,
-        ai_chat_model_id: payload?.ai_chat_model_id,
-        error: formatTransportErrorDetail(error),
-      });
-      return aiChatStream(apiFetch, payload, {
-        ...options,
-        __forceStreamSource: "window.fetch(same-origin)",
-        __requestMode: "fetch",
-        __triedSources: [...nextTried, "window.fetch(same-origin)"],
-      });
-    }
-
-    if (isLikelyTransportError(error)) {
-      throw createApiError(
-        `AI Chat 网络请求失败: ${formatTransportErrorDetail(error)} | source=${source} | request_mode=${requestMode} | body_mode=${bodyMode}`,
-        {
-        source,
+      emitDebug(options, {
+        type: "fallback",
         path: "/ai/aiChat",
-        status: error?.status,
-        errNo: error?.errNo,
-        data: error,
-        },
-      );
-    }
-
-    if (error?.message || error?.status !== undefined || error?.errNo !== undefined) {
-      console.error("[aiChatStream] request:error", {
         source,
-        path: "/ai/aiChat",
-        part_enum: payload?.part_enum,
-        ai_chat_model_id: payload?.ai_chat_model_id,
-        status: error?.status,
-        err_no: error?.errNo,
-        message: error?.message,
-        data: error?.data,
+        message: formatTransportErrorDetail(error),
       });
-      throw error;
     }
-    console.error("[aiChatStream] request:error", {
-      source,
-      path: "/ai/aiChat",
-      part_enum: payload?.part_enum,
-      ai_chat_model_id: payload?.ai_chat_model_id,
-      raw: error,
-    });
-    throw createApiError(`AI Chat 流式请求异常: ${stringifyUnknown(error) || "unknown"}`, {
-      source,
-      path: "/ai/aiChat",
-      data: error,
-    });
   }
+
+  const finalError =
+    lastError && (lastError?.message || lastError?.status !== undefined || lastError?.errNo !== undefined)
+      ? lastError
+      : createApiError(`AI Chat 流式请求异常: ${stringifyUnknown(lastError) || "unknown"}`, {
+          path: "/ai/aiChat",
+          data: lastError,
+        });
+  console.error("[aiChatStream] request:error", {
+    path: "/ai/aiChat",
+    part_enum: payload?.part_enum,
+    ai_chat_model_id: payload?.ai_chat_model_id,
+    status: finalError?.status,
+    err_no: finalError?.errNo,
+    message: finalError?.message,
+    data: finalError?.data,
+  });
+  emitDebug(options, {
+    type: "error",
+    path: "/ai/aiChat",
+    message: finalError?.message || "请求失败",
+    response: finalError?.data,
+  });
+  if (isLikelyTransportError(finalError)) {
+    throw createApiError(
+      `AI Chat 网络请求失败: ${formatTransportErrorDetail(finalError)} | request_mode=fetch | body_mode=${bodyMode}`,
+      {
+        path: "/ai/aiChat",
+        status: finalError?.status,
+        errNo: finalError?.errNo,
+        data: finalError,
+      },
+    );
+  }
+  throw finalError;
 }

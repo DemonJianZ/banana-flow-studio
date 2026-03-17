@@ -55,6 +55,8 @@ import {
   Scan,
   Scissors,
   Search,
+  PanelLeftClose,
+  PanelLeftOpen,
   GripVertical,
 } from "lucide-react";
 import { useAuth } from "../auth/AuthProvider";
@@ -77,8 +79,15 @@ import {
   setPreference as setMemoryPreference,
 } from "../api/memoryPreferences";
 import { harvestEvalCase } from "../api/qualityFeedback";
-import { aiChatStream, resolveMemberAuthorizationInfo, viewAIChatModelParams, viewAIChatModels } from "../api/aiChat";
+import {
+  aiChatStream,
+  isLoginRequiredError,
+  resolveMemberAuthorizationInfo,
+  viewAIChatModelParams,
+  viewAIChatModels,
+} from "../api/aiChat";
 import { viewMemberInfo } from "../api/memberInfo";
+import { hasUserAuth, USER_AUTHS_ENUM_1, viewUserAuths } from "../api/userAuths";
 import { detectIntent } from "../agent/router";
 import { detectPreferenceSuggestions } from "../agent/preferenceSuggestion";
 import { buildHitlFeedbackRows } from "../agent/hitlFeedbackHistory";
@@ -160,6 +169,22 @@ const LOADING_TIPS = [
   "正在构思光影布局...",
   "精彩马上呈现...",
 ];
+
+const MODES_WITHOUT_APP_AUTH = new Set([
+  "bg_replace",
+  "gesture_swap",
+  "product_swap",
+  "local_text2img",
+  "rmbg",
+  "feature_extract",
+  "multi_angleshots",
+]);
+
+const HIDDEN_IMAGE_CONFIG_MODES = new Set([
+  "bg_replace",
+  "gesture_swap",
+  "product_swap",
+]);
 
 const makeAgentId = () => Math.random().toString(36).slice(2, 10);
 
@@ -386,7 +411,7 @@ const buildApiDebugDetailText = (event) => {
   return lines.join("\n").trim();
 };
 
-const API_DEBUG_DETAIL_KEYS = new Set(["aiChatLang", "aiChatImage"]);
+const API_DEBUG_DETAIL_KEYS = new Set(["aiChatLang", "aiChatImage", "userAuths"]);
 
 const API_DEBUG_STATUS_LABEL = {
   idle: "待执行",
@@ -1129,7 +1154,19 @@ const ToolIconBtn = ({ icon, onClick, disabled, active, title }) => {
   );
 };
 
-const SidebarBtn = ({ icon, label, desc, onClick, color, bg, active = false, compact = false, expanded = false, onHoverChange }) => {
+const SidebarBtn = ({
+  icon,
+  label,
+  desc,
+  onClick,
+  color,
+  bg,
+  active = false,
+  compact = false,
+  expanded = false,
+  onHoverChange,
+  category = "",
+}) => {
   const IconComponent = icon;
   return (
     <button
@@ -1145,9 +1182,7 @@ const SidebarBtn = ({ icon, label, desc, onClick, color, bg, active = false, com
                 ? "border-cyan-400/25 bg-[linear-gradient(180deg,rgba(15,23,42,0.95),rgba(30,41,59,0.9))] text-slate-100 shadow-[0_10px_24px_rgba(8,145,178,0.14)]"
                 : "border-transparent text-slate-300 hover:bg-slate-800/70 hover:text-slate-100"
             }`
-          : `mx-auto min-h-[52px] rounded-[22px] ${
-              expanded ? "w-full px-3.5 py-2.5 justify-start overflow-hidden" : "w-[56px] px-0 py-0 justify-center overflow-hidden"
-            } ${
+          : `mx-auto min-h-[88px] w-full items-center justify-between overflow-hidden rounded-[22px] px-3.5 py-3 ${
               active
                 ? "bg-[linear-gradient(180deg,rgba(15,23,42,0.95),rgba(30,41,59,0.9))] text-slate-100 border-cyan-400/25 shadow-[0_10px_24px_rgba(8,145,178,0.14)]"
                 : "bg-[linear-gradient(180deg,rgba(15,23,42,0.82),rgba(15,23,42,0.68))] text-slate-300 border-slate-800/80 hover:border-slate-600/80 hover:bg-slate-900/90"
@@ -1161,7 +1196,7 @@ const SidebarBtn = ({ icon, label, desc, onClick, color, bg, active = false, com
       />
       <div
         className={`${
-          compact ? (expanded ? "w-8 h-8" : "w-7 h-7") : expanded ? "w-10 h-10" : "w-10 h-10"
+          compact ? (expanded ? "w-8 h-8" : "w-7 h-7") : "h-10 w-10"
         } rounded-2xl ${bg} flex items-center justify-center ${color} shrink-0 ring-1 transition-all ${
           active ? "ring-cyan-400/35" : "ring-slate-700/70 group-hover:ring-slate-500/60"
         }`}
@@ -1173,19 +1208,23 @@ const SidebarBtn = ({ icon, label, desc, onClick, color, bg, active = false, com
           : null}
       </div>
       {!compact && (
-        <div
-          className={`grid transition-all duration-200 ${
-            expanded ? "ml-3 min-w-0 flex-1 opacity-100" : "ml-0 w-0 opacity-0"
-          }`}
-        >
-          <div className="min-w-0 overflow-hidden">
-            <div className={`font-medium text-[12px] truncate ${active ? "text-slate-100" : "text-slate-200 group-hover:text-slate-100"}`}>{label}</div>
-            <div className="text-[10px] text-slate-500 truncate">{desc}</div>
+        <>
+          <div className="ml-3 min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <div className={`truncate text-[13px] font-medium leading-5 ${active ? "text-slate-100" : "text-slate-200 group-hover:text-slate-100"}`}>{label}</div>
+              {category ? (
+                <span className={`shrink-0 rounded-full border px-2 py-1 text-[9px] leading-none ${
+                  active
+                    ? "border-cyan-400/20 bg-cyan-400/10 text-cyan-100"
+                    : "border-slate-700/80 bg-slate-900/75 text-slate-400"
+                }`}>
+                  {category}
+                </span>
+              ) : null}
+            </div>
+            <div className="mt-1 text-[11px] leading-5 text-slate-400 whitespace-normal break-words">{desc}</div>
           </div>
-          <Plus className={`absolute right-3.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 shrink-0 transition-all ${
-            expanded ? (active ? "text-cyan-200 opacity-90" : "text-slate-500 opacity-100") : "opacity-0"
-          }`} />
-        </div>
+        </>
       )}
     </button>
   );
@@ -1195,7 +1234,7 @@ const SidebarSectionHeader = ({ title, open, onToggle }) => (
   <button
     type="button"
     onClick={onToggle}
-    className="w-full inline-flex items-center gap-2 py-1 text-[10px] font-semibold text-slate-300 uppercase tracking-[0.14em] hover:text-slate-100"
+    className="inline-flex w-full items-center gap-2 rounded-xl px-1 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-300 transition-colors hover:text-slate-100"
   >
     <span className={`transition-transform ${open ? "rotate-90" : ""}`}>
       <ChevronRight className="w-3 h-3 text-slate-500" />
@@ -1380,7 +1419,11 @@ const PropertyPanel = ({
 
   const availableTools = Object.keys(TOOL_CARDS).filter((key) => {
     const tool = TOOL_CARDS[key];
-    if (isProcessor) return tool.category === "generate" || tool.category === "skill";
+    if (isProcessor) {
+      return (tool.category === "generate" || tool.category === "skill")
+        && key !== "video_upscale"
+        && !HIDDEN_IMAGE_CONFIG_MODES.has(key);
+    }
     if (isPostProcessor) return tool.category === "enhance";
     if (isVideoGen) return tool.category === "video";
     return false;
@@ -1398,6 +1441,14 @@ const PropertyPanel = ({
     (node?.data?.mode === "text2img" || node?.data?.mode === "multi_image_generate");
   const currentVideoModelId = String(node?.data?.model || "").trim();
   const currentImageModelId = String(node?.data?.model || "").trim();
+
+  useEffect(() => {
+    if (!node?.id) {
+      setShowAdvanced(false);
+      return;
+    }
+    setShowAdvanced(true);
+  }, [node?.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2708,6 +2759,8 @@ const Workbench = () => {
   const [memberInfo, setMemberInfo] = useState(null);
   const [memberInfoLoading, setMemberInfoLoading] = useState(true);
   const [memberInfoLoginUrl, setMemberInfoLoginUrl] = useState("");
+  const [userAuths, setUserAuths] = useState(null);
+  const [userAuthsLoading, setUserAuthsLoading] = useState(true);
   const navigate = useNavigate();
   const [nodes, setNodes] = useState([]);
   const [connections, setConnections] = useState([]);
@@ -2784,6 +2837,7 @@ const Workbench = () => {
   const [apiDebugOpen, setApiDebugOpen] = useState(true);
   const [apiDebugStatus, setApiDebugStatus] = useState(() => ({
     memberInfo: { status: "idle", message: "", detail: "", updatedAt: 0 },
+    userAuths: { status: "idle", message: "", detail: "", updatedAt: 0 },
     modelParams: { status: "idle", message: "", detail: "", updatedAt: 0 },
     modelsLang: { status: "idle", message: "", detail: "", updatedAt: 0 },
     modelsImage: { status: "idle", message: "", detail: "", updatedAt: 0 },
@@ -2805,7 +2859,8 @@ const Workbench = () => {
   const rightPanelResizeRef = useRef(null);
 
   const agentSessions = agentStore.sessions ?? EMPTY_LIST;
-  const isLeftSidebarCollapsed = true;
+  const isLeftSidebarCollapsed = leftSidebarCollapsed;
+  const leftSidebarWidth = isLeftSidebarCollapsed ? 76 : 340;
   const activeAgentSession = useMemo(
     () => agentSessions.find((session) => session.id === agentStore.activeSessionId) || agentSessions[0] || null,
     [agentSessions, agentStore.activeSessionId],
@@ -2844,6 +2899,7 @@ const Workbench = () => {
   const memberAvatar = useMemo(() => resolveMemberAvatar(memberInfo), [memberInfo]);
   const memberPoint = useMemo(() => resolveMemberPoints(memberInfo, ["point"]), [memberInfo]);
   const memberTotalPoint = useMemo(() => resolveMemberPoints(memberInfo, ["total_point", "totalPoint"]), [memberInfo]);
+  const isAdminUser = useMemo(() => hasUserAuth(userAuths, USER_AUTHS_ENUM_1), [userAuths]);
   const languageModelOptions = useMemo(
     () => (Array.isArray(aiChatModels.language) && aiChatModels.language.length ? aiChatModels.language : EMPTY_LIST),
     [aiChatModels.language],
@@ -2964,7 +3020,7 @@ const Workbench = () => {
           message: error instanceof Error ? error.message : String(error),
         });
         const ssoUrl = error?.ssoUrl || error?.data?.data?.sso_url || "";
-        const isLoginRequired = Number(error?.errNo) === 2;
+        const isLoginRequired = isLoginRequiredError(error);
         if (ssoUrl) {
           setMemberInfoLoginUrl(ssoUrl);
         }
@@ -2997,6 +3053,81 @@ const Workbench = () => {
     };
 
     loadMemberInfo();
+    return () => {
+      cancelled = true;
+      activeController?.abort();
+      if (timerId) window.clearTimeout(timerId);
+      if (timeoutId) window.clearTimeout(timeoutId);
+    };
+  }, [apiFetch, pushApiDebugDetail, updateApiDebugStatus]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timerId = 0;
+    let timeoutId = 0;
+    let activeController = null;
+
+    const loadUserAuths = async (attempt = 0) => {
+      const requestController = new AbortController();
+      activeController = requestController;
+      let didTimeout = false;
+
+      if (attempt === 0) setUserAuthsLoading(true);
+      if (attempt === 0) updateApiDebugStatus("userAuths", { status: "loading", message: "POST /user/auths" });
+      console.info("[userAuths] load:attempt", { attempt });
+      if (timeoutId) window.clearTimeout(timeoutId);
+      timeoutId = window.setTimeout(() => {
+        didTimeout = true;
+        updateApiDebugStatus("userAuths", { status: "timeout", message: "请求超时(10s)" });
+        console.warn("[userAuths] load:timeout", { attempt });
+        requestController.abort(new DOMException("viewUserAuths timeout", "AbortError"));
+      }, 10000);
+
+      try {
+        const data = await viewUserAuths(apiFetch, {}, {
+          signal: requestController.signal,
+          onDebug: (event) => pushApiDebugDetail("userAuths", event),
+        });
+        if (cancelled) return;
+        if (timeoutId) window.clearTimeout(timeoutId);
+        console.info("[userAuths] load:done", { attempt, data, isAdmin: hasUserAuth(data, USER_AUTHS_ENUM_1) });
+        setUserAuths(data);
+        setUserAuthsLoading(false);
+        updateApiDebugStatus("userAuths", {
+          status: "success",
+          message: hasUserAuth(data, USER_AUTHS_ENUM_1) ? "admin" : "loaded",
+        });
+      } catch (error) {
+        if (timeoutId) window.clearTimeout(timeoutId);
+        if (cancelled) return;
+        if (requestController.signal.aborted && !didTimeout) return;
+        console.error("[userAuths] load:failed", {
+          attempt,
+          didTimeout,
+          message: error instanceof Error ? error.message : String(error),
+        });
+        const isLoginRequired = isLoginRequiredError(error);
+        if (didTimeout || isLoginRequired) {
+          if (isLoginRequired) {
+            updateApiDebugStatus("userAuths", { status: "login_required", message: error?.message || "请登录后再操作" });
+          }
+          setUserAuths(null);
+          setUserAuthsLoading(false);
+          return;
+        }
+        updateApiDebugStatus("userAuths", { status: "error", message: error instanceof Error ? error.message : String(error) });
+        if (attempt < 2) {
+          timerId = window.setTimeout(() => {
+            loadUserAuths(attempt + 1);
+          }, 400 * (attempt + 1));
+          return;
+        }
+        setUserAuths(null);
+        setUserAuthsLoading(false);
+      }
+    };
+
+    loadUserAuths();
     return () => {
       cancelled = true;
       activeController?.abort();
@@ -3168,7 +3299,8 @@ const Workbench = () => {
   const rightPanelContainerStyle = useMemo(
     () => ({
       width: rightPanelWidth,
-      height: "auto",
+      height: "min(70vh, calc(100vh - 180px))",
+      maxHeight: "calc(100vh - 180px)",
       transition: "width 280ms cubic-bezier(0.22,1,0.36,1)",
     }),
     [rightPanelWidth],
@@ -5738,6 +5870,7 @@ const createConnectedImg2ImgBranch = useCallback(
                 if (procNode.data.mode === "local_text2img") {
                   const resp = await apiFetch(`/api/local/text2img`, {
                     method: "POST",
+                    skipAuth: true,
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
                       prompt: promptToUse,
@@ -6216,6 +6349,7 @@ const createConnectedImg2ImgBranch = useCallback(
               } else if (procNode.data.mode === "rmbg") {
                 const resp = await apiFetch(`/api/rmbg`, {
                   method: "POST",
+                  skipAuth: true,
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({
                     image: inputImages[i],
@@ -6229,6 +6363,7 @@ const createConnectedImg2ImgBranch = useCallback(
               } else if (procNode.data.mode === "feature_extract") {
                 const resp = await apiFetch(`/api/multi_image_generate`, {
                   method: "POST",
+                  skipAuth: true,
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({
                     prompt: sourceText || procNode.data.prompt || FEATURE_EXTRACT_PRESET_PROMPTS.face,
@@ -6293,6 +6428,7 @@ const createConnectedImg2ImgBranch = useCallback(
               } else if (procNode.data.mode === "multi_angleshots") {
                 const resp = await apiFetch(`/api/multi_angleshots`, {
                   method: "POST",
+                  skipAuth: true,
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({
                     image: inputImages[i],
@@ -6314,6 +6450,7 @@ const createConnectedImg2ImgBranch = useCallback(
                 };
                 const resp = await apiFetch(`/api/edit`, {
                   method: "POST",
+                  skipAuth: MODES_WITHOUT_APP_AUTH.has(procNode.data.mode),
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify(payload),
                 });
@@ -6479,15 +6616,6 @@ const createConnectedImg2ImgBranch = useCallback(
             bg: "bg-purple-500/10",
             onClick: () => addNode(NODE_TYPES.PROCESSOR, "multi_angleshots"),
           },
-          {
-            id: "skill_video_upscale",
-            icon: TrendingUp,
-            label: "超分辨率视频",
-            desc: "3 秒切片后逐段超分",
-            color: "text-cyan-300",
-            bg: "bg-cyan-500/10",
-            onClick: () => addNode(NODE_TYPES.PROCESSOR, "video_upscale"),
-          },
         ],
       },
       {
@@ -6571,30 +6699,23 @@ const createConnectedImg2ImgBranch = useCallback(
 
     return (
       <>
-        {!isLeftSidebarCollapsed && (
-          <div className="mb-2.5">
-            <div className="relative">
-              <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                value={leftSidebarQuery}
-                onChange={(e) => setLeftSidebarQuery(e.target.value)}
-                placeholder="搜索节点 / 技能 / 工作流"
-                className="w-full h-9 rounded-md border border-slate-800/90 bg-slate-950/70 pl-8 pr-2.5 text-[11px] text-slate-200 placeholder:text-slate-500 outline-none focus:border-yellow-500/40"
-              />
-            </div>
-          </div>
-        )}
-
         {visibleSections.length === 0 && !isLeftSidebarCollapsed ? (
           <div className="rounded-md border border-slate-800/90 bg-slate-950/60 p-2.5 text-[11px] text-slate-400">
             未找到匹配项，请尝试其他关键词。
           </div>
         ) : (
-          <div className="flex flex-col items-center space-y-2">
+          <div className={`flex flex-col space-y-2 ${isLeftSidebarCollapsed ? "items-center" : "items-stretch"}`}>
             {visibleSections.map((section, idx) => {
               const sectionOpen = isLeftSidebarCollapsed ? true : !!leftSidebarSectionOpen[section.key];
               return (
-                <div key={section.key} className={`flex w-full flex-col items-center ${idx === 0 ? "" : "border-t border-slate-800/70 pt-1.5"}`}>
+                <div
+                  key={section.key}
+                  className={`flex w-full flex-col ${
+                    isLeftSidebarCollapsed
+                      ? `items-center ${idx === 0 ? "" : "border-t border-slate-800/70 pt-1.5"}`
+                      : "items-stretch rounded-[20px] border border-slate-800/80 bg-[linear-gradient(180deg,rgba(7,10,18,0.72),rgba(2,6,23,0.4))] px-3 py-2.5"
+                  }`}
+                >
                   {!isLeftSidebarCollapsed && (
                     <SidebarSectionHeader
                       title={section.title}
@@ -6603,7 +6724,7 @@ const createConnectedImg2ImgBranch = useCallback(
                     />
                   )}
                   {sectionOpen && (
-                    <div className="flex w-full flex-col items-center space-y-1.5">
+                    <div className={isLeftSidebarCollapsed ? "flex w-full flex-col items-center space-y-1.5" : "mt-2 flex w-full flex-col space-y-2"}>
                       {section.items.map((item) => (
                         <SidebarBtn
                           key={item.id}
@@ -6614,8 +6735,14 @@ const createConnectedImg2ImgBranch = useCallback(
                           bg={item.bg}
                           active={activeSidebarItemKey === item.id}
                           compact={isLeftSidebarCollapsed}
-                          expanded={hoveredSidebarItemKey === item.id}
+                          expanded={isLeftSidebarCollapsed ? hoveredSidebarItemKey === item.id : true}
+                          category={section.title}
                           onHoverChange={(isHovering, target) => {
+                            if (!isLeftSidebarCollapsed) {
+                              setHoveredSidebarItemKey("");
+                              setHoveredSidebarPreview(null);
+                              return;
+                            }
                             setHoveredSidebarItemKey(isHovering ? item.id : "");
                             if (isHovering && target && workspaceShellRef.current) {
                               const itemRect = target.getBoundingClientRect();
@@ -6649,6 +6776,7 @@ const createConnectedImg2ImgBranch = useCallback(
 
   const apiDebugItems = [
     { key: "memberInfo", label: "memberInfo" },
+    { key: "userAuths", label: "userAuths" },
     { key: "modelParams", label: "modelParams(id=4)" },
     { key: "modelsLang", label: "models(part=1)" },
     { key: "modelsImage", label: "models(part=2)" },
@@ -6769,12 +6897,12 @@ const createConnectedImg2ImgBranch = useCallback(
                   <GripVertical className="w-3.5 h-3.5 absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none" />
                 </button>
                 <div
-                  className="relative h-full overflow-hidden rounded-[28px] border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))]"
+                  className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-[28px] border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))]"
                   style={{ boxShadow: "0 24px 60px rgba(0,0,0,0.48), inset 0 1px 0 rgba(255,255,255,0.05)" }}
                 >
               <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.03),transparent_24%),linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.008)_34%,transparent_100%)]" />
               <div className="pointer-events-none absolute inset-x-6 top-0 h-px bg-white/18" />
-              <div className="relative h-[54px] px-4 flex items-center justify-between border-b border-white/10 bg-black/10">
+              <div className="relative flex h-[54px] shrink-0 items-center justify-between border-b border-white/10 bg-black/10 px-4">
                 <div className="inline-flex min-w-0 items-center gap-1.5 text-xs">
                   <History className="w-3.5 h-3.5 text-yellow-400" />
                   <span className="font-medium truncate text-slate-200">对话流</span>
@@ -6814,8 +6942,8 @@ const createConnectedImg2ImgBranch = useCallback(
                   </button>
                 </div>
               </div>
-              <div className="h-[calc(100%-50px)] flex flex-col">
-                <div className="relative border-b border-white/10 p-3 bg-black/10">
+              <div className="flex min-h-0 flex-1 flex-col">
+                <div className="relative shrink-0 border-b border-white/10 bg-black/10 p-3">
                   <select
                     value={activeAgentSession?.id || ""}
                     onChange={(e) => setActiveAgentSession(e.target.value)}
@@ -6829,7 +6957,7 @@ const createConnectedImg2ImgBranch = useCallback(
                   </select>
                 </div>
                 {minimizedAgentCards.length > 0 && (
-                  <div className="relative border-b border-white/10 p-3 space-y-2 bg-black/10">
+                  <div className="relative shrink-0 space-y-2 border-b border-white/10 bg-black/10 p-3">
                     <div className="text-[10px] uppercase tracking-wider text-slate-400">已最小化结果</div>
                     {minimizedAgentCards.map((card) => {
                       const turn = agentTurns.find((item) => item.id === card.turnId);
@@ -6847,7 +6975,7 @@ const createConnectedImg2ImgBranch = useCallback(
                     })}
                   </div>
                 )}
-                <div className="relative flex-1 overflow-y-auto p-3 space-y-3 custom-scrollbar bg-black/10">
+                <div className="relative min-h-0 flex-1 overflow-y-auto bg-black/10 p-3 space-y-3 custom-scrollbar">
                   {agentTurns.length === 0 && (
                     <div className="space-y-2 rounded-[20px] border border-white/10 bg-white/[0.04] px-3 py-3">
                       <div className="text-[11px] text-slate-400">暂无对话，先试一个 Mission 或快速打开模板。</div>
@@ -7117,17 +7245,44 @@ const createConnectedImg2ImgBranch = useCallback(
 
       <div ref={workspaceShellRef} className="flex-1 flex relative min-h-0 overflow-hidden">
         {/* Sidebar */}
-        <div className="z-40 my-4 flex h-[calc(100%-2rem)] shrink-0 flex-col justify-between self-start">
+        <div className="relative z-40 my-4 flex h-[calc(100%-2rem)] shrink-0 flex-col justify-between self-start">
           <div
             className={`flex min-h-0 flex-1 flex-col items-center self-start px-2 py-3 select-none`}
-            style={{ WebkitOverflowScrolling: "touch", width: 76 }}
+            style={{ WebkitOverflowScrolling: "touch", width: leftSidebarWidth }}
           >
-            <div className="flex min-h-0 w-full flex-1 justify-center overflow-y-auto overflow-x-visible custom-scrollbar [scrollbar-gutter:stable] overscroll-contain">
-            {!isLeftSidebarCollapsed && <div className="mb-2.5 h-px w-full bg-gradient-to-r from-slate-500/40 via-slate-700/20 to-transparent" />}
-            {renderSidebarContent()}
+            {!isLeftSidebarCollapsed && (
+              <div className="mb-3 w-full">
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+                  <input
+                    value={leftSidebarQuery}
+                    onChange={(e) => setLeftSidebarQuery(e.target.value)}
+                    placeholder="搜索节点 / 技能 / 工作流"
+                    className="h-9 w-full rounded-md border border-slate-800/90 bg-slate-950/70 pl-8 pr-2.5 text-[11px] text-slate-200 placeholder:text-slate-500 outline-none focus:border-yellow-500/40"
+                  />
+                </div>
+              </div>
+            )}
+            <div className="min-h-0 w-full flex-1 overflow-y-auto overflow-x-visible custom-scrollbar [scrollbar-gutter:stable] overscroll-contain">
+              {!isLeftSidebarCollapsed && <div className="mb-2.5 h-px w-full bg-gradient-to-r from-slate-500/40 via-slate-700/20 to-transparent" />}
+              {renderSidebarContent()}
+            </div>
+            <div className="mt-3 w-full">
+              <button
+                type="button"
+                onClick={() => setLeftSidebarCollapsed((prev) => !prev)}
+                title={isLeftSidebarCollapsed ? "展开左侧菜单" : "收起左侧菜单"}
+                aria-label={isLeftSidebarCollapsed ? "展开左侧菜单" : "收起左侧菜单"}
+                className={`flex items-center justify-center rounded-xl border border-slate-700/80 bg-slate-950/95 text-slate-300 shadow-[0_10px_28px_rgba(0,0,0,0.28)] transition-colors hover:border-cyan-400/35 hover:bg-slate-900 hover:text-white ${
+                  isLeftSidebarCollapsed ? "mx-auto h-9 w-9" : "h-10 w-full gap-2 text-[11px]"
+                }`}
+              >
+                {isLeftSidebarCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+                {!isLeftSidebarCollapsed && <span>{isLeftSidebarCollapsed ? "展开左侧菜单" : "收起组件列表"}</span>}
+              </button>
+            </div>
           </div>
-          </div>
-          <div className="mt-3 w-[76px] shrink-0 p-2">
+          <div className="mt-3 shrink-0 p-2" style={{ width: leftSidebarWidth }}>
             {isLeftSidebarCollapsed ? (
               <details className="relative group">
                 <summary
@@ -7155,6 +7310,19 @@ const createConnectedImg2ImgBranch = useCallback(
                       <div className="truncate text-sm font-semibold text-slate-100">{memberLabel}</div>
                       <div className="text-[10px] text-slate-400">
                         {memberInfoLoginUrl ? "会员未登录" : "会员信息"}
+                      </div>
+                      <div className="mt-1">
+                        <span
+                          className={`inline-flex rounded-full border px-2 py-0.5 text-[9px] ${
+                            userAuthsLoading
+                              ? "border-slate-700/80 bg-slate-900/70 text-slate-400"
+                              : isAdminUser
+                              ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-100"
+                              : "border-slate-700/80 bg-slate-900/70 text-slate-400"
+                          }`}
+                        >
+                          {userAuthsLoading ? "权限加载中" : isAdminUser ? "管理员" : "普通成员"}
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -7203,6 +7371,19 @@ const createConnectedImg2ImgBranch = useCallback(
                     <div className="truncate text-[10px] text-slate-400">
                       {memberInfoLoginUrl ? "会员未登录" : user?.email || "会员信息"}
                     </div>
+                    <div className="mt-1">
+                      <span
+                        className={`inline-flex rounded-full border px-2 py-0.5 text-[9px] ${
+                          userAuthsLoading
+                            ? "border-slate-700/80 bg-slate-900/70 text-slate-400"
+                            : isAdminUser
+                            ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-100"
+                            : "border-slate-700/80 bg-slate-900/70 text-slate-400"
+                        }`}
+                      >
+                        {userAuthsLoading ? "权限加载中" : isAdminUser ? "管理员" : "普通成员"}
+                      </span>
+                    </div>
                   </div>
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-2">
@@ -7236,10 +7417,10 @@ const createConnectedImg2ImgBranch = useCallback(
           </div>
         </div>
 
-        {hoveredSidebarPreview ? (
+        {isLeftSidebarCollapsed && hoveredSidebarPreview ? (
           <div
             className="pointer-events-none absolute z-[55] w-72 -translate-y-1/2 rounded-2xl border border-slate-800/90 bg-[linear-gradient(180deg,rgba(5,5,7,0.98),rgba(12,12,16,0.94))] px-3.5 py-3.5 text-left shadow-2xl"
-            style={{ left: 82, top: hoveredSidebarPreview.top }}
+            style={{ left: leftSidebarWidth + 6, top: hoveredSidebarPreview.top }}
           >
             <div className="absolute left-[-6px] top-1/2 h-3 w-3 -translate-y-1/2 rotate-45 border-l border-t border-slate-800/90 bg-[#070709]" />
             <div className="flex items-start gap-3">

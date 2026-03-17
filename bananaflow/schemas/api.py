@@ -159,6 +159,13 @@ class AgentVideoGenerationResponse(BaseModel):
     shots_failed: int = 0
     artifacts: List[AgentVideoShotArtifact] = Field(default_factory=list)
 
+class AgentChitchatRequest(BaseModel):
+    message: str = Field(default="")
+
+class AgentChitchatResponse(BaseModel):
+    text: str = Field(default="")
+    model: str = Field(default="")
+
 class VideoUpscaleTaskStartResponse(BaseModel):
     task_id: str
     status: str

@@ -1,5 +1,7 @@
 import { MEMBER_API_BASE, MEMBER_AUTHORIZATION } from "../config";
 
+export const USER_AUTHS_ENUM_1 = 1;
+
 const API_ROOT = (MEMBER_API_BASE || "").replace(/\/+$/, "");
 
 const buildUrl = (path) => {
@@ -29,13 +31,13 @@ const emitDebug = (options, event) => {
   if (typeof options?.onDebug === "function") options.onDebug(event);
 };
 
-const normalizeMemberInfoPayload = (payload) => {
+const normalizeUserAuthsPayload = (payload) => {
   if (!payload || typeof payload !== "object") return {};
   if (payload.err_no !== undefined || payload.message !== undefined) {
     return payload;
   }
   if (payload.data && typeof payload.data === "object") {
-    return normalizeMemberInfoPayload(payload.data);
+    return normalizeUserAuthsPayload(payload.data);
   }
   return payload;
 };
@@ -64,7 +66,7 @@ const createScopedSignal = (parentSignal) => {
   };
 
   const handleParentAbort = () => {
-    abort(parentSignal?.reason || new DOMException("memberInfo aborted", "AbortError"));
+    abort(parentSignal?.reason || new DOMException("userAuths aborted", "AbortError"));
   };
 
   if (parentSignal) {
@@ -81,12 +83,11 @@ const createScopedSignal = (parentSignal) => {
     cleanup: () => {
       if (parentSignal) parentSignal.removeEventListener("abort", handleParentAbort);
     },
-    wasParentAborted: () => !!parentSignal?.aborted,
   };
 };
 
 const callWithLocalTimeout = async (candidate, requestUrl, requestInit, parentSignal) => {
-  const scope = createScopedSignal(parentSignal, 0);
+  const scope = createScopedSignal(parentSignal);
   let timeoutId = 0;
   try {
     const targetUrl = candidate?.requestUrl || requestUrl;
@@ -96,8 +97,8 @@ const callWithLocalTimeout = async (candidate, requestUrl, requestInit, parentSi
     }
     const timeoutPromise = new Promise((_, reject) => {
       timeoutId = window.setTimeout(() => {
-        scope.abort(new DOMException("memberInfo local timeout", "AbortError"));
-        reject(createApiError("memberInfo local timeout", { code: "LOCAL_TIMEOUT", source: candidate.source }));
+        scope.abort(new DOMException("userAuths local timeout", "AbortError"));
+        reject(createApiError("userAuths local timeout", { code: "LOCAL_TIMEOUT", source: candidate.source }));
       }, candidate.timeoutMs);
     });
     return await Promise.race([requestPromise, timeoutPromise]);
@@ -162,11 +163,71 @@ const resolveMemberAuthorization = (options = {}) => {
   return { value: "", source: "" };
 };
 
-export async function viewMemberInfo(apiFetch, payload = {}, options = {}) {
+const AUTH_ENUM_FIELD_KEYS = [
+  "enum",
+  "value",
+  "id",
+  "auth_enum",
+  "authEnum",
+  "user_auths_enum",
+  "userAuthsEnum",
+  "permission_enum",
+  "permissionEnum",
+  "auth_id",
+  "authId",
+];
+
+const toNumber = (value) => {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+};
+
+const extractEnumFromItem = (item) => {
+  if (item === null || item === undefined) return null;
+  if (typeof item === "number" || typeof item === "string") return toNumber(item);
+  if (typeof item !== "object") return null;
+  for (const key of AUTH_ENUM_FIELD_KEYS) {
+    const value = toNumber(item[key]);
+    if (value !== null) return value;
+  }
+  return null;
+};
+
+const toNumberList = (value) =>
+  (Array.isArray(value) ? value : [])
+    .map((item) => extractEnumFromItem(item))
+    .filter((item) => item !== null);
+
+export const extractUserAuthEnums = (payload) => {
+  const queue = [payload];
+  const visited = new Set();
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || typeof current !== "object" || visited.has(current)) continue;
+    visited.add(current);
+
+    const directEnum = extractEnumFromItem(current);
+    if (directEnum !== null) return [directEnum];
+
+    for (const key of ["auths", "user_auths", "enums", "permission_enums", "permissions", "list", "rows", "items"]) {
+      const list = toNumberList(current[key]);
+      if (list.length > 0) return [...new Set(list)];
+    }
+
+    for (const value of Object.values(current)) {
+      if (value && typeof value === "object") queue.push(value);
+    }
+  }
+  return [];
+};
+
+export const hasUserAuth = (payload, authEnum) => extractUserAuthEnums(payload).includes(Number(authEnum));
+
+export async function viewUserAuths(apiFetch, payload = {}, options = {}) {
   apiFetch = resolveLegacyCompatibleFetch(apiFetch); // 兼容老版本
   const injectedFetch = resolveMicroAppFetch();
   const auth = resolveMemberAuthorization(options);
-  const requestPath = "/ai/viewMemberInfo";
+  const requestPath = "/user/auths";
   const requestUrl = buildUrl(requestPath);
   const requestCandidates = [];
   if (typeof injectedFetch === "function") {
@@ -192,8 +253,8 @@ export async function viewMemberInfo(apiFetch, payload = {}, options = {}) {
     caller: (url, init) => fetch(url, init),
   });
 
-  console.info("[memberInfo] request:start", {
-    path: "/ai/viewMemberInfo",
+  console.info("[userAuths] request:start", {
+    path: requestPath,
     url: requestUrl,
     candidates: requestCandidates.map((item) => item.source),
     payload: payload || {},
@@ -201,12 +262,13 @@ export async function viewMemberInfo(apiFetch, payload = {}, options = {}) {
   });
   emitDebug(options, {
     type: "start",
-    path: "/ai/viewMemberInfo",
+    path: requestPath,
     url: requestUrl,
     candidates: requestCandidates.map((item) => item.source),
     payload: payload || {},
     authorizationSource: auth.source || "none",
   });
+
   const baseRequestInit = {
     method: "POST",
     body: JSON.stringify(payload || {}),
@@ -216,8 +278,7 @@ export async function viewMemberInfo(apiFetch, payload = {}, options = {}) {
   let source = requestCandidates[requestCandidates.length - 1].source;
   let lastError = null;
 
-  for (let index = 0; index < requestCandidates.length; index += 1) {
-    const candidate = requestCandidates[index];
+  for (const candidate of requestCandidates) {
     try {
       const headers = new Headers({ "Content-Type": "application/json" });
       if (auth.value) {
@@ -234,7 +295,7 @@ export async function viewMemberInfo(apiFetch, payload = {}, options = {}) {
     } catch (error) {
       if (options.signal?.aborted) throw error;
       lastError = error;
-      console.warn("[memberInfo] request:fallback", {
+      console.warn("[userAuths] request:fallback", {
         source: candidate.source,
         message: error instanceof Error ? error.message : String(error),
       });
@@ -243,12 +304,11 @@ export async function viewMemberInfo(apiFetch, payload = {}, options = {}) {
         source: candidate.source,
         message: error instanceof Error ? error.message : String(error),
       });
-      continue;
     }
   }
 
   if (!resp) {
-    throw createApiError(lastError?.message || "viewMemberInfo 请求失败", {
+    throw createApiError(lastError?.message || "viewUserAuths 请求失败", {
       source,
       data: lastError,
     });
@@ -256,14 +316,10 @@ export async function viewMemberInfo(apiFetch, payload = {}, options = {}) {
 
   const isFetchResponse = resp && typeof resp === "object" && typeof resp.json === "function";
   const rawData = isFetchResponse ? await resp.json().catch(() => ({})) : resp || {};
-  const data = normalizeMemberInfoPayload(rawData);
+  const data = normalizeUserAuthsPayload(rawData);
 
   if (isFetchResponse && !resp.ok) {
-    console.error("[memberInfo] request:error", {
-      source,
-      status: resp.status,
-      data,
-    });
+    console.error("[userAuths] request:error", { source, status: resp.status, data });
     throw createApiError(extractApiError(data), {
       source,
       status: resp.status,
@@ -273,11 +329,7 @@ export async function viewMemberInfo(apiFetch, payload = {}, options = {}) {
     });
   }
   if (data?.err_no !== undefined && Number(data.err_no) !== 0) {
-    console.error("[memberInfo] request:error", {
-      source,
-      err_no: data?.err_no,
-      data,
-    });
+    console.error("[userAuths] request:error", { source, status: resp?.status, err_no: data?.err_no, data });
     throw createApiError(extractApiError(data), {
       source,
       status: resp?.status,
@@ -287,8 +339,9 @@ export async function viewMemberInfo(apiFetch, payload = {}, options = {}) {
     });
   }
 
-  console.info("[memberInfo] request:success", {
+  console.info("[userAuths] request:success", {
     source,
+    enums: extractUserAuthEnums(data),
     data,
   });
   emitDebug(options, {

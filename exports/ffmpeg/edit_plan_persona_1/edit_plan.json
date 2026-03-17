@@ -1,0 +1,98 @@
+{
+  "plan_id": "edit_plan_persona_1",
+  "product": "成片",
+  "topic_index": 0,
+  "angle": "persona",
+  "title": "第一次买成片？别被参数绕晕，这样选才不踩坑",
+  "tracks": [
+    {
+      "track_id": "persona_video_track_1",
+      "track_type": "video",
+      "clips": [
+        {
+          "clip_id": "persona_clip_01",
+          "shot_id": "SHOT001",
+          "segment": "HOOK",
+          "duration_sec": 8.0,
+          "camera": "Close-up",
+          "scene": "A person looking overwhelmed by a complex spreadsheet or technical diagram.",
+          "action": "The person sighs and rubs their temples, looking confused and frustrated.",
+          "primary_asset": null,
+          "alternates": []
+        },
+        {
+          "clip_id": "persona_clip_02",
+          "shot_id": "SHOT002",
+          "segment": "VIEW",
+          "duration_sec": 12.0,
+          "camera": "Medium Shot",
+          "scene": "A split screen showing a generic parameter list on one side and a real-world scenario (e.g., video editing interface) on the other.",
+          "action": "The camera pans across the parameter list, then zooms into the real-world application, highlighting the disconnect.",
+          "primary_asset": null,
+          "alternates": []
+        },
+        {
+          "clip_id": "persona_clip_03",
+          "shot_id": "SHOT003",
+          "segment": "STEPS",
+          "duration_sec": 10.0,
+          "camera": "Overhead shot",
+          "scene": "A clean desk surface with sticky notes being placed down, representing steps.",
+          "action": "Hands place three distinct sticky notes on the desk, each with a simple icon representing a step (e.g., a checklist, a gear, a bar graph).",
+          "primary_asset": null,
+          "alternates": []
+        },
+        {
+          "clip_id": "persona_clip_04",
+          "shot_id": "SHOT004",
+          "segment": "STEPS",
+          "duration_sec": 10.0,
+          "camera": "Close-up",
+          "scene": "Focus on a single sticky note with an icon representing a 'key metric' (like speed or compatibility).",
+          "action": "A finger points to the icon, then draws a line to a simple graph icon on another note, emphasizing the connection.",
+          "primary_asset": null,
+          "alternates": []
+        },
+        {
+          "clip_id": "persona_clip_05",
+          "shot_id": "SHOT005",
+          "segment": "STEPS",
+          "duration_sec": 8.0,
+          "camera": "Tracking shot",
+          "scene": "A montage of simplified, animated graphics comparing two abstract 'solutions' based on the identified metrics.",
+          "action": "The graphics animate to show one solution outperforming the other on a specific metric bar.",
+          "primary_asset": null,
+          "alternates": []
+        },
+        {
+          "clip_id": "persona_clip_06",
+          "shot_id": "SHOT006",
+          "segment": "PRODUCT",
+          "duration_sec": 9.0,
+          "camera": "Medium Close-up",
+          "scene": "A friendly presenter (or animated character) giving a thumbs up next to a clean graphic representing the 'chosen' solution.",
+          "action": "The presenter smiles confidently and gestures towards the graphic, which shows positive checkmarks next to key metrics.",
+          "primary_asset": null,
+          "alternates": []
+        },
+        {
+          "clip_id": "persona_clip_07",
+          "shot_id": "SHOT007",
+          "segment": "CTA",
+          "duration_sec": 8.0,
+          "camera": "Close-up",
+          "scene": "A hand pointing towards the camera, then gesturing to a 'like' button animation.",
+          "action": "The hand performs a 'like' gesture, followed by an animated 'like' button appearing on screen.",
+          "primary_asset": null,
+          "alternates": []
+        }
+      ]
+    }
+  ],
+  "total_duration_sec": 65.0,
+  "missing_primary_asset_count": 7,
+  "prompt_version": "idea_script_prompt_v3_1",
+  "policy_version": "risk_policy_v1",
+  "config_hash": "17cc70d8b8c3cf892355dd4d316ca1c582601c16d83bbd77971020b517abfa18",
+  "generated_at": "2026-03-17T05:03:31+00:00"
+}
