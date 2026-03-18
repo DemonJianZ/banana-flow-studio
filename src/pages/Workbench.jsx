@@ -1443,25 +1443,24 @@ const PropertyPanel = ({
   const currentImageModelId = String(node?.data?.model || "").trim();
 
   useEffect(() => {
-    if (!node?.id) {
-      setShowAdvanced(false);
-      return;
-    }
-    setShowAdvanced(true);
+    const tid = window.setTimeout(() => {
+      setShowAdvanced(Boolean(node?.id));
+    }, 0);
+    return () => window.clearTimeout(tid);
   }, [node?.id]);
 
   useEffect(() => {
     let cancelled = false;
     if (!isRemoteImg2Video || typeof resolveModelParamsForId !== "function" || !currentVideoModelId) {
-      setVideoParamOptions({ resolution: EMPTY_LIST, ratio: EMPTY_LIST, duration: EMPTY_LIST });
-      setVideoParamLoading(false);
-      setVideoParamError("");
       return () => {
         cancelled = true;
       };
     }
-    setVideoParamLoading(true);
-    setVideoParamError("");
+    Promise.resolve().then(() => {
+      if (cancelled) return;
+      setVideoParamLoading(true);
+      setVideoParamError("");
+    });
     resolveModelParamsForId(currentVideoModelId)
       .then((paramList) => {
         if (cancelled) return;
@@ -1494,15 +1493,15 @@ const PropertyPanel = ({
   useEffect(() => {
     let cancelled = false;
     if (!isRemoteImageGen || typeof resolveModelParamsForId !== "function" || !currentImageModelId) {
-      setImageParamOptions({ taskType: EMPTY_LIST, size: EMPTY_LIST, ratio: EMPTY_LIST });
-      setImageParamLoading(false);
-      setImageParamError("");
       return () => {
         cancelled = true;
       };
     }
-    setImageParamLoading(true);
-    setImageParamError("");
+    Promise.resolve().then(() => {
+      if (cancelled) return;
+      setImageParamLoading(true);
+      setImageParamError("");
+    });
     resolveModelParamsForId(currentImageModelId)
       .then((paramList) => {
         if (cancelled) return;
@@ -1527,13 +1526,13 @@ const PropertyPanel = ({
 
   const remoteResolutionOptions = useMemo(() => {
     if (videoParamOptions.resolution.length) return videoParamOptions.resolution;
-    return node?.data?.model === VIDEO_MODEL_1_5 ? ["480p", "720p"] : ["480p", "720p", "1080p"];
-  }, [videoParamOptions.resolution, node?.data?.model]);
+    return currentVideoModelId === VIDEO_MODEL_1_5 ? ["480p", "720p"] : ["480p", "720p", "1080p"];
+  }, [videoParamOptions.resolution, currentVideoModelId]);
 
   const remoteDurationOptions = useMemo(() => {
     if (videoParamOptions.duration.length) return videoParamOptions.duration;
-    return node?.data?.model === VIDEO_MODEL_1_5 ? ["4", "5", "8", "12"] : ["3", "5", "10"];
-  }, [videoParamOptions.duration, node?.data?.model]);
+    return currentVideoModelId === VIDEO_MODEL_1_5 ? ["4", "5", "8", "12"] : ["3", "5", "10"];
+  }, [videoParamOptions.duration, currentVideoModelId]);
 
   const remoteRatioOptions = useMemo(() => {
     if (videoParamOptions.ratio.length) return videoParamOptions.ratio;
@@ -3913,16 +3912,6 @@ const handleNodeMouseDown = (e, nid) => {
     setViewport({ x: 0, y: 0, zoom: 1 });
   };
 
-  const autoLayout = () => {
-    pushHistory();
-    const sorted = [...nodes].sort((a, b) => {
-      const order = { [NODE_TYPES.INPUT]: 0, [NODE_TYPES.TEXT_INPUT]: 0, [NODE_TYPES.PROCESSOR]: 1, [NODE_TYPES.POST_PROCESSOR]: 2, [NODE_TYPES.VIDEO_GEN]: 3, [NODE_TYPES.OUTPUT]: 4 };
-      return order[a.type] - order[b.type];
-    });
-    const newNodes = sorted.map((n, i) => ({ ...n, x: 100 + i * 350, y: 200 + (i % 2) * 50 }));
-    setNodes(newNodes);
-  };
-
   const createConnectedVideoNode = (sourceNodeId) => {
     pushHistory();
     const sourceNode = nodes.find((n) => n.id === sourceNodeId);
@@ -4836,7 +4825,7 @@ const createConnectedImg2ImgBranch = useCallback(
               true,
             ),
           });
-        } catch (error) {
+        } catch {
           appendAssistantTurn(missionText, getChitchatReply(missionText), {
             routeDebug: buildRouteDebug(
               { ...route, reason: "local_chitchat_reply_fallback" },
@@ -5038,6 +5027,7 @@ const createConnectedImg2ImgBranch = useCallback(
       resolvePendingProductCandidate,
       runMissionOnTurn,
       sendAIChatLanguageStream,
+      apiFetch,
       runVideoMissionOnTurn,
       setPendingTaskForActiveSession,
       updateActiveAgentSession,

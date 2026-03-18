@@ -123,6 +123,31 @@ const extractApiError = (data) => {
   return String(d);
 };
 
+
+
+const FRIENDLY_ERROR_REASONS = [
+  "常见原因：",
+  "1. 提示词或文件涉及敏感内容，请修改内容后重试",
+  "2. 当前网络不稳定，请稍后重试",
+].join("\n");
+
+const buildFriendlyErrorMessage = (error, actionLabel = "任务处理") => {
+  const raw = String(error?.message || error || "").trim();
+  const lower = raw.toLowerCase();
+  const isSensitive = /(敏感|违规|违法|违禁|unsafe|policy|forbidden|blocked|审核|内容安全)/i.test(raw);
+  const isTimeout = /(timeout|timed out|超时|deadline|504|408|time limit)/i.test(raw);
+  const isNetwork = /(network|failed to fetch|err_network|ecconn|断网|网络|连接失败|socket|dns)/i.test(raw);
+
+  let headline = `${actionLabel}失败，请稍后重试。`;
+  if (isSensitive) {
+    headline = `${actionLabel}失败：可能触发内容安全限制，请调整提示词或文件后重试。`;
+  } else if (isTimeout || isNetwork || lower.includes("abort")) {
+    headline = `${actionLabel}失败：当前网络波动或请求超时，请稍后重试。`;
+  }
+
+  return [headline, FRIENDLY_ERROR_REASONS, raw ? `原始信息：${raw}` : ""].filter(Boolean).join("\n");
+};
+
 const normalizeText = (value) => String(value || "").trim().toLowerCase();
 
 const pickModelField = (record, keys) => {
@@ -142,11 +167,15 @@ const pickImageModelId = (list) => {
     pickModelField(item, ["ai_chat_model_id", "model_id", "id", "aiChatModelId", "ai_chat_model"]);
   const pickName = (item) =>
     pickModelField(item, ["ai_chat_model_name", "model_name", "name", "label", "title"]).toLowerCase();
+  const nanoBanana2 = items.find((item) => {
+    const n = pickName(item).replace(/[\s_-]+/g, "");
+    return n.includes("nanobanana2");
+  });
   const nano = items.find((item) => {
     const n = pickName(item);
     return n.includes("nano") || n.includes("banana");
   });
-  return pickId(nano || items[0]);
+  return pickId(nanoBanana2 || nano || items[0]);
 };
 
 const sortParamValues = (values) => {
@@ -773,7 +802,7 @@ const PipelineBatchVideo = () => {
               if (controller.signal.aborted) {
                 updateResult(task.id, { status: "cancelled", error: "任务已取消" });
               } else {
-                updateResult(task.id, { status: "error", error: err?.message || String(err) });
+                updateResult(task.id, { status: "error", error: buildFriendlyErrorMessage(err, "图片生成") });
               }
             } finally {
               setProgress((prev) => ({ done: prev.done + 1, total: prev.total }));
@@ -934,7 +963,7 @@ const PipelineBatchVideo = () => {
         if (!outputUrl) throw new Error("未返回动图结果");
         updateResult(item.id, { videoStatus: "success", videoUrl: outputUrl, videoError: null });
       } catch (err) {
-        updateResult(item.id, { videoStatus: "error", videoError: err?.message || String(err) });
+        updateResult(item.id, { videoStatus: "error", videoError: buildFriendlyErrorMessage(err, "动图生成") });
       }
     },
     [apiFetch, aspectRatio, updateResult, videoResolution],
@@ -1080,7 +1109,7 @@ const PipelineBatchVideo = () => {
         )}
 
         {error && (
-          <div className="flex items-center gap-2 bg-red-950/60 border border-red-800 text-red-200 px-4 py-2 rounded-lg text-sm">
+          <div className="flex items-start gap-2 bg-red-950/60 border border-red-800 text-red-200 px-4 py-2 rounded-lg text-sm whitespace-pre-line">
             <AlertCircle className="w-4 h-4" />
             {error}
           </div>
@@ -1897,7 +1926,7 @@ const PipelineBatchVideo = () => {
                   </div>
 
                   {item.error && (
-                    <div className="text-xs text-red-400 flex items-start gap-2">
+                    <div className="text-xs text-red-400 flex items-start gap-2 whitespace-pre-line">
                       <AlertCircle className="w-3 h-3 mt-0.5" />
                       {item.error}
                     </div>
@@ -2018,7 +2047,7 @@ const PipelineBatchVideo = () => {
                   </div>
 
                   {item.videoError && (
-                    <div className="text-xs text-red-400 flex items-start gap-2">
+                    <div className="text-xs text-red-400 flex items-start gap-2 whitespace-pre-line">
                       <AlertCircle className="w-3 h-3 mt-0.5" />
                       动图生成失败：{item.videoError}
                     </div>

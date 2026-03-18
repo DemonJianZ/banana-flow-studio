@@ -490,7 +490,7 @@ export default function AIChatImagePlayground() {
             {
               source: "window.fetch(api-server-curl-proxy)",
               timeoutMs: 0,
-              caller: (_url) =>
+              caller: () =>
                 fetch(backendCurlEndpoint, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
