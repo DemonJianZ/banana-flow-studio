@@ -791,6 +791,13 @@ const findAIChatParamValueId = (paramList, keywords = [], preferredValue = "") =
   if (!valueText) return "";
   const item = findAIChatParamItem(paramList, keywords);
   if (!item) return "";
+  const normalizeText = (text) =>
+    String(text || "")
+      .trim()
+      .toLowerCase()
+      .replace(/秒|second|seconds|sec|s/gi, "")
+      .replace(/\s+/g, "");
+  const normalizedPreferred = normalizeText(valueText);
   const values = sortParamValues(item?.param_values || EMPTY_LIST);
   for (const val of values) {
     const candidates = [
@@ -800,6 +807,21 @@ const findAIChatParamValueId = (paramList, keywords = [], preferredValue = "") =
     if (candidates.includes(valueText)) {
       const id = val?.param_value_id;
       return id === undefined || id === null || id === "" ? "" : String(id);
+    }
+    if (normalizedPreferred) {
+      const matched = candidates.some((candidate) => {
+        const normalizedCandidate = normalizeText(candidate);
+        if (!normalizedCandidate) return false;
+        return (
+          normalizedCandidate === normalizedPreferred ||
+          normalizedCandidate.includes(normalizedPreferred) ||
+          normalizedPreferred.includes(normalizedCandidate)
+        );
+      });
+      if (matched) {
+        const id = val?.param_value_id;
+        return id === undefined || id === null || id === "" ? "" : String(id);
+      }
     }
   }
   return "";
@@ -6677,6 +6699,7 @@ const createConnectedImg2ImgBranch = useCallback(
     ];
 
     const query = leftSidebarQuery.trim().toLowerCase();
+    const hasSidebarQuery = Boolean(query);
     const visibleSections = sections
       .map((section) => ({
         ...section,
@@ -6696,7 +6719,7 @@ const createConnectedImg2ImgBranch = useCallback(
         ) : (
           <div className={`flex flex-col space-y-2 ${isLeftSidebarCollapsed ? "items-center" : "items-stretch"}`}>
             {visibleSections.map((section, idx) => {
-              const sectionOpen = isLeftSidebarCollapsed ? true : !!leftSidebarSectionOpen[section.key];
+              const sectionOpen = isLeftSidebarCollapsed ? true : hasSidebarQuery ? true : !!leftSidebarSectionOpen[section.key];
               return (
                 <div
                   key={section.key}
