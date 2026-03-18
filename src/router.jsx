@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import React, { Children, createContext, isValidElement, useCallback, useContext, useEffect, useMemo, useState } from "react";
 
 const RouterContext = createContext(null);

@@ -3,6 +3,7 @@ set -euo pipefail
 
 
 BRANCH="dev"
+REMOTE_NAME="${REMOTE_NAME:-origin}"
 BACKEND_PORT="8083"
 FRONTEND_PORT="5174"
 DISPLAY_HOST="${DISPLAY_HOST:-192.168.20.30}"
@@ -49,6 +50,15 @@ ensure_worktree() {
     log "create worktree: $WORKTREE_ROOT ($BRANCH)"
     git -C "$SOURCE_REPO" worktree add "$WORKTREE_ROOT" "$BRANCH" >/dev/null
   fi
+}
+
+sync_latest_code() {
+  git -C "$WORKTREE_ROOT" remote get-url "$REMOTE_NAME" >/dev/null 2>&1 || die "git remote '$REMOTE_NAME' not found in $WORKTREE_ROOT"
+  log "fetch latest: ${REMOTE_NAME}/${BRANCH}"
+  git -C "$WORKTREE_ROOT" fetch "$REMOTE_NAME" "$BRANCH" --prune >/dev/null || die "failed to fetch ${REMOTE_NAME}/${BRANCH}"
+  git -C "$WORKTREE_ROOT" checkout "$BRANCH" >/dev/null 2>&1 || die "failed to checkout $BRANCH in $WORKTREE_ROOT"
+  git -C "$WORKTREE_ROOT" branch --set-upstream-to "${REMOTE_NAME}/${BRANCH}" "$BRANCH" >/dev/null 2>&1 || true
+  git -C "$WORKTREE_ROOT" pull --ff-only "$REMOTE_NAME" "$BRANCH" >/dev/null || die "failed to pull latest ${REMOTE_NAME}/${BRANCH}"
 }
 
 ensure_backend_env() {
@@ -119,6 +129,7 @@ ensure_cmd git
 ensure_cmd python3
 ensure_cmd npm
 ensure_worktree
+sync_latest_code
 ensure_backend_env
 ensure_frontend_env
 start_backend

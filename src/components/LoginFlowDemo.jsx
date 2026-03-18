@@ -12,7 +12,7 @@ import {
 function Node({
   title,
   subtitle,
-  icon: Icon,
+  icon,
   tone = "purple",
   x,
   y,
@@ -62,7 +62,7 @@ function Node({
       <div className="relative h-full p-3 flex gap-2.5 items-center">
         {/* 调整：减小图标容器和图标尺寸 */}
         <div className="shrink-0 p-1.5 rounded-lg bg-slate-950/40 border border-white/10">
-          <Icon className="w-3.5 h-3.5 text-white" />
+          {React.createElement(icon, { className: "w-3.5 h-3.5 text-white" })}
         </div>
         <div className="min-w-0 flex flex-col justify-center">
           {/* 调整：减小字号 */}
