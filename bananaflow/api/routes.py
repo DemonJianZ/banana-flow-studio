@@ -519,6 +519,49 @@ def _parse_sse_output(raw_text: str) -> Dict[str, Any]:
     }
 
 
+def _extract_fast_result_from_stream_line(line: str) -> tuple[str, str]:
+    """
+    尝试从单行 SSE data 中快速提取 image_url / done_error，减少整段重复解析导致的额外耗时。
+    返回: (image_url, done_error)
+    """
+    trimmed = str(line or "").strip()
+    if not trimmed.startswith("data:"):
+        return "", ""
+    payload_text = trimmed[5:].strip()
+    if not payload_text or payload_text == "[DONE]":
+        return "", ""
+
+    payload: Any = payload_text
+    try:
+        payload = json.loads(payload_text)
+    except Exception:
+        matched = re.search(r"https?://[^\s\"'<>]+", payload_text, re.IGNORECASE)
+        return (matched.group(0) if matched else ""), ""
+
+    if isinstance(payload, dict):
+        content = payload.get("content")
+        if isinstance(content, list):
+            for content_item in content:
+                if not isinstance(content_item, dict):
+                    continue
+                direct_url = str(content_item.get("url") or content_item.get("image_url") or content_item.get("imageUrl") or "").strip()
+                if direct_url:
+                    return direct_url, ""
+        url = _pick_first_image_url(payload)
+        if url:
+            return url, ""
+        for key in ["errMsg", "error", "message", "detail"]:
+            msg = str(payload.get(key) or "").strip()
+            if msg:
+                return "", msg
+    elif isinstance(payload, str):
+        url = _pick_first_image_url(payload)
+        if url:
+            return url, ""
+
+    return "", ""
+
+
 def _guess_suffix_from_mime(mime_type: str) -> str:
     text = str(mime_type or "").strip().lower()
     if not text:
@@ -990,6 +1033,8 @@ def _call_ai_chat_image_via_curl(req_id: str, req: AIChatCurlProxyRequest) -> Di
     process = None
     stdout_text = ""
     stderr_text = ""
+    fast_image_url = ""
+    fast_done_error = ""
     try:
         try:
             process = subprocess.Popen(
@@ -1007,10 +1052,12 @@ def _call_ai_chat_image_via_curl(req_id: str, req: AIChatCurlProxyRequest) -> Di
                 chunk = process.stdout.readline()
                 if chunk:
                     stdout_text += chunk
-                    parsed = _parse_sse_output(stdout_text)
-                    done_error = str(parsed.get("done_error") or "").strip()
-                    image_url = str(parsed.get("image_url") or "").strip()
-                    if image_url or done_error:
+                    line_image_url, line_done_error = _extract_fast_result_from_stream_line(chunk)
+                    if line_image_url and not fast_image_url:
+                        fast_image_url = line_image_url
+                    if line_done_error and not fast_done_error:
+                        fast_done_error = line_done_error
+                    if fast_image_url or fast_done_error:
                         break
                 elif process.poll() is not None:
                     break
@@ -1045,8 +1092,8 @@ def _call_ai_chat_image_via_curl(req_id: str, req: AIChatCurlProxyRequest) -> Di
         raise HTTPException(status_code=500, detail=f"curl 请求失败(code={return_code}): {stderr_text[:300]}")
 
     parsed = _parse_sse_output(stdout_text)
-    done_error = str(parsed.get("done_error") or "").strip()
-    image_url = str(parsed.get("image_url") or "").strip()
+    done_error = fast_done_error or str(parsed.get("done_error") or "").strip()
+    image_url = fast_image_url or str(parsed.get("image_url") or "").strip()
     ok = bool(image_url) and not done_error
 
     return {
