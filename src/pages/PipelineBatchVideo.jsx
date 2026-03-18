@@ -126,14 +126,37 @@ const extractApiError = (data) => {
 
 
 
-const FRIENDLY_ERROR_REASONS = [
-  "常见原因：",
-  "1. 提示词或文件涉及敏感内容，请修改内容后重试",
-  "2. 当前网络不稳定，请稍后重试",
-].join("\n");
+const extractAiChatDoneErrMsg = (rawText = "") => {
+  const text = String(rawText || "").trim();
+  if (!text) return "";
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  for (const line of lines) {
+    if (!line.startsWith("{") || !line.endsWith("}")) continue;
+    try {
+      const payload = JSON.parse(line);
+      const finish = payload?.finish;
+      const errMsg = String(payload?.errMsg || payload?.message || payload?.detail || "").trim();
+      if ((finish === true || String(finish).toLowerCase() === "true") && errMsg) {
+        return errMsg;
+      }
+    } catch {
+      // ignore non-json lines
+    }
+  }
+  return "";
+};
 
 const buildFriendlyErrorMessage = (error, actionLabel = "任务处理") => {
   const raw = String(error?.message || error || "").trim();
+  const aiChatErrMsg = extractAiChatDoneErrMsg(raw);
+  const userFacingErrMsg = aiChatErrMsg || raw;
+  if (userFacingErrMsg) {
+    return `${actionLabel}失败：${userFacingErrMsg}`;
+  }
+
   const lower = raw.toLowerCase();
   const isSensitive = /(敏感|违规|违法|违禁|unsafe|policy|forbidden|blocked|审核|内容安全)/i.test(raw);
   const isTimeout = /(timeout|timed out|超时|deadline|504|408|time limit)/i.test(raw);
@@ -145,8 +168,7 @@ const buildFriendlyErrorMessage = (error, actionLabel = "任务处理") => {
   } else if (isTimeout || isNetwork || lower.includes("abort")) {
     headline = `${actionLabel}失败：当前网络波动或请求超时，请稍后重试。`;
   }
-
-  return [headline, FRIENDLY_ERROR_REASONS, raw ? `原始信息：${raw}` : ""].filter(Boolean).join("\n");
+  return headline;
 };
 
 const normalizeText = (value) => String(value || "").trim().toLowerCase();
