@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   ArrowLeft,
@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import { Link } from "../router";
 import { useAuth } from "../auth/AuthProvider";
-import { resolveMemberAuthorizationInfo, viewAIChatModelParams, viewAIChatModels } from "../api/aiChat";
+import { resolveMemberAuthorizationInfo, viewAIChatModelParams } from "../api/aiChat";
 
 const SWAP_MODE_META = {
   face: {
@@ -74,6 +74,7 @@ const SWAP_MODE_OPTIONS = [
 ];
 const DEFAULT_VIDEO_PROMPT =
   "画面轻微晃动，镜头产生呼吸感；画面中不出现任何额外元素，商品保持静止。";
+const AI_CHAT_IMAGE_MODEL_ID = "10";
 const AI_CHAT_I2V_MODEL_ID = "6";
 const DEFAULT_VIDEO_DURATION = 3;
 const DEFAULT_VIDEO_RESOLUTION = "1080p";
@@ -135,35 +136,6 @@ const buildFriendlyErrorMessage = (error, actionLabel = "任务处理") => {
 };
 
 const normalizeText = (value) => String(value || "").trim().toLowerCase();
-
-const pickModelField = (record, keys) => {
-  if (!record || typeof record !== "object") return "";
-  for (const key of keys) {
-    const value = record?.[key];
-    const text = String(value ?? "").trim();
-    if (text) return text;
-  }
-  return "";
-};
-
-const pickImageModelId = (list) => {
-  const items = Array.isArray(list) ? list : [];
-  if (!items.length) return "";
-  const pickId = (item) =>
-    pickModelField(item, ["ai_chat_model_id", "model_id", "id", "aiChatModelId", "ai_chat_model"]);
-  const pickName = (item) =>
-    pickModelField(item, ["ai_chat_model_name", "model_name", "name", "label", "title"]).toLowerCase();
-  const nanoBanana2 = items.find((item) => {
-    const n = pickName(item).replace(/[\s_-]+/g, "");
-    return n.includes("nanobanana2");
-  });
-  const nano = items.find((item) => {
-    const n = pickName(item);
-    return n.includes("nano") || n.includes("banana");
-  });
-  return pickId(nanoBanana2 || nano || items[0]);
-};
-
 
 const sortParamValues = (values) => {
   const list = Array.isArray(values) ? values.slice() : [];
@@ -275,7 +247,7 @@ const PipelineSwapTrio = () => {
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [previewImage, setPreviewImage] = useState(null);
   const [previewVideo, setPreviewVideo] = useState(null);
-  const [aiChatImageModelId, setAiChatImageModelId] = useState("");
+  const [aiChatImageModelId] = useState(AI_CHAT_IMAGE_MODEL_ID);
   const resultsSeedRef = useRef([]);
   const aiChatModelParamsCacheRef = useRef(new Map());
   const aiChatSessionIdRef = useRef("");
@@ -308,28 +280,6 @@ const PipelineSwapTrio = () => {
     if (!progress.total) return 0;
     return Math.min(100, Math.round((progress.done / progress.total) * 100));
   }, [progress.done, progress.total]);
-
-  useEffect(() => {
-    let active = true;
-    const loadImageModel = async () => {
-      try {
-        const data = await viewAIChatModels(
-          apiFetch,
-          { module_enum: 1, part_enum: 2 },
-          { preferApiFetchFirst: true },
-        );
-        const list = Array.isArray(data?.list) ? data.list : Array.isArray(data?.data?.list) ? data.data.list : [];
-        const modelId = pickImageModelId(list);
-        if (active && modelId) setAiChatImageModelId(String(modelId));
-      } catch {
-        if (active) setAiChatImageModelId("");
-      }
-    };
-    loadImageModel();
-    return () => {
-      active = false;
-    };
-  }, [apiFetch]);
 
   const updateResult = useCallback((id, patch) => {
     setResults((prev) => {
