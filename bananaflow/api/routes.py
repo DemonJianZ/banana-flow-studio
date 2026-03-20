@@ -1,4 +1,5 @@
 # routes.py
+import asyncio
 import time
 import json
 import os
@@ -8,13 +9,16 @@ import hashlib
 import threading
 import subprocess
 import tempfile
+import shutil
 import urllib.request
 import mimetypes
+from datetime import datetime, timezone
 from contextlib import contextmanager, nullcontext
 from typing import Dict, Any, Optional, List
 from urllib.parse import unquote
 
-from fastapi import APIRouter, HTTPException, Request, Depends, Query, Response
+import httpx
+from fastapi import APIRouter, HTTPException, Request, Depends, Query, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from google.genai import types
@@ -28,11 +32,17 @@ from core.config import (
     AGENT_CHAT_HTTPS_PROXY,
     MODEL_COMFYUI_OVERLAYTEXT,
     MODEL_COMFYUI_RMBG,
+    MODEL_COMFYUI_REMOVE_WATERMARK,
     MODEL_COMFYUI_MULTI_ANGLESHOTS,
     MODEL_COMFYUI_VIDEO_UPSCALE,
     MODEL_COMFYUI_CONTROLNET,
     MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO,
     MODEL_COMFYUI_QWEN_I2V,
+    AI_CHAT_DOWNSTREAM_URL,
+    AI_CHAT_TASK_DB_PATH,
+    AI_CHAT_TASK_TEMP_DIR,
+    AI_CHAT_TASK_TIMEOUT_SEC,
+    AI_CHAT_TASK_MAX_RETRIES,
 )
 from core.logging import sys_logger
 from auth_routes import get_current_user
@@ -43,14 +53,24 @@ from schemas.api import (
     MultiImageRequest, MultiImageResponse,
     OverlayTextRequest, OverlayTextResponse,
     RmbgRequest, RmbgResponse,
+    RemoveWatermarkRequest, RemoveWatermarkResponse,
     MultiAngleShotsRequest, MultiAngleShotsResponse,
     VideoUpscaleRequest, VideoUpscaleResponse,
     ControlnetPoseVideoRequest, ControlnetPoseVideoResponse,
     VideoUpscaleTaskStartResponse, VideoUpscaleTaskStatusResponse,
     EditRequest, EditResponse,
     Img2VideoRequest, Img2VideoResponse,
+    AgentRequest,
     AgentVideoGenerationRequest, AgentVideoGenerationResponse, AgentVideoShotArtifact,
     AgentChitchatRequest, AgentChitchatResponse,
+    AIChatImageTaskSubmitResponse, AIChatImageTaskStatusResponse,
+)
+from storage.ai_chat_tasks import (
+    create_ai_chat_task,
+    get_ai_chat_task,
+    init_ai_chat_tasks_store,
+    mark_stale_ai_chat_tasks,
+    update_ai_chat_task,
 )
 
 from storage.prompt_log import PromptLogger, LogAnalyzer
@@ -61,6 +81,7 @@ from services.comfyui import (
     run_image_z_image_turbo_workflow,
     run_overlaytext_workflow,
     run_rmbg_workflow,
+    run_remove_watermark_workflow,
     run_multi_angleshots_workflow,
     run_qwen_i2v_workflow,
     run_controlnet_pose_video_workflow,
@@ -74,6 +95,7 @@ from prompts.business import build_business_prompt
 
 from agent.idea_script.orchestrator import IdeaScriptOrchestrator
 from agent.idea_script.schemas import EditPlan, IdeaScriptRequest, IdeaScriptResponse
+from agent.planner import agent_plan_impl
 from mcp.client import MCPClientError, MCPStdioClient
 from mcp.registry import MCPRegistryError, MCPToolInvocationError, get_global_registry
 from mcp.tool_export_ffmpeg import (
@@ -116,6 +138,14 @@ idea_script_orchestrator = IdeaScriptOrchestrator()
 idea_script_plan_cache: Dict[str, Dict[str, Any]] = {}
 idea_script_plan_cache_lock = threading.Lock()
 _tracer = _otel_trace.get_tracer(__name__) if _otel_trace else None
+_AI_CHAT_TASK_RETRY_BACKOFFS = (2, 5, 10)
+init_ai_chat_tasks_store(AI_CHAT_TASK_DB_PATH)
+mark_stale_ai_chat_tasks(
+    AI_CHAT_TASK_DB_PATH,
+    from_statuses=["PENDING", "RUNNING", "RETRYING"],
+    to_status="FAILED",
+    error="服务重启导致任务中断，请重新提交。",
+)
 
 
 class _NoopSpan:
@@ -209,12 +239,9 @@ _PREFERENCE_COMMAND_PATTERNS = [
 
 _MEMBER_API_BASE = os.getenv("MEMBER_API_BASE", "http://192.168.20.217:16313").rstrip("/")
 _MEMBER_API_AUTHORIZATION = str(os.getenv("MEMBER_API_AUTHORIZATION") or "").strip()
-_IDEA_SCRIPT_HTTP_PROXY = str(
-    os.getenv("IDEA_SCRIPT_HTTP_PROXY") or "http://szdayu:123456@124.243.168.90:16607"
-).strip()
-_IDEA_SCRIPT_HTTPS_PROXY = str(
-    os.getenv("IDEA_SCRIPT_HTTPS_PROXY") or "http://szdayu:123456@124.243.168.90:16607"
-).strip()
+_IDEA_SCRIPT_HTTP_PROXY = str(os.getenv("IDEA_SCRIPT_HTTP_PROXY") or "").strip()
+_IDEA_SCRIPT_HTTPS_PROXY = str(os.getenv("IDEA_SCRIPT_HTTPS_PROXY") or "").strip()
+_IDEA_SCRIPT_LLM_TIMEOUT_MESSAGE = "生成脚本超时，请稍后重试。"
 _AI_CHAT_MODEL_ID_NANO_BANANA_PRO = str(os.getenv("AI_CHAT_MODEL_ID_NANO_BANANA_PRO") or "").strip()
 _AI_CHAT_MODEL_ID_SEEDANCE_1_0 = str(os.getenv("AI_CHAT_MODEL_ID_SEEDANCE_1_0") or "").strip()
 _AI_CHAT_IMAGE_SIZE_ID_MAP = {
@@ -263,6 +290,331 @@ class AIChatCurlProxyRequest(BaseModel):
     timeout_seconds: Optional[int] = 120
 
 
+class _AIChatRetryableError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        raw_text: str = "",
+        response_json: Any = None,
+        error_type: str = "FAILED",
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.raw_text = raw_text
+        self.response_json = response_json
+        self.error_type = error_type
+
+
+class _AIChatNonRetryableError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        raw_text: str = "",
+        response_json: Any = None,
+        error_type: str = "FAILED",
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.raw_text = raw_text
+        self.response_json = response_json
+        self.error_type = error_type
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except Exception:
+        return None
+
+
+def _diff_ms(start: Optional[datetime], end: Optional[datetime]) -> Optional[int]:
+    if start is None or end is None:
+        return None
+    return max(0, int((end - start).total_seconds() * 1000))
+
+
+def clean_form_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    for _ in range(3):
+        if not (text.startswith('"') and text.endswith('"')):
+            break
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            break
+        if not isinstance(parsed, str):
+            break
+        next_text = str(parsed).strip()
+        if not next_text or next_text == text:
+            break
+        text = next_text
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        text = text[1:-1].strip()
+    return text
+
+
+def _sanitize_ai_chat_proxy_request(req: AIChatCurlProxyRequest) -> AIChatCurlProxyRequest:
+    payload = req.model_dump()
+    list_fields = {"tusd_file_remote_ids", "images"}
+    for key, value in list(payload.items()):
+        if key in list_fields:
+            payload[key] = [clean_form_value(item) for item in list(value or []) if clean_form_value(item)]
+            continue
+        if value is None:
+            continue
+        if isinstance(value, str):
+            payload[key] = clean_form_value(value)
+    timeout_value = payload.get("timeout_seconds")
+    try:
+        payload["timeout_seconds"] = int(str(timeout_value or "").strip() or AI_CHAT_TASK_TIMEOUT_SEC)
+    except Exception:
+        payload["timeout_seconds"] = AI_CHAT_TASK_TIMEOUT_SEC
+    return AIChatCurlProxyRequest(**payload)
+
+
+def _build_ai_chat_request_form(req: AIChatCurlProxyRequest) -> Dict[str, Any]:
+    clean_req = _sanitize_ai_chat_proxy_request(req)
+    return {
+        "endpoint": str(clean_req.endpoint or "").strip() or AI_CHAT_DOWNSTREAM_URL,
+        "authorization": clean_form_value(clean_req.authorization),
+        "history_ai_chat_record_id": clean_form_value(clean_req.history_ai_chat_record_id),
+        "module_enum": clean_form_value(clean_req.module_enum),
+        "part_enum": clean_form_value(clean_req.part_enum),
+        "message": clean_form_value(clean_req.message),
+        "ai_chat_session_id": clean_form_value(clean_req.ai_chat_session_id),
+        "ai_chat_model_id": clean_form_value(clean_req.ai_chat_model_id),
+        "ai_image_param_task_type_id": clean_form_value(clean_req.ai_image_param_task_type_id),
+        "ai_image_param_size_id": clean_form_value(clean_req.ai_image_param_size_id),
+        "ai_image_param_ratio_id": clean_form_value(clean_req.ai_image_param_ratio_id),
+        "ai_video_param_ratio_id": clean_form_value(clean_req.ai_video_param_ratio_id),
+        "ai_video_param_resolution_id": clean_form_value(clean_req.ai_video_param_resolution_id),
+        "ai_video_param_duration_id": clean_form_value(clean_req.ai_video_param_duration_id),
+        "tusd_file_remote_ids": [clean_form_value(item) for item in list(clean_req.tusd_file_remote_ids or []) if clean_form_value(item)],
+        "timeout_seconds": max(10, min(int(clean_req.timeout_seconds or AI_CHAT_TASK_TIMEOUT_SEC), 300)),
+    }
+
+
+def _build_ai_chat_public_task(task: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not task:
+        raise HTTPException(status_code=404, detail="task not found")
+    status = str(task.get("status") or "FAILED")
+    result = task.get("result_json")
+    if isinstance(result, dict):
+        result = dict(result)
+        request_form = result.get("request_form")
+        if isinstance(request_form, dict) and request_form.get("authorization"):
+            request_form = dict(request_form)
+            request_form["authorization"] = "***"
+            result["request_form"] = request_form
+    telemetry = _build_ai_chat_task_telemetry(task, result=result)
+    return {
+        "ok": status not in {"FAILED", "TIMEOUT"},
+        "task_id": str(task.get("task_id") or ""),
+        "status": status,
+        "retry_count": int(task.get("retry_count") or 0),
+        "progress_message": str(task.get("progress_message") or ""),
+        "result": result,
+        "telemetry": telemetry,
+        "error": str(task.get("error") or "") or None,
+        "created_at": str(task.get("created_at") or ""),
+        "updated_at": str(task.get("updated_at") or ""),
+    }
+
+
+def _build_ai_chat_task_telemetry(
+    task: Optional[Dict[str, Any]],
+    *,
+    result: Optional[Dict[str, Any]] = None,
+    runtime_end: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    if not task:
+        return {}
+    created_at = _parse_iso_datetime(task.get("created_at"))
+    started_at = _parse_iso_datetime(task.get("started_at"))
+    finished_at = _parse_iso_datetime(task.get("finished_at"))
+    updated_at = _parse_iso_datetime(task.get("updated_at"))
+    resolved_runtime_end = runtime_end or finished_at or updated_at or datetime.now(timezone.utc)
+    if result is None:
+        task_result = task.get("result_json")
+        result = dict(task_result) if isinstance(task_result, dict) else None
+    result_timings = result.get("timings") if isinstance(result, dict) else None
+    if not isinstance(result_timings, dict):
+        result_timings = {}
+    return {
+        "queue_wait_ms": _diff_ms(created_at, started_at),
+        "run_ms": _diff_ms(started_at, resolved_runtime_end) if started_at else None,
+        "wall_clock_ms": _diff_ms(created_at, resolved_runtime_end) if created_at else None,
+        "last_attempt_ms": int(task.get("last_duration_ms") or 0) or None,
+        "downstream_build_ms": result_timings.get("build_ms"),
+        "downstream_first_chunk_ms": result_timings.get("first_chunk_ms"),
+        "downstream_first_result_ms": result_timings.get("first_result_ms"),
+        "downstream_read_loop_ms": result_timings.get("read_loop_ms"),
+        "downstream_parse_ms": result_timings.get("parse_ms"),
+        "downstream_total_ms": result_timings.get("total_ms"),
+        "downstream_lines_read": result_timings.get("lines_read"),
+    }
+
+
+def _guess_suffix_from_filename(name: str, content_type: str = "") -> str:
+    filename = str(name or "").strip()
+    if filename:
+        _, ext = os.path.splitext(filename)
+        if ext:
+            return ext
+    return _guess_suffix_from_mime(content_type)
+
+
+def _ensure_ai_chat_task_dir(task_id: str) -> str:
+    task_dir = os.path.join(AI_CHAT_TASK_TEMP_DIR, str(task_id))
+    os.makedirs(task_dir, exist_ok=True)
+    return task_dir
+
+
+def _cleanup_ai_chat_task_dir(task_id: str) -> None:
+    task_dir = os.path.join(AI_CHAT_TASK_TEMP_DIR, str(task_id))
+    if os.path.isdir(task_dir):
+        shutil.rmtree(task_dir, ignore_errors=True)
+
+
+def _cleanup_stale_ai_chat_task_dirs(max_age_seconds: int = 24 * 3600) -> None:
+    base_dir = os.path.abspath(AI_CHAT_TASK_TEMP_DIR)
+    if not os.path.isdir(base_dir):
+        return
+    now_ts = time.time()
+    for entry in os.scandir(base_dir):
+        if not entry.is_dir():
+            continue
+        try:
+            age_seconds = now_ts - float(entry.stat().st_mtime)
+        except Exception:
+            continue
+        if age_seconds <= max_age_seconds:
+            continue
+        shutil.rmtree(entry.path, ignore_errors=True)
+
+
+def _write_image_bytes_to_task_file(image_bytes: bytes, *, suffix: str, task_id: str, index: int) -> str:
+    task_dir = _ensure_ai_chat_task_dir(task_id)
+    path = os.path.join(task_dir, f"image_{index}{suffix}")
+    with open(path, "wb") as f:
+        f.write(image_bytes)
+    return path
+
+
+def _materialize_image_to_task_file(image_value: str, *, task_id: str, index: int) -> Dict[str, Any]:
+    text = str(image_value or "").strip()
+    if not text:
+        raise ValueError(f"image[{index}] 为空")
+    if text.startswith("data:"):
+        mime_type, image_bytes = parse_data_url(text)
+        source = "data_url"
+    else:
+        with urllib.request.urlopen(text, timeout=20) as resp:
+            image_bytes = resp.read()
+            mime_type = resp.headers.get("Content-Type", "")
+        source = "remote_url"
+    if not image_bytes:
+        raise ValueError(f"image[{index}] 内容为空")
+    suffix = _guess_suffix_from_mime(mime_type)
+    path = _write_image_bytes_to_task_file(image_bytes, suffix=suffix, task_id=task_id, index=index)
+    return {
+        "path": path,
+        "filename": os.path.basename(path),
+        "content_type": mime_type or "application/octet-stream",
+        "size_bytes": int(len(image_bytes)),
+        "source": source,
+    }
+
+
+async def _save_upload_file_to_task_dir(upload: UploadFile, *, task_id: str, index: int) -> Dict[str, Any]:
+    content = await upload.read()
+    if not content:
+        raise ValueError(f"upload[{index}] 内容为空")
+    suffix = _guess_suffix_from_filename(getattr(upload, "filename", ""), getattr(upload, "content_type", "") or "")
+    path = _write_image_bytes_to_task_file(content, suffix=suffix, task_id=task_id, index=index)
+    return {
+        "path": path,
+        "filename": str(getattr(upload, "filename", "") or os.path.basename(path)),
+        "content_type": str(getattr(upload, "content_type", "") or "application/octet-stream"),
+        "size_bytes": int(len(content)),
+        "source": "upload_file",
+    }
+
+
+async def _parse_ai_chat_submission_request(request: Request, task_id: str) -> tuple[AIChatCurlProxyRequest, Dict[str, Any], List[Dict[str, Any]]]:
+    content_type = str(request.headers.get("content-type") or "").lower()
+    if "multipart/form-data" not in content_type:
+        payload = await request.json()
+        req = _sanitize_ai_chat_proxy_request(AIChatCurlProxyRequest(**(payload or {})))
+        form_payload = _build_ai_chat_request_form(req)
+        stored_files: List[Dict[str, Any]] = []
+        for idx, image_value in enumerate(req.images or []):
+            stored_files.append(_materialize_image_to_task_file(image_value, task_id=task_id, index=idx))
+        return req, form_payload, stored_files
+
+    form = await request.form()
+    scalar_fields: Dict[str, str] = {}
+    image_values: List[str] = []
+    remote_ids: List[str] = []
+    stored_files: List[Dict[str, Any]] = []
+    upload_index = 0
+    for key, value in form.multi_items():
+        normalized_key = str(key or "").strip()
+        if hasattr(value, "read") and hasattr(value, "filename"):
+            if normalized_key in {"files", "files[]", "images", "images[]"}:
+                stored_files.append(await _save_upload_file_to_task_dir(value, task_id=task_id, index=upload_index))
+                upload_index += 1
+            continue
+        cleaned = clean_form_value(value)
+        if not cleaned:
+            continue
+        if normalized_key in {"images", "images[]"}:
+            image_values.append(cleaned)
+            continue
+        if normalized_key in {"tusd_file_remote_ids", "tusd_file_remote_ids[]"}:
+            remote_ids.append(cleaned)
+            continue
+        scalar_fields[normalized_key] = cleaned
+
+    req = _sanitize_ai_chat_proxy_request(
+        AIChatCurlProxyRequest(
+            endpoint=scalar_fields.get("endpoint", ""),
+            authorization=scalar_fields.get("authorization", ""),
+            history_ai_chat_record_id=scalar_fields.get("history_ai_chat_record_id", ""),
+            module_enum=scalar_fields.get("module_enum", "1"),
+            part_enum=scalar_fields.get("part_enum", "2"),
+            message=scalar_fields.get("message", ""),
+            ai_chat_session_id=scalar_fields.get("ai_chat_session_id", ""),
+            ai_chat_model_id=scalar_fields.get("ai_chat_model_id", ""),
+            ai_image_param_task_type_id=scalar_fields.get("ai_image_param_task_type_id", ""),
+            ai_image_param_size_id=scalar_fields.get("ai_image_param_size_id", ""),
+            ai_image_param_ratio_id=scalar_fields.get("ai_image_param_ratio_id", ""),
+            ai_video_param_ratio_id=scalar_fields.get("ai_video_param_ratio_id", ""),
+            ai_video_param_resolution_id=scalar_fields.get("ai_video_param_resolution_id", ""),
+            ai_video_param_duration_id=scalar_fields.get("ai_video_param_duration_id", ""),
+            tusd_file_remote_ids=remote_ids,
+            images=image_values,
+            timeout_seconds=scalar_fields.get("timeout_seconds", str(AI_CHAT_TASK_TIMEOUT_SEC)),
+        )
+    )
+    form_payload = _build_ai_chat_request_form(req)
+    for idx, image_value in enumerate(req.images or [], start=len(stored_files)):
+        stored_files.append(_materialize_image_to_task_file(image_value, task_id=task_id, index=idx))
+    return req, form_payload, stored_files
+
 def _normalize_ai_chat_token(value: Optional[str]) -> str:
     text = str(value or "").strip()
     if not text:
@@ -310,9 +662,11 @@ def _map_param_id(id_map: Dict[str, str], raw_value: Any) -> str:
     return ""
 
 
-def _build_ai_chat_curl_command(req_id: str, req: AIChatCurlProxyRequest) -> tuple[List[str], Dict[str, str], List[str], str, int]:
-    endpoint = str(req.endpoint or "").strip() or f"{_MEMBER_API_BASE}/ai/aiChat"
-    authorization = str(req.authorization or "").strip()
+def _build_ai_chat_curl_command(req_id: str, req: AIChatCurlProxyRequest) -> tuple[List[str], Dict[str, str], List[str], str, int, Dict[str, Any]]:
+    req = _sanitize_ai_chat_proxy_request(req)
+    build_started_at = time.perf_counter()
+    endpoint = str(req.endpoint or "").strip() or AI_CHAT_DOWNSTREAM_URL or f"{_MEMBER_API_BASE}/ai/aiChat"
+    authorization = clean_form_value(req.authorization)
     timeout_seconds = max(10, min(int(req.timeout_seconds or 120), 300))
     if not authorization:
         raise HTTPException(status_code=400, detail="authorization 不能为空")
@@ -342,6 +696,8 @@ def _build_ai_chat_curl_command(req_id: str, req: AIChatCurlProxyRequest) -> tup
         str(timeout_seconds),
         "--header",
         f"authorization: {authorization}",
+        "--header",
+        f"x-request-id: {req_id}",
     ]
     request_form: Dict[str, str] = {}
     for key, value in form_pairs:
@@ -357,17 +713,40 @@ def _build_ai_chat_curl_command(req_id: str, req: AIChatCurlProxyRequest) -> tup
         cmd.extend(["--form", f"tusd_file_remote_ids[]={quoted}"])
 
     temp_files: List[str] = []
+    materialize_items: List[Dict[str, Any]] = []
     for idx, image_value in enumerate(req.images or []):
         if not str(image_value or "").strip():
             continue
+        item_started_at = time.perf_counter()
         temp_path = _materialize_image_to_temp_file(image_value, req_id, idx)
         temp_files.append(temp_path)
+        source_type = "data_url" if str(image_value or "").strip().startswith("data:") else "remote_url"
+        file_size = 0
+        try:
+            file_size = int(os.path.getsize(temp_path))
+        except Exception:
+            file_size = 0
+        materialize_items.append(
+            {
+                "index": idx,
+                "source": source_type,
+                "size_bytes": file_size,
+                "elapsed_ms": int((time.perf_counter() - item_started_at) * 1000),
+            }
+        )
         cmd.extend(["--form", f"files=@{temp_path}"])
-    return cmd, request_form, temp_files, endpoint, timeout_seconds
+    metrics = {
+        "build_ms": int((time.perf_counter() - build_started_at) * 1000),
+        "form_field_count": len(request_form),
+        "image_count": len(temp_files),
+        "remote_file_id_count": len(req.tusd_file_remote_ids or []),
+        "image_materialization": materialize_items,
+    }
+    return cmd, request_form, temp_files, endpoint, timeout_seconds, metrics
 
 
 def _to_quoted_form_value(value: Any) -> str:
-    text = str(value or "").strip()
+    text = clean_form_value(value)
     if not text:
         return ""
     if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
@@ -579,7 +958,7 @@ def _guess_suffix_from_mime(mime_type: str) -> str:
 
 
 def _materialize_image_to_temp_file(image_value: str, req_id: str, index: int) -> str:
-    text = str(image_value or "").strip()
+    text = clean_form_value(image_value)
     if not text:
         raise ValueError(f"image[{index}] 为空")
     if text.startswith("data:"):
@@ -595,6 +974,69 @@ def _materialize_image_to_temp_file(image_value: str, req_id: str, index: int) -
     with os.fdopen(fd, "wb") as f:
         f.write(image_bytes)
     return path
+
+
+def _schedule_graceful_curl_process_cleanup(
+    process: subprocess.Popen,
+    *,
+    req_id: str,
+    context: str,
+    grace_seconds: int = 5,
+) -> None:
+    def _cleanup() -> None:
+        try:
+            stdout_tail, stderr_tail = process.communicate(timeout=max(1, int(grace_seconds)))
+            sys_logger.info(
+                json.dumps(
+                    {
+                        "event": "ai_chat_curl_graceful_cleanup",
+                        "req_id": req_id,
+                        "context": context,
+                        "grace_seconds": grace_seconds,
+                        "return_code": process.returncode,
+                        "stdout_tail_chars": len(str(stdout_tail or "")),
+                        "stderr_tail_chars": len(str(stderr_tail or "")),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+            except Exception:
+                pass
+            try:
+                stdout_tail, stderr_tail = process.communicate(timeout=1)
+            except Exception:
+                stdout_tail, stderr_tail = "", ""
+            sys_logger.warning(
+                json.dumps(
+                    {
+                        "event": "ai_chat_curl_graceful_cleanup_timeout",
+                        "req_id": req_id,
+                        "context": context,
+                        "grace_seconds": grace_seconds,
+                        "return_code": process.returncode,
+                        "stdout_tail_chars": len(str(stdout_tail or "")),
+                        "stderr_tail_chars": len(str(stderr_tail or "")),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        except Exception as exc:
+            sys_logger.warning(
+                json.dumps(
+                    {
+                        "event": "ai_chat_curl_graceful_cleanup_error",
+                        "req_id": req_id,
+                        "context": context,
+                        "message": str(exc or "cleanup failed"),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    threading.Thread(target=_cleanup, name=f"ai-chat-curl-cleanup-{req_id}", daemon=True).start()
 
 
 def _parse_preference_command(text: str) -> Optional[Dict[str, str]]:
@@ -1028,13 +1470,34 @@ def multi_image_generate(req: MultiImageRequest, request: Request, current_user=
 
 
 def _call_ai_chat_image_via_curl(req_id: str, req: AIChatCurlProxyRequest) -> Dict[str, Any]:
-    cmd, request_form, temp_files, endpoint, timeout_seconds = _build_ai_chat_curl_command(req_id, req)
+    cmd, request_form, temp_files, endpoint, timeout_seconds, build_metrics = _build_ai_chat_curl_command(req_id, req)
     started_at = time.time()
+    started_perf = time.perf_counter()
     process = None
+    deferred_cleanup = False
     stdout_text = ""
     stderr_text = ""
     fast_image_url = ""
     fast_done_error = ""
+    first_chunk_ms = None
+    first_result_ms = None
+    read_loop_started_perf = time.perf_counter()
+    lines_read = 0
+    sys_logger.info(
+        json.dumps(
+            {
+                "event": "ai_chat_image_via_curl_start",
+                "req_id": req_id,
+                "endpoint": endpoint,
+                "module_enum": str(req.module_enum or ""),
+                "part_enum": str(req.part_enum or ""),
+                "ai_chat_model_id": str(req.ai_chat_model_id or ""),
+                "timeout_seconds": timeout_seconds,
+                "build_metrics": build_metrics,
+            },
+            ensure_ascii=False,
+        )
+    )
     try:
         try:
             process = subprocess.Popen(
@@ -1051,6 +1514,10 @@ def _call_ai_chat_image_via_curl(req_id: str, req: AIChatCurlProxyRequest) -> Di
                     raise HTTPException(status_code=504, detail=f"curl 请求超时({timeout_seconds}s)")
                 chunk = process.stdout.readline()
                 if chunk:
+                    lines_read += 1
+                    now_ms = int((time.perf_counter() - started_perf) * 1000)
+                    if first_chunk_ms is None:
+                        first_chunk_ms = now_ms
                     stdout_text += chunk
                     line_image_url, line_done_error = _extract_fast_result_from_stream_line(chunk)
                     if line_image_url and not fast_image_url:
@@ -1058,6 +1525,8 @@ def _call_ai_chat_image_via_curl(req_id: str, req: AIChatCurlProxyRequest) -> Di
                     if line_done_error and not fast_done_error:
                         fast_done_error = line_done_error
                     if fast_image_url or fast_done_error:
+                        if first_result_ms is None:
+                            first_result_ms = now_ms
                         break
                 elif process.poll() is not None:
                     break
@@ -1071,11 +1540,19 @@ def _call_ai_chat_image_via_curl(req_id: str, req: AIChatCurlProxyRequest) -> Di
         if process is not None:
             try:
                 if process.poll() is None:
-                    process.kill()
+                    if fast_image_url or fast_done_error:
+                        deferred_cleanup = True
+                        _schedule_graceful_curl_process_cleanup(
+                            process,
+                            req_id=req_id,
+                            context="ai_chat_image_via_curl",
+                        )
+                    else:
+                        process.kill()
             except Exception:
                 pass
             try:
-                if process.stderr is not None:
+                if process.stderr is not None and not deferred_cleanup:
                     stderr_text = str(process.stderr.read() or "")
             except Exception:
                 pass
@@ -1086,15 +1563,48 @@ def _call_ai_chat_image_via_curl(req_id: str, req: AIChatCurlProxyRequest) -> Di
                 pass
 
     elapsed_ms = int((time.time() - started_at) * 1000)
+    read_loop_ms = int((time.perf_counter() - read_loop_started_perf) * 1000)
     return_code = process.returncode if process is not None else 0
     if return_code not in (0, None) and not stdout_text:
         sys_logger.error(f"[{req_id}] ai_chat_image_via_curl error: code={return_code}, stderr={stderr_text[:500]}")
         raise HTTPException(status_code=500, detail=f"curl 请求失败(code={return_code}): {stderr_text[:300]}")
 
+    parse_started_perf = time.perf_counter()
     parsed = _parse_sse_output(stdout_text)
+    parse_ms = int((time.perf_counter() - parse_started_perf) * 1000)
     done_error = fast_done_error or str(parsed.get("done_error") or "").strip()
     image_url = fast_image_url or str(parsed.get("image_url") or "").strip()
     ok = bool(image_url) and not done_error
+    timings = {
+        "build_ms": int(build_metrics.get("build_ms") or 0),
+        "first_chunk_ms": first_chunk_ms,
+        "first_result_ms": first_result_ms,
+        "read_loop_ms": read_loop_ms,
+        "parse_ms": parse_ms,
+        "total_ms": elapsed_ms,
+        "lines_read": lines_read,
+    }
+    sys_logger.info(
+        json.dumps(
+            {
+                "event": "ai_chat_image_via_curl_done",
+                "req_id": req_id,
+                "ok": ok,
+                "endpoint": endpoint,
+                "module_enum": str(req.module_enum or ""),
+                "part_enum": str(req.part_enum or ""),
+                "ai_chat_model_id": str(req.ai_chat_model_id or ""),
+                "timings": timings,
+                "build_metrics": build_metrics,
+                "stdout_chars": len(stdout_text),
+                "stderr_chars": len(stderr_text),
+                "return_code": return_code,
+                "has_image_url": bool(image_url),
+                "has_done_error": bool(done_error),
+            },
+            ensure_ascii=False,
+        )
+    )
 
     return {
         "ok": ok,
@@ -1110,13 +1620,800 @@ def _call_ai_chat_image_via_curl(req_id: str, req: AIChatCurlProxyRequest) -> Di
         "events": parsed.get("events", []),
         "text": parsed.get("text", ""),
         "stderr": stderr_text[-2000:],
+        "timings": timings,
+        "build_metrics": build_metrics,
     }
+
+
+def _call_ai_chat_image_via_curl_from_task(
+    *,
+    req_id: str,
+    task_id: str,
+    request_form: Dict[str, Any],
+    request_files: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    build_started_at = time.perf_counter()
+    endpoint = str(request_form.get("endpoint") or AI_CHAT_DOWNSTREAM_URL).strip() or AI_CHAT_DOWNSTREAM_URL
+    authorization = clean_form_value(request_form.get("authorization"))
+    timeout_seconds = max(10, min(int(request_form.get("timeout_seconds") or AI_CHAT_TASK_TIMEOUT_SEC), 300))
+    if not authorization:
+        raise HTTPException(status_code=400, detail="authorization 不能为空")
+
+    cmd: List[str] = [
+        "curl",
+        "-sS",
+        "-N",
+        "--location",
+        endpoint,
+        "--max-time",
+        str(timeout_seconds),
+        "--header",
+        f"authorization: {authorization}",
+        "--header",
+        f"x-request-id: {req_id}",
+    ]
+    request_form_dump: Dict[str, str] = {}
+    for key in [
+        "history_ai_chat_record_id",
+        "module_enum",
+        "part_enum",
+        "message",
+        "ai_chat_session_id",
+        "ai_chat_model_id",
+        "ai_image_param_task_type_id",
+        "ai_image_param_size_id",
+        "ai_image_param_ratio_id",
+        "ai_video_param_ratio_id",
+        "ai_video_param_resolution_id",
+        "ai_video_param_duration_id",
+    ]:
+        quoted = _to_quoted_form_value(request_form.get(key))
+        if not quoted:
+            continue
+        request_form_dump[key] = quoted
+        cmd.extend(["--form", f"{key}={quoted}"])
+    for item in list(request_form.get("tusd_file_remote_ids") or []):
+        quoted = _to_quoted_form_value(item)
+        if not quoted:
+            continue
+        cmd.extend(["--form", f"tusd_file_remote_ids[]={quoted}"])
+
+    materialize_items: List[Dict[str, Any]] = []
+    for idx, item in enumerate(request_files):
+        path = str(item.get("path") or "").strip()
+        if not path or not os.path.exists(path):
+            raise HTTPException(status_code=400, detail=f"图片文件不存在: {path}")
+        file_size = 0
+        try:
+            file_size = int(os.path.getsize(path))
+        except Exception:
+            file_size = 0
+        materialize_items.append(
+            {
+                "index": idx,
+                "source": str(item.get("source") or "task_file"),
+                "size_bytes": file_size,
+                "elapsed_ms": 0,
+            }
+        )
+        cmd.extend(["--form", f"files=@{path}"])
+
+    build_metrics = {
+        "build_ms": int((time.perf_counter() - build_started_at) * 1000),
+        "form_field_count": len(request_form_dump),
+        "image_count": len(request_files),
+        "remote_file_id_count": len(list(request_form.get("tusd_file_remote_ids") or [])),
+        "image_materialization": materialize_items,
+        "task_id": task_id,
+    }
+
+    started_at = time.time()
+    started_perf = time.perf_counter()
+    process = None
+    deferred_cleanup = False
+    stdout_text = ""
+    stderr_text = ""
+    fast_image_url = ""
+    fast_done_error = ""
+    first_chunk_ms = None
+    first_result_ms = None
+    read_loop_started_perf = time.perf_counter()
+    lines_read = 0
+
+    sys_logger.info(
+        json.dumps(
+            {
+                "event": "ai_chat_image_via_curl_task_start",
+                "req_id": req_id,
+                "task_id": task_id,
+                "endpoint": endpoint,
+                "module_enum": str(request_form.get("module_enum") or ""),
+                "part_enum": str(request_form.get("part_enum") or ""),
+                "ai_chat_model_id": str(request_form.get("ai_chat_model_id") or ""),
+                "timeout_seconds": timeout_seconds,
+                "build_metrics": build_metrics,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        deadline = time.time() + timeout_seconds + 5
+        while True:
+            if time.time() > deadline:
+                raise HTTPException(status_code=504, detail=f"curl 请求超时({timeout_seconds}s)")
+            chunk = process.stdout.readline()
+            if chunk:
+                lines_read += 1
+                now_ms = int((time.perf_counter() - started_perf) * 1000)
+                if first_chunk_ms is None:
+                    first_chunk_ms = now_ms
+                stdout_text += chunk
+                line_image_url, line_done_error = _extract_fast_result_from_stream_line(chunk)
+                if line_image_url and not fast_image_url:
+                    fast_image_url = line_image_url
+                if line_done_error and not fast_done_error:
+                    fast_done_error = line_done_error
+                if fast_image_url or fast_done_error:
+                    if first_result_ms is None:
+                        first_result_ms = now_ms
+                    break
+            elif process.poll() is not None:
+                break
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail="服务器未安装 curl") from exc
+    finally:
+        if process is not None:
+            try:
+                if process.poll() is None:
+                    if fast_image_url or fast_done_error:
+                        deferred_cleanup = True
+                        _schedule_graceful_curl_process_cleanup(
+                            process,
+                            req_id=req_id,
+                            context=f"ai_chat_image_via_curl_task:{task_id}",
+                        )
+                    else:
+                        process.kill()
+            except Exception:
+                pass
+            try:
+                if process.stderr is not None and not deferred_cleanup:
+                    stderr_text = str(process.stderr.read() or "")
+            except Exception:
+                pass
+
+    elapsed_ms = int((time.time() - started_at) * 1000)
+    read_loop_ms = int((time.perf_counter() - read_loop_started_perf) * 1000)
+    return_code = process.returncode if process is not None else 0
+    if return_code not in (0, None) and not stdout_text:
+        raise HTTPException(status_code=500, detail=f"curl 请求失败(code={return_code}): {stderr_text[:300]}")
+
+    parse_started_perf = time.perf_counter()
+    parsed = _parse_sse_output(stdout_text)
+    parse_ms = int((time.perf_counter() - parse_started_perf) * 1000)
+    done_error = fast_done_error or str(parsed.get("done_error") or "").strip()
+    image_url = fast_image_url or str(parsed.get("image_url") or "").strip()
+    ok = bool(image_url) and not done_error
+    timings = {
+        "build_ms": int(build_metrics.get("build_ms") or 0),
+        "first_chunk_ms": first_chunk_ms,
+        "first_result_ms": first_result_ms,
+        "read_loop_ms": read_loop_ms,
+        "parse_ms": parse_ms,
+        "total_ms": elapsed_ms,
+        "lines_read": lines_read,
+    }
+    return {
+        "ok": ok,
+        "endpoint": endpoint,
+        "duration_ms": elapsed_ms,
+        "request_form": request_form_dump,
+        "request_files_count": len(request_files),
+        "mode": parsed.get("mode", "text"),
+        "image_url": image_url,
+        "done_error": done_error,
+        "source_session_id": parsed.get("source_session_id", ""),
+        "source_history_record_id": parsed.get("source_history_record_id", ""),
+        "events": parsed.get("events", []),
+        "text": parsed.get("text", ""),
+        "stderr": stderr_text[-2000:],
+        "raw_text": stdout_text[-20000:],
+        "timings": timings,
+        "build_metrics": build_metrics,
+    }
+
+
+def _decode_httpx_body(body: bytes, headers: Optional[Dict[str, Any]] = None) -> str:
+    if not body:
+        return ""
+    encoding = ""
+    if headers:
+        content_type = str(headers.get("content-type") or "")
+        matched = re.search(r"charset=([^\s;]+)", content_type, re.IGNORECASE)
+        if matched:
+            encoding = matched.group(1).strip().strip('"').strip("'")
+    for codec in [encoding, "utf-8", "utf-8-sig", "latin-1"]:
+        if not codec:
+            continue
+        try:
+            return body.decode(codec)
+        except Exception:
+            continue
+    return body.decode("utf-8", errors="replace")
+
+
+def _extract_error_message_from_payload(payload: Any) -> str:
+    if isinstance(payload, dict):
+        for key in ["detail", "message", "error", "errMsg"]:
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return json.dumps(payload, ensure_ascii=False)[:2000]
+    if isinstance(payload, list):
+        return json.dumps(payload, ensure_ascii=False)[:2000]
+    return str(payload or "").strip()
+
+
+async def _call_ai_chat_image_via_httpx_once(
+    *,
+    req_id: str,
+    task_id: str,
+    request_form: Dict[str, Any],
+    request_files: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    endpoint = str(request_form.get("endpoint") or AI_CHAT_DOWNSTREAM_URL).strip() or AI_CHAT_DOWNSTREAM_URL
+    authorization = clean_form_value(request_form.get("authorization"))
+    if not authorization:
+        raise _AIChatNonRetryableError("authorization 不能为空", status_code=400)
+
+    timeout_seconds = max(10, min(int(request_form.get("timeout_seconds") or AI_CHAT_TASK_TIMEOUT_SEC), 300))
+    timeout = httpx.Timeout(timeout_seconds, connect=30.0, read=float(timeout_seconds), write=60.0, pool=30.0)
+    headers = {
+        "authorization": authorization,
+        "x-request-id": req_id,
+    }
+    form_pairs: list[tuple[str, str]] = []
+    for key in [
+        "history_ai_chat_record_id",
+        "module_enum",
+        "part_enum",
+        "message",
+        "ai_chat_session_id",
+        "ai_chat_model_id",
+        "ai_image_param_task_type_id",
+        "ai_image_param_size_id",
+        "ai_image_param_ratio_id",
+        "ai_video_param_ratio_id",
+        "ai_video_param_resolution_id",
+        "ai_video_param_duration_id",
+    ]:
+        value = clean_form_value(request_form.get(key))
+        if value:
+            form_pairs.append((key, value))
+    for remote_id in list(request_form.get("tusd_file_remote_ids") or []):
+        cleaned = clean_form_value(remote_id)
+        if cleaned:
+            form_pairs.append(("tusd_file_remote_ids[]", cleaned))
+
+    started_perf = time.perf_counter()
+    first_chunk_ms = None
+    first_result_ms = None
+    lines_read = 0
+    raw_text = ""
+    parsed_json = None
+    fast_image_url = ""
+    fast_done_error = ""
+
+    files_payload = []
+    for item in request_files:
+        path = str(item.get("path") or "").strip()
+        if not path or not os.path.exists(path):
+            raise _AIChatNonRetryableError(f"图片文件不存在: {path}", status_code=400)
+        try:
+            with open(path, "rb") as f:
+                file_bytes = f.read()
+        except Exception as exc:
+            raise _AIChatNonRetryableError(f"读取图片文件失败: {path}", status_code=400) from exc
+        files_payload.append(
+            (
+                "files",
+                (
+                    str(item.get("filename") or os.path.basename(path)),
+                    file_bytes,
+                    str(item.get("content_type") or "application/octet-stream"),
+                ),
+            )
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                async with client.stream(
+                    "POST",
+                    endpoint,
+                    headers=headers,
+                    data=form_pairs,
+                    files=files_payload,
+                ) as resp:
+                    content_type = str(resp.headers.get("content-type") or "").lower()
+                    if resp.status_code >= 400:
+                        body = await resp.aread()
+                        raw_text = _decode_httpx_body(body, dict(resp.headers))
+                        try:
+                            parsed_json = json.loads(raw_text)
+                        except Exception:
+                            parsed_json = None
+                        message = _extract_error_message_from_payload(parsed_json if parsed_json is not None else raw_text) or f"HTTP {resp.status_code}"
+                        if resp.status_code in {502, 503, 504}:
+                            error_type = "TIMEOUT" if resp.status_code == 504 else "FAILED"
+                            raise _AIChatRetryableError(message, status_code=resp.status_code, raw_text=raw_text, response_json=parsed_json, error_type=error_type)
+                        raise _AIChatNonRetryableError(message, status_code=resp.status_code, raw_text=raw_text, response_json=parsed_json)
+
+                    if "application/json" in content_type:
+                        body = await resp.aread()
+                        raw_text = _decode_httpx_body(body, dict(resp.headers))
+                        try:
+                            parsed_json = json.loads(raw_text)
+                        except Exception:
+                            parsed_json = None
+                    else:
+                        chunks: List[str] = []
+                        async for line in resp.aiter_lines():
+                            if line is None:
+                                continue
+                            lines_read += 1
+                            now_ms = int((time.perf_counter() - started_perf) * 1000)
+                            if first_chunk_ms is None:
+                                first_chunk_ms = now_ms
+                            chunks.append(f"{line}\n")
+                            line_image_url, line_done_error = _extract_fast_result_from_stream_line(line)
+                            if line_image_url and not fast_image_url:
+                                fast_image_url = line_image_url
+                            if line_done_error and not fast_done_error:
+                                fast_done_error = line_done_error
+                            if fast_image_url or fast_done_error:
+                                if first_result_ms is None:
+                                    first_result_ms = now_ms
+                                break
+                        raw_text = "".join(chunks)
+            except httpx.ConnectTimeout as exc:
+                raise _AIChatRetryableError(f"connect timeout: {exc}", error_type="TIMEOUT") from exc
+            except httpx.ReadTimeout as exc:
+                raise _AIChatRetryableError(f"read timeout: {exc}", error_type="TIMEOUT") from exc
+            except httpx.ConnectError as exc:
+                raise _AIChatRetryableError(f"connect error: {exc}", error_type="FAILED") from exc
+            except httpx.TransportError as exc:
+                raise _AIChatRetryableError(f"network error: {exc}", error_type="FAILED") from exc
+
+        parse_started_perf = time.perf_counter()
+        if parsed_json is not None:
+            parsed = {
+                "events": [],
+                "text": raw_text,
+                "mode": "json",
+                "image_url": _pick_first_image_url(parsed_json),
+                "done_error": _extract_error_message_from_payload(parsed_json.get("done_error") if isinstance(parsed_json, dict) else ""),
+                "source_session_id": str(parsed_json.get("source_session_id") or parsed_json.get("ai_chat_session_id") or "") if isinstance(parsed_json, dict) else "",
+                "source_history_record_id": str(parsed_json.get("source_history_record_id") or parsed_json.get("history_ai_chat_record_id") or "") if isinstance(parsed_json, dict) else "",
+            }
+            if isinstance(parsed_json, dict) and not parsed["done_error"]:
+                parsed["done_error"] = _extract_error_message_from_payload(parsed_json.get("error") or parsed_json.get("message") or parsed_json.get("detail"))
+        else:
+            parsed = _parse_sse_output(raw_text)
+        parse_ms = int((time.perf_counter() - parse_started_perf) * 1000)
+        done_error = fast_done_error or str(parsed.get("done_error") or "").strip()
+        image_url = fast_image_url or str(parsed.get("image_url") or "").strip()
+        ok = bool(image_url) and not done_error
+        total_ms = int((time.perf_counter() - started_perf) * 1000)
+
+        return {
+            "ok": ok,
+            "endpoint": endpoint,
+            "duration_ms": total_ms,
+            "request_form": request_form,
+            "request_files_count": len(request_files),
+            "mode": parsed.get("mode", "text"),
+            "image_url": image_url,
+            "done_error": done_error,
+            "source_session_id": parsed.get("source_session_id", ""),
+            "source_history_record_id": parsed.get("source_history_record_id", ""),
+            "events": parsed.get("events", []),
+            "text": parsed.get("text", raw_text),
+            "stderr": "",
+            "raw_text": raw_text[-20000:],
+            "timings": {
+                "build_ms": 0,
+                "first_chunk_ms": first_chunk_ms,
+                "first_result_ms": first_result_ms,
+                "read_loop_ms": total_ms,
+                "parse_ms": parse_ms,
+                "total_ms": total_ms,
+                "lines_read": lines_read,
+            },
+            "build_metrics": {
+                "form_field_count": len(form_pairs),
+                "image_count": len(request_files),
+                "remote_file_id_count": len(list(request_form.get("tusd_file_remote_ids") or [])),
+            },
+            "response_json": parsed_json,
+        }
+    finally:
+        pass
+
+
+async def _run_ai_chat_image_task(task_id: str) -> None:
+    task = get_ai_chat_task(AI_CHAT_TASK_DB_PATH, task_id)
+    if not task:
+        return
+
+    request_form = dict(task.get("request_form_json") or {})
+    request_files = list(task.get("request_files_json") or [])
+    request_images = list(request_form.get("images") or [])
+    req_id = str(task.get("req_id") or uuid.uuid4().hex[:8])
+    ai_chat_model_id = clean_form_value(request_form.get("ai_chat_model_id"))
+    image_count = int(task.get("image_count") or len(request_files))
+    max_retries = max(0, min(int(AI_CHAT_TASK_MAX_RETRIES or 3), len(_AI_CHAT_TASK_RETRY_BACKOFFS)))
+    started_at_iso = _now_iso()
+    queue_wait_ms = _diff_ms(_parse_iso_datetime(task.get("created_at")), _parse_iso_datetime(started_at_iso))
+
+    sys_logger.info(
+        json.dumps(
+            {
+                "event": "ai_chat_image_task_start",
+                "req_id": req_id,
+                "task_id": task_id,
+                "status": "RUNNING",
+                "retry_count": 0,
+                "image_count": image_count,
+                "ai_chat_model_id": ai_chat_model_id,
+                "queue_wait_ms": queue_wait_ms,
+            },
+            ensure_ascii=False,
+        )
+    )
+    update_ai_chat_task(
+        AI_CHAT_TASK_DB_PATH,
+        task_id,
+        status="RUNNING",
+        progress_message="任务执行中",
+        started_at=started_at_iso,
+        error="",
+    )
+
+    last_error = ""
+    last_raw_text = ""
+    for attempt in range(max_retries + 1):
+        attempt_started = time.perf_counter()
+        try:
+            has_uploaded_files = any(str(item.get("source") or "") == "upload_file" for item in request_files)
+            if request_images and not has_uploaded_files:
+                proxy_req = AIChatCurlProxyRequest(
+                    endpoint=str(request_form.get("endpoint") or ""),
+                    authorization=str(request_form.get("authorization") or ""),
+                    history_ai_chat_record_id=str(request_form.get("history_ai_chat_record_id") or ""),
+                    module_enum=str(request_form.get("module_enum") or "1"),
+                    part_enum=str(request_form.get("part_enum") or "2"),
+                    message=str(request_form.get("message") or ""),
+                    ai_chat_session_id=str(request_form.get("ai_chat_session_id") or ""),
+                    ai_chat_model_id=str(request_form.get("ai_chat_model_id") or ""),
+                    ai_image_param_task_type_id=str(request_form.get("ai_image_param_task_type_id") or ""),
+                    ai_image_param_size_id=str(request_form.get("ai_image_param_size_id") or ""),
+                    ai_image_param_ratio_id=str(request_form.get("ai_image_param_ratio_id") or ""),
+                    ai_video_param_ratio_id=str(request_form.get("ai_video_param_ratio_id") or ""),
+                    ai_video_param_resolution_id=str(request_form.get("ai_video_param_resolution_id") or ""),
+                    ai_video_param_duration_id=str(request_form.get("ai_video_param_duration_id") or ""),
+                    tusd_file_remote_ids=list(request_form.get("tusd_file_remote_ids") or []),
+                    images=request_images,
+                    timeout_seconds=int(request_form.get("timeout_seconds") or AI_CHAT_TASK_TIMEOUT_SEC),
+                )
+                result = await asyncio.to_thread(_call_ai_chat_image_via_curl, req_id, proxy_req)
+            else:
+                result = await asyncio.to_thread(
+                    _call_ai_chat_image_via_curl_from_task,
+                    req_id=req_id,
+                    task_id=task_id,
+                    request_form=request_form,
+                    request_files=request_files,
+                )
+            done_error = str(result.get("done_error") or "").strip()
+            image_url = str(result.get("image_url") or "").strip()
+            if done_error:
+                raise _AIChatNonRetryableError(done_error, raw_text=str(result.get("raw_text") or ""))
+            if not image_url:
+                raise _AIChatNonRetryableError("下游未返回图片结果", raw_text=str(result.get("raw_text") or ""))
+
+            duration_ms = int((time.perf_counter() - attempt_started) * 1000)
+            finished_at_iso = _now_iso()
+            updated_task = update_ai_chat_task(
+                AI_CHAT_TASK_DB_PATH,
+                task_id,
+                status="SUCCESS",
+                retry_count=attempt,
+                progress_message="任务执行成功",
+                result=result,
+                error="",
+                raw_response_text=str(result.get("raw_text") or ""),
+                finished_at=finished_at_iso,
+                last_duration_ms=duration_ms,
+            )
+            telemetry = _build_ai_chat_task_telemetry(
+                updated_task,
+                result=result,
+                runtime_end=_parse_iso_datetime(finished_at_iso),
+            )
+            sys_logger.info(
+                json.dumps(
+                    {
+                        "event": "ai_chat_image_task_success",
+                        "req_id": req_id,
+                        "task_id": task_id,
+                        "status": "SUCCESS",
+                        "retry_count": attempt,
+                        "duration_ms": duration_ms,
+                        "image_count": image_count,
+                        "ai_chat_model_id": ai_chat_model_id,
+                        "telemetry": telemetry,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            _cleanup_ai_chat_task_dir(task_id)
+            return
+        except HTTPException as exc:
+            duration_ms = int((time.perf_counter() - attempt_started) * 1000)
+            detail = str(getattr(exc, "detail", "") or str(exc) or "请求失败")
+            status_code = int(getattr(exc, "status_code", 500) or 500)
+            is_retryable = status_code in {502, 503, 504} or re.search(r"(timeout|timed out|network|连接|socket|dns)", detail, re.IGNORECASE)
+            if is_retryable and attempt < max_retries:
+                backoff = int(_AI_CHAT_TASK_RETRY_BACKOFFS[attempt])
+                updated_task = update_ai_chat_task(
+                    AI_CHAT_TASK_DB_PATH,
+                    task_id,
+                    status="RETRYING",
+                    retry_count=attempt + 1,
+                    progress_message=f"任务重试中，{backoff}s 后发起第 {attempt + 1} 次重试",
+                    error=detail,
+                    last_duration_ms=duration_ms,
+                )
+                telemetry = _build_ai_chat_task_telemetry(updated_task, runtime_end=datetime.now(timezone.utc))
+                sys_logger.warning(
+                    json.dumps(
+                        {
+                            "event": "ai_chat_image_task_retry",
+                            "req_id": req_id,
+                            "task_id": task_id,
+                            "status": "RETRYING",
+                            "retry_count": attempt + 1,
+                            "duration_ms": duration_ms,
+                            "image_count": image_count,
+                            "ai_chat_model_id": ai_chat_model_id,
+                            "error": detail,
+                            "backoff_seconds": backoff,
+                            "telemetry": telemetry,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                await asyncio.sleep(backoff)
+                update_ai_chat_task(
+                    AI_CHAT_TASK_DB_PATH,
+                    task_id,
+                    status="RUNNING",
+                    progress_message=f"正在执行第 {attempt + 2} 次尝试",
+                    retry_count=attempt + 1,
+                    error=detail,
+                )
+                continue
+
+            final_status = "TIMEOUT" if status_code == 504 or re.search(r"(timeout|timed out)", detail, re.IGNORECASE) else "FAILED"
+            finished_at_iso = _now_iso()
+            updated_task = update_ai_chat_task(
+                AI_CHAT_TASK_DB_PATH,
+                task_id,
+                status=final_status,
+                retry_count=attempt,
+                progress_message="任务执行失败",
+                error=detail,
+                finished_at=finished_at_iso,
+                last_duration_ms=duration_ms,
+            )
+            telemetry = _build_ai_chat_task_telemetry(updated_task, runtime_end=_parse_iso_datetime(finished_at_iso))
+            sys_logger.error(
+                json.dumps(
+                    {
+                        "event": "ai_chat_image_task_timeout" if final_status == "TIMEOUT" else "ai_chat_image_task_failed",
+                        "req_id": req_id,
+                        "task_id": task_id,
+                        "status": final_status,
+                        "retry_count": attempt,
+                        "duration_ms": duration_ms,
+                        "image_count": image_count,
+                        "ai_chat_model_id": ai_chat_model_id,
+                        "error": detail,
+                        "telemetry": telemetry,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            _cleanup_ai_chat_task_dir(task_id)
+            return
+        except _AIChatRetryableError as exc:
+            last_error = str(exc)
+            last_raw_text = str(exc.raw_text or "")
+            duration_ms = int((time.perf_counter() - attempt_started) * 1000)
+            if attempt < max_retries:
+                backoff = int(_AI_CHAT_TASK_RETRY_BACKOFFS[attempt])
+                updated_task = update_ai_chat_task(
+                    AI_CHAT_TASK_DB_PATH,
+                    task_id,
+                    status="RETRYING",
+                    retry_count=attempt + 1,
+                    progress_message=f"任务重试中，{backoff}s 后发起第 {attempt + 1} 次重试",
+                    error=last_error,
+                    raw_response_text=last_raw_text[-20000:],
+                    last_duration_ms=duration_ms,
+                )
+                telemetry = _build_ai_chat_task_telemetry(updated_task, runtime_end=datetime.now(timezone.utc))
+                sys_logger.warning(
+                    json.dumps(
+                        {
+                            "event": "ai_chat_image_task_retry",
+                            "req_id": req_id,
+                            "task_id": task_id,
+                            "status": "RETRYING",
+                            "retry_count": attempt + 1,
+                            "duration_ms": duration_ms,
+                            "image_count": image_count,
+                            "ai_chat_model_id": ai_chat_model_id,
+                            "error": last_error,
+                            "backoff_seconds": backoff,
+                            "telemetry": telemetry,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                await asyncio.sleep(backoff)
+                update_ai_chat_task(
+                    AI_CHAT_TASK_DB_PATH,
+                    task_id,
+                    status="RUNNING",
+                    progress_message=f"正在执行第 {attempt + 2} 次尝试",
+                    retry_count=attempt + 1,
+                    error=last_error,
+                )
+                continue
+
+            final_status = "TIMEOUT" if exc.error_type == "TIMEOUT" else "FAILED"
+            finished_at_iso = _now_iso()
+            updated_task = update_ai_chat_task(
+                AI_CHAT_TASK_DB_PATH,
+                task_id,
+                status=final_status,
+                retry_count=attempt,
+                progress_message="任务执行失败",
+                error=last_error,
+                raw_response_text=last_raw_text[-20000:],
+                finished_at=finished_at_iso,
+                last_duration_ms=duration_ms,
+            )
+            telemetry = _build_ai_chat_task_telemetry(updated_task, runtime_end=_parse_iso_datetime(finished_at_iso))
+            sys_logger.error(
+                json.dumps(
+                    {
+                        "event": "ai_chat_image_task_timeout" if final_status == "TIMEOUT" else "ai_chat_image_task_failed",
+                        "req_id": req_id,
+                        "task_id": task_id,
+                        "status": final_status,
+                        "retry_count": attempt,
+                        "duration_ms": duration_ms,
+                        "image_count": image_count,
+                        "ai_chat_model_id": ai_chat_model_id,
+                        "error": last_error,
+                        "telemetry": telemetry,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            _cleanup_ai_chat_task_dir(task_id)
+            return
+        except _AIChatNonRetryableError as exc:
+            duration_ms = int((time.perf_counter() - attempt_started) * 1000)
+            finished_at_iso = _now_iso()
+            updated_task = update_ai_chat_task(
+                AI_CHAT_TASK_DB_PATH,
+                task_id,
+                status="FAILED",
+                retry_count=attempt,
+                progress_message="任务执行失败",
+                error=str(exc),
+                raw_response_text=str(exc.raw_text or "")[-20000:],
+                finished_at=finished_at_iso,
+                last_duration_ms=duration_ms,
+            )
+            telemetry = _build_ai_chat_task_telemetry(updated_task, runtime_end=_parse_iso_datetime(finished_at_iso))
+            sys_logger.error(
+                json.dumps(
+                    {
+                        "event": "ai_chat_image_task_failed",
+                        "req_id": req_id,
+                        "task_id": task_id,
+                        "status": "FAILED",
+                        "retry_count": attempt,
+                        "duration_ms": duration_ms,
+                        "image_count": image_count,
+                        "ai_chat_model_id": ai_chat_model_id,
+                        "error": str(exc),
+                        "telemetry": telemetry,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            _cleanup_ai_chat_task_dir(task_id)
+            return
+        except Exception as exc:
+            duration_ms = int((time.perf_counter() - attempt_started) * 1000)
+            message = str(exc or "未知错误")
+            finished_at_iso = _now_iso()
+            updated_task = update_ai_chat_task(
+                AI_CHAT_TASK_DB_PATH,
+                task_id,
+                status="FAILED",
+                retry_count=attempt,
+                progress_message="任务执行失败",
+                error=message,
+                finished_at=finished_at_iso,
+                last_duration_ms=duration_ms,
+            )
+            telemetry = _build_ai_chat_task_telemetry(updated_task, runtime_end=_parse_iso_datetime(finished_at_iso))
+            sys_logger.error(
+                json.dumps(
+                    {
+                        "event": "ai_chat_image_task_failed",
+                        "req_id": req_id,
+                        "task_id": task_id,
+                        "status": "FAILED",
+                        "retry_count": attempt,
+                        "duration_ms": duration_ms,
+                        "image_count": image_count,
+                        "ai_chat_model_id": ai_chat_model_id,
+                        "error": message,
+                        "telemetry": telemetry,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            _cleanup_ai_chat_task_dir(task_id)
+            return
 
 
 @router.post("/api/ai_chat_stream_via_curl")
 def ai_chat_stream_via_curl(req: AIChatCurlProxyRequest, request: Request):
     req_id = getattr(request.state, "req_id", uuid.uuid4().hex[:8])
-    cmd, _, temp_files, _, timeout_seconds = _build_ai_chat_curl_command(req_id, req)
+    cmd, _, temp_files, endpoint, timeout_seconds, build_metrics = _build_ai_chat_curl_command(req_id, req)
+    sys_logger.info(
+        json.dumps(
+            {
+                "event": "ai_chat_stream_via_curl_start",
+                "req_id": req_id,
+                "endpoint": endpoint,
+                "module_enum": str(req.module_enum or ""),
+                "part_enum": str(req.part_enum or ""),
+                "ai_chat_model_id": str(req.ai_chat_model_id or ""),
+                "timeout_seconds": timeout_seconds,
+                "build_metrics": build_metrics,
+            },
+            ensure_ascii=False,
+        )
+    )
 
     def _cleanup() -> None:
         for path in temp_files:
@@ -1189,10 +2486,85 @@ def ai_chat_stream_via_curl(req: AIChatCurlProxyRequest, request: Request):
     )
 
 
-@router.post("/api/ai_chat_image_via_curl", response_model=Dict[str, Any])
-def ai_chat_image_via_curl(req: AIChatCurlProxyRequest, request: Request):
+@router.post("/api/ai_chat_image_via_curl", response_model=AIChatImageTaskSubmitResponse)
+async def ai_chat_image_via_curl(request: Request):
+    submit_started = time.perf_counter()
     req_id = getattr(request.state, "req_id", uuid.uuid4().hex[:8])
-    return _call_ai_chat_image_via_curl(req_id=req_id, req=req)
+    task_id = f"ai_chat_task_{uuid.uuid4().hex}"
+    _cleanup_stale_ai_chat_task_dirs()
+    try:
+        parsed_req, request_form, request_files = await _parse_ai_chat_submission_request(request, task_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _cleanup_ai_chat_task_dir(task_id)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not clean_form_value(request_form.get("authorization")):
+        request_form["authorization"] = _resolve_member_authorization(request)
+    authorization = clean_form_value(request_form.get("authorization"))
+    if not authorization:
+        _cleanup_ai_chat_task_dir(task_id)
+        raise HTTPException(status_code=400, detail="authorization 不能为空")
+
+    request_form = {
+        **request_form,
+        "images": list(parsed_req.images or []),
+        "tusd_file_remote_ids": list(parsed_req.tusd_file_remote_ids or []),
+    }
+
+    task = create_ai_chat_task(
+        AI_CHAT_TASK_DB_PATH,
+        task_id=task_id,
+        req_id=req_id,
+        status="PENDING",
+        progress_message="任务已提交",
+        endpoint=str(request_form.get("endpoint") or AI_CHAT_DOWNSTREAM_URL),
+        ai_chat_model_id=clean_form_value(request_form.get("ai_chat_model_id")),
+        image_count=len(request_files),
+        request_form=request_form,
+        request_files=request_files,
+    )
+    sys_logger.info(
+        json.dumps(
+            {
+                "event": "ai_chat_image_task_submitted",
+                "req_id": req_id,
+                "task_id": task_id,
+                "status": "PENDING",
+                "retry_count": 0,
+                "duration_ms": int((time.perf_counter() - submit_started) * 1000),
+                "image_count": len(request_files),
+                "ai_chat_model_id": clean_form_value(request_form.get("ai_chat_model_id")),
+                "telemetry": {
+                    "submit_handling_ms": int((time.perf_counter() - submit_started) * 1000),
+                    "queue_wait_ms": 0,
+                    "run_ms": None,
+                    "wall_clock_ms": 0,
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+    asyncio.create_task(_run_ai_chat_image_task(task_id))
+    return AIChatImageTaskSubmitResponse(
+        ok=True,
+        task_id=task_id,
+        status=str(task.get("status") or "PENDING"),
+        message="任务已提交",
+    )
+
+
+@router.get("/api/ai_chat_image_via_curl/{task_id}", response_model=AIChatImageTaskStatusResponse)
+def get_ai_chat_image_task_status(task_id: str):
+    task = get_ai_chat_task(AI_CHAT_TASK_DB_PATH, task_id)
+    public_task = _build_ai_chat_public_task(task)
+    return AIChatImageTaskStatusResponse(**public_task)
+
+
+@router.post("/api/agent/plan", response_model=Dict[str, Any])
+def agent_plan(req: AgentRequest, request: Request):
+    return agent_plan_impl(req, request)
 
 
 @router.post("/api/local/text2img", response_model=Text2ImgResponse)
@@ -1444,6 +2816,55 @@ def remove_background(req: RmbgRequest, request: Request, current_user=Depends(_
             req.model_dump(),
             "",
             {"model": MODEL_COMFYUI_RMBG},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=_user_id_for_log(current_user),
+            inputs_full=req.model_dump(),
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/remove_watermark", response_model=RemoveWatermarkResponse)
+def remove_watermark(req: RemoveWatermarkRequest, request: Request, current_user=Depends(_get_current_user_optional)):
+    req_id = request.state.req_id
+    t0 = time.time()
+
+    try:
+        img_bytes = run_remove_watermark_workflow(
+            req_id=req_id,
+            image_data_url=req.image,
+            size=req.size,
+            aspect_ratio=req.aspect_ratio,
+        )
+
+        if not img_bytes:
+            raise RuntimeError("No image returned")
+
+        output_data_url = bytes_to_data_url(img_bytes)
+        prompt_logger.log(
+            req_id,
+            "remove_watermark",
+            req.model_dump(),
+            "",
+            {"model": MODEL_COMFYUI_REMOVE_WATERMARK, "size": req.size, "ar": req.aspect_ratio},
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=_user_id_for_log(current_user),
+            inputs_full=req.model_dump(),
+            output_full={"images": [output_data_url]},
+        )
+        _record_usage_if_authed(current_user, MODEL_COMFYUI_REMOVE_WATERMARK)
+        return RemoveWatermarkResponse(image=output_data_url)
+
+    except Exception as e:
+        sys_logger.error(f"[{req_id}] RemoveWatermark Error: {e}")
+        prompt_logger.log(
+            req_id,
+            "remove_watermark",
+            req.model_dump(),
+            "",
+            {"model": MODEL_COMFYUI_REMOVE_WATERMARK},
             {"file": "mem"},
             time.time() - t0,
             user_id=_user_id_for_log(current_user),
@@ -2537,6 +3958,8 @@ def agent_idea_script(
             inputs_full=req.model_dump(),
             error=str(e),
         )
+        if "idea_script_llm_timeout" in str(e):
+            raise HTTPException(status_code=504, detail=_IDEA_SCRIPT_LLM_TIMEOUT_MESSAGE)
         raise HTTPException(status_code=500, detail=str(e))
 
 

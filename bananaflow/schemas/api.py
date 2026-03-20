@@ -91,6 +91,14 @@ class RmbgRequest(BaseModel):
 class RmbgResponse(BaseModel):
     image: str
 
+class RemoveWatermarkRequest(BaseModel):
+    image: str
+    size: Optional[str] = None
+    aspect_ratio: Optional[str] = None
+
+class RemoveWatermarkResponse(BaseModel):
+    image: str
+
 class MultiAngleShotsRequest(BaseModel):
     image: str
     config: Optional[Dict[str, Any]] = Field(default_factory=dict)
@@ -165,6 +173,26 @@ class AgentChitchatRequest(BaseModel):
 class AgentChitchatResponse(BaseModel):
     text: str = Field(default="")
     model: str = Field(default="")
+
+
+class AIChatImageTaskSubmitResponse(BaseModel):
+    ok: bool = True
+    task_id: str
+    status: str
+    message: str = "任务已提交"
+
+
+class AIChatImageTaskStatusResponse(BaseModel):
+    ok: bool = True
+    task_id: str
+    status: str
+    retry_count: int = 0
+    progress_message: str = ""
+    result: Optional[Dict[str, Any]] = None
+    telemetry: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: str = ""
+    updated_at: str = ""
 
 class VideoUpscaleTaskStartResponse(BaseModel):
     task_id: str

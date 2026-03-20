@@ -7,11 +7,20 @@ from typing import Any, Dict, List, Optional, TypedDict
 
 from google.genai import types
 
-from core.config import MODEL_AGENT, MODEL_GEMINI
+from core.config import (
+    AGENT_MODEL_HTTP_PROXY,
+    AGENT_MODEL_HTTPS_PROXY,
+    MODEL_AGENT,
+    MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO,
+    MODEL_COMFYUI_QWEN_I2V,
+    MODEL_GEMINI,
+    VIDEO_MODEL_1_0,
+    VIDEO_MODEL_1_5,
+)
 from core.logging import sys_logger
 from core.rate_limit import run_agent_call
 from schemas.agent import AgentOut
-from services.genai_client import get_client
+from services.genai_client import get_client, generate_content_with_proxy
 
 from agent.system_prompt import agent_system_prompt
 from agent.normalizer import safe_json_load, normalize_patch
@@ -31,6 +40,34 @@ except Exception:
 _GRAPH_CLOSER = None
 _GRAPH = None
 _CHECKPOINTER = None
+
+PROCESSOR_MODES = {
+    "text2img",
+    "local_text2img",
+    "multi_image_generate",
+    "bg_replace",
+    "gesture_swap",
+    "product_swap",
+    "rmbg",
+    "feature_extract",
+    "multi_angleshots",
+    "video_upscale",
+}
+POST_PROCESSOR_MODES = {"relight", "upscale"}
+VIDEO_GEN_MODES = {"img2video", "local_img2video"}
+PROMPT_REQUIRED_MODES = {"text2img", "local_text2img", "multi_image_generate"}
+SIZE_TEMPLATE_MODES = {
+    "text2img",
+    "local_text2img",
+    "multi_image_generate",
+    "rmbg",
+    "feature_extract",
+}
+VIDEO_ALLOWED_MODELS = {
+    MODEL_COMFYUI_QWEN_I2V,
+    VIDEO_MODEL_1_0,
+    VIDEO_MODEL_1_5,
+}
 
 
 class PlanState(TypedDict, total=False):
@@ -96,26 +133,39 @@ def _validate_business_rules(out: Dict[str, Any]) -> None:
             ntype = node.get("type")
             if ntype in ("processor", "post_processor", "video_gen"):
                 data = node.get("data") or {}
-
-                # processor/post_processor model 强制
-                if ntype in ("processor", "post_processor"):
-                    if data.get("model") != MODEL_GEMINI:
-                        raise ValueError("processor.data.model must be fixed to MODEL_GEMINI")
-
-                if not data.get("mode"):
+                mode = str(data.get("mode") or "").strip()
+                if not mode:
                     raise ValueError("processor.data.mode required")
 
-                # prompt：对 text2img / multi_image_generate / edit / img2video 都要求存在
-                if not data.get("prompt"):
-                    raise ValueError("processor.data.prompt required")
+                if ntype == "processor" and mode not in PROCESSOR_MODES:
+                    raise ValueError(f"unsupported processor mode: {mode}")
+                if ntype == "post_processor" and mode not in POST_PROCESSOR_MODES:
+                    raise ValueError(f"unsupported post_processor mode: {mode}")
+                if ntype == "video_gen" and mode not in VIDEO_GEN_MODES:
+                    raise ValueError(f"unsupported video_gen mode: {mode}")
+
+                prompt = str(data.get("prompt") or "").strip()
+                if mode in PROMPT_REQUIRED_MODES and not prompt:
+                    raise ValueError(f"{mode} requires data.prompt")
 
                 tpl = data.get("templates") or {}
-                if "size" not in tpl or "aspect_ratio" not in tpl:
-                    raise ValueError("processor.data.templates.size/aspect_ratio required")
+                if mode in SIZE_TEMPLATE_MODES:
+                    if "size" not in tpl or "aspect_ratio" not in tpl:
+                        raise ValueError(f"{mode} requires templates.size/aspect_ratio")
 
-                if data.get("mode") == "edit":
-                    if not data.get("edit_mode"):
-                        raise ValueError("edit requires data.edit_mode")
+                if ntype in ("processor", "post_processor"):
+                    model = str(data.get("model") or "").strip()
+                    if mode == "local_text2img" and model and model != MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO:
+                        raise ValueError("local_text2img model must be comfyui-image-z-image-turbo when provided")
+                    if mode != "local_text2img" and model and model not in {MODEL_GEMINI, MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO}:
+                        raise ValueError(f"unsupported processor model: {model}")
+
+                if ntype == "video_gen":
+                    model = str(data.get("model") or "").strip()
+                    if mode == "local_img2video" and model and model != MODEL_COMFYUI_QWEN_I2V:
+                        raise ValueError("local_img2video model must be comfyui-qwen-i2v when provided")
+                    if mode == "img2video" and model and model not in VIDEO_ALLOWED_MODELS:
+                        raise ValueError(f"unsupported img2video model: {model}")
 
 
 def _validate_structural_sanity(state: PlanState, out: Dict[str, Any]) -> None:
@@ -208,7 +258,7 @@ def _node_generate_patch(state: PlanState) -> PlanState:
 
     # ❗不要用 response_schema：Gemini API 会报 additionalProperties 不支持
     def _call() -> str:
-        resp = client.models.generate_content(
+        resp = generate_content_with_proxy(
             model=MODEL_AGENT,
             contents=[
                 types.Part(text=agent_system_prompt()),
@@ -219,6 +269,8 @@ def _node_generate_patch(state: PlanState) -> PlanState:
                 max_output_tokens=1400,
                 response_mime_type="application/json",
             ),
+            http_proxy=AGENT_MODEL_HTTP_PROXY,
+            https_proxy=AGENT_MODEL_HTTPS_PROXY,
         )
         return resp.candidates[0].content.parts[0].text
 
@@ -276,12 +328,15 @@ Hard rules:
 - If current canvas is empty, ensure patch creates a runnable minimal workflow:
   add at least one AI node (processor/post_processor/video_gen) AND an output node.
 
-Reminder of model requirement:
-- processor/post_processor data.model MUST be "{MODEL_GEMINI}".
+Reminder of valid modes:
+- processor: {sorted(PROCESSOR_MODES)}
+- post_processor: {sorted(POST_PROCESSOR_MODES)}
+- video_gen: {sorted(VIDEO_GEN_MODES)}
+- Never use the deprecated synthetic mode "edit".
 """
 
     def _call() -> str:
-        resp = client.models.generate_content(
+        resp = generate_content_with_proxy(
             model=MODEL_AGENT,
             contents=[
                 types.Part(text=SYSTEM),
@@ -292,6 +347,8 @@ Reminder of model requirement:
                 max_output_tokens=1200,
                 response_mime_type="application/json",
             ),
+            http_proxy=AGENT_MODEL_HTTP_PROXY,
+            https_proxy=AGENT_MODEL_HTTPS_PROXY,
         )
         return resp.candidates[0].content.parts[0].text
 

@@ -37,6 +37,18 @@ def _build_client():
         return genai.Client(api_key=API_KEY)
     return genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
 
+
+def generate_content_with_proxy(model, contents, config, http_proxy=None, https_proxy=None):
+    if http_proxy or https_proxy:
+        with _temporary_proxy_env(http_proxy=http_proxy, https_proxy=https_proxy):
+            client = _build_client()
+            return client.models.generate_content(model=model, contents=contents, config=config)
+
+    client = get_client()
+    if client is None:
+        raise RuntimeError("AI client not initialized")
+    return client.models.generate_content(model=model, contents=contents, config=config)
+
 def init_client():
     global _client
     if _client is not None:

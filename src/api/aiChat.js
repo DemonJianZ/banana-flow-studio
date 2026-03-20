@@ -36,9 +36,35 @@ const createApiError = (message, extras = {}) => {
   return error;
 };
 
+const shouldBypassFetchFallback = (e) => {
+  const ctorName = String(e?.constructor?.name || "").trim();
+  return ctorName === "HttpUserNotExistError" || ctorName === "HttpUserTokenExpiredError";
+};
+
 const emitDebug = (options, event) => {
   if (typeof options?.onDebug === "function") options.onDebug(event);
 };
+
+const delayWithSignal = (ms, signal) =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason || new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const timerId = window.setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      window.clearTimeout(timerId);
+      cleanup();
+      reject(signal.reason || new DOMException("Aborted", "AbortError"));
+    };
+    const cleanup = () => {
+      if (signal) signal.removeEventListener("abort", onAbort);
+    };
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+  });
 
 const resolveMicroAppFetch = () => {
   try {
@@ -131,16 +157,22 @@ const buildRequestCandidates = (apiFetch, path, options = {}) => {
   if (options.preferApiFetchFirst) {
     if (apiFetchCandidate) candidates.push(apiFetchCandidate);
     if (microAppCandidate) candidates.push(microAppCandidate);
+    candidates.push({
+      source: "window.fetch(member-api)",
+      requestUrl,
+      timeoutMs: 0,
+      caller: (url, init) => fetch(url, init),
+    });
   } else {
     if (microAppCandidate) candidates.push(microAppCandidate);
+    candidates.push({
+      source: "window.fetch(member-api)",
+      requestUrl,
+      timeoutMs: 0,
+      caller: (url, init) => fetch(url, init),
+    });
     if (apiFetchCandidate) candidates.push(apiFetchCandidate);
   }
-  candidates.push({
-    source: "window.fetch(member-api)",
-    requestUrl,
-    timeoutMs: 0,
-    caller: (url, init) => fetch(url, init),
-  });
   return { requestUrl, candidates };
 };
 
@@ -200,6 +232,20 @@ const resolveMemberAuthorization = (options = {}) => {
 };
 
 export const resolveMemberAuthorizationInfo = (options = {}) => resolveMemberAuthorization(options);
+
+export const AI_CHAT_ANCHOR_MODULE_ENUM = 3;
+export const AI_CHAT_ANCHOR_OPERATE_ENUM_1 = 1; // 打开新对话
+export const AI_CHAT_ANCHOR_OPERATE_ENUM_2 = 2; // 切换模型
+export const AI_CHAT_ANCHOR_OPERATE_ENUM_3 = 3; // 切换对话模式
+export const AI_CHAT_ANCHOR_OPERATE_ENUM_4 = 4; // 打开页面
+export const AI_CHAT_ANCHOR_OPERATE_ENUM_5 = 5; // 刷新页面
+
+export const AI_CHAT_PART_ENUM_203 = 203; // 图片生成
+export const AI_CHAT_PART_ENUM_204 = 204; // 视频生成
+export const AI_CHAT_PART_ENUM_207 = 207; // 特征提取
+export const AI_CHAT_PART_ENUM_209 = 209; // 三合一换图
+export const AI_CHAT_PART_ENUM_210 = 210; // 批量动图
+export const AI_CHAT_PART_ENUM_211 = 211; // 批量花字
 
 const LOGIN_REQUIRED_MESSAGE_PATTERN = /请登录后[再在]操作/;
 
@@ -278,6 +324,7 @@ const postJson = async (apiFetch, path, payload = {}, options = {}) => {
       break;
     } catch (error) {
       if (options.signal?.aborted) throw error;
+      if (shouldBypassFetchFallback(error)) throw error;
       lastError = error;
       console.warn("[aiChatApi] request:fallback", {
         path,
@@ -351,6 +398,111 @@ export async function viewAIChatModelParams(apiFetch, payload = {}, options = {}
 
 export async function viewAIChatModels(apiFetch, payload = {}, options = {}) {
   return postJson(apiFetch, "/ai/viewAIChatModels", payload, options);
+}
+
+export async function aiChatAnchor(apiFetch, payload = {}, options = {}) {
+  const normalizedPayload = {
+    ...payload,
+    module_enum: AI_CHAT_ANCHOR_MODULE_ENUM,
+  };
+  return postJson(apiFetch, "/ai/aiChatAnchor", normalizedPayload, options);
+}
+
+export async function submitAIChatImageTask(apiFetch, payload = {}, options = {}) {
+  const submitResp = await apiFetch("/api/ai_chat_image_via_curl", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload || {}),
+    signal: options.signal,
+  });
+  const submitData = await submitResp.json().catch(() => ({}));
+  if (!submitResp.ok) {
+    throw createApiError(extractApiError(submitData), {
+      path: "/api/ai_chat_image_via_curl",
+      status: submitResp.status,
+      data: submitData,
+    });
+  }
+
+  const taskId = String(submitData?.task_id || "").trim();
+  if (!taskId) {
+    throw createApiError("aiChat 任务提交失败：未返回 task_id", {
+      path: "/api/ai_chat_image_via_curl",
+      data: submitData,
+    });
+  }
+
+  emitDebug(options, {
+    type: "task_submitted",
+    path: "/api/ai_chat_image_via_curl",
+    response: submitData,
+  });
+
+  const pollIntervalMs = Math.max(400, Number(options.pollIntervalMs || 1200));
+  const timeoutMs = Math.max(pollIntervalMs, Number(options.timeoutMs || 300000));
+  const startedAt = Date.now();
+  const pollPath = `/api/ai_chat_image_via_curl/${encodeURIComponent(taskId)}`;
+
+  while (true) {
+    if (options.signal?.aborted) {
+      throw options.signal.reason || new DOMException("Aborted", "AbortError");
+    }
+    if (Date.now() - startedAt > timeoutMs) {
+      throw createApiError("aiChat 任务轮询超时", {
+        path: pollPath,
+        taskId,
+        code: "TASK_POLL_TIMEOUT",
+      });
+    }
+
+    const statusResp = await apiFetch(pollPath, {
+      method: "GET",
+      signal: options.signal,
+    });
+    const statusData = await statusResp.json().catch(() => ({}));
+    if (!statusResp.ok) {
+      throw createApiError(extractApiError(statusData), {
+        path: pollPath,
+        taskId,
+        status: statusResp.status,
+        data: statusData,
+      });
+    }
+
+    emitDebug(options, {
+      type: "task_status",
+      path: pollPath,
+      response: statusData,
+    });
+
+    const status = String(statusData?.status || "").trim().toUpperCase();
+    if (status === "SUCCESS") {
+      const result = statusData?.result && typeof statusData.result === "object" ? statusData.result : {};
+      return {
+        ...result,
+        task_id: taskId,
+        task_status: status,
+        task_meta: statusData,
+      };
+    }
+
+    if (status === "FAILED" || status === "TIMEOUT") {
+      const result = statusData?.result && typeof statusData.result === "object" ? statusData.result : {};
+      const errorMessage =
+        String(result?.done_error || "").trim() ||
+        String(statusData?.error || "").trim() ||
+        `aiChat 任务${status === "TIMEOUT" ? "超时" : "失败"}`;
+      throw createApiError(errorMessage, {
+        path: pollPath,
+        taskId,
+        status,
+        data: statusData,
+        result,
+      });
+    }
+
+    await delayWithSignal(pollIntervalMs, options.signal);
+  }
 }
 
 const appendQuotedFormValue = (formData, key, value) => {

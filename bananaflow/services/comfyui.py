@@ -20,6 +20,7 @@ from core.config import (
     COMFYUI_URL,
     COMFYUI_OVERLAYTEXT_PATH,
     COMFYUI_RMBG_PATH,
+    COMFYUI_REMOVE_WATERMARK_PATH,
     COMFYUI_MULTI_ANGLESHOTS_PATH,
     COMFYUI_IMAGE_Z_IMAGE_TURBO_PATH,
     COMFYUI_VIDEO_WAN_I2V_PATH,
@@ -818,6 +819,42 @@ def run_rmbg_workflow(
     uploaded = _upload_image(img_bytes, upload_name)
 
     _set_node_input(workflow, "3", "image", uploaded)
+
+    client_id = uuid.uuid4().hex
+    sys_logger.info(f"[{req_id}] ComfyUI queue prompt client_id={client_id}")
+    prompt_id = _queue_prompt(workflow, client_id)
+
+    history = _wait_for_history(prompt_id)
+    image_info = _pick_output_image(history)
+    return _download_image(image_info)
+
+
+def run_remove_watermark_workflow(
+    *,
+    req_id: str,
+    image_data_url: str,
+    size: Optional[str] = None,
+    aspect_ratio: Optional[str] = None,
+) -> bytes:
+    workflow = _load_workflow(COMFYUI_REMOVE_WATERMARK_PATH)
+    workflow = copy.deepcopy(workflow)
+
+    mime_type, img_bytes = parse_data_url(image_data_url)
+    img_bytes, orientation_fixed = _normalize_orientation_if_needed(img_bytes)
+    img_bytes, resized = _resize_image_if_needed(img_bytes, size, aspect_ratio)
+    ext = "png"
+    if not resized and not orientation_fixed:
+        if "jpeg" in mime_type or "jpg" in mime_type:
+            ext = "jpg"
+        elif "webp" in mime_type:
+            ext = "webp"
+
+    upload_name = f"remove-watermark-{uuid.uuid4().hex}.{ext}"
+    sys_logger.info(f"[{req_id}] Uploading image to ComfyUI: {upload_name}")
+    uploaded = _upload_image(img_bytes, upload_name)
+
+    load_node_id = _find_workflow_node_id(workflow, ["LoadImage"], ["image"]) or "78"
+    _set_node_input(workflow, load_node_id, "image", uploaded)
 
     client_id = uuid.uuid4().hex
     sys_logger.info(f"[{req_id}] ComfyUI queue prompt client_id={client_id}")

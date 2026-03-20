@@ -1,6 +1,7 @@
 import { extractProductKeyword } from "../api/agentCanvas";
 
 export type Intent =
+  | "CANVAS"
   | "CHITCHAT"
   | "HELP"
   | "SCRIPT"
@@ -79,10 +80,50 @@ const VIDEO_KEYWORDS = [
   "i2v",
 ];
 
+const CANVAS_KEYWORDS = [
+  "画布",
+  "工作流",
+  "workflow",
+  "节点",
+  "组件",
+  "搭建",
+  "编排",
+  "串联",
+  "连接",
+  "流程",
+  "自动搭建",
+  "自动编排",
+  "帮我搭",
+  "帮我建",
+  "帮我排",
+];
+
+const CANVAS_COMPONENT_TERMS = [
+  "提示词输入",
+  "上传",
+  "图片上传",
+  "视频上传",
+  "图片生成",
+  "文生图",
+  "图生图",
+  "视频生成",
+  "图生视频",
+  "本地文生图",
+  "本地图生视频",
+  "背景移除",
+  "抠图",
+  "特征提取",
+  "多角度镜头",
+  "输出",
+  "结果输出",
+  "rmbg",
+];
+
 const WEAK_SCRIPT_TERMS = ["脚本", "口播", "选题", "爆款", "文案", "带货"];
 const WEAK_STORYBOARD_TERMS = ["分镜", "镜头", "画面", "shot"];
 const WEAK_EXPORT_TERMS = ["导出", "打包", "渲染", "ffmpeg", "render"];
 const WEAK_VIDEO_TERMS = ["成片", "视频", "动态视频", "视频生成", "i2v"];
+const WEAK_CANVAS_TERMS = ["画布", "工作流", "节点", "组件", "搭建", "编排", "流程", "串联"];
 const WEAK_HELP_TERMS = ["帮助", "怎么用", "你能做什么", "示例"];
 const WEAK_CHITCHAT_TERMS = ["你好", "在吗", "谢谢", "哈哈", "晚安", "拜拜"];
 
@@ -118,6 +159,11 @@ function hasTerm(text: string, terms: string[]): string | null {
 }
 
 function weakIntentFallback(raw: string, normalized: string): DetectIntentResult | null {
+  const weakCanvas = hasTerm(normalized, WEAK_CANVAS_TERMS);
+  if (weakCanvas) {
+    return { intent: "CANVAS", reason: `weak:${weakCanvas}` };
+  }
+
   const weakScript = hasTerm(normalized, WEAK_SCRIPT_TERMS);
   if (weakScript) {
     const product = extractProductKeyword(raw) || undefined;
@@ -153,12 +199,18 @@ export function detectIntent(text: string, sessionState: any): DetectIntentResul
   const normalized = normalizeText(raw);
   if (!raw) return { intent: "UNKNOWN", reason: "empty_input" };
 
+  const hitCanvas = findFirstKeyword(normalized, CANVAS_KEYWORDS);
   const hitExport = findFirstKeyword(normalized, EXPORT_KEYWORDS);
   const hitVideo = findFirstKeyword(normalized, VIDEO_KEYWORDS);
   const hitStoryboard = findFirstKeyword(normalized, STORYBOARD_KEYWORDS);
   const hitScript = findFirstKeyword(normalized, SCRIPT_KEYWORDS);
   const hitHelp = findFirstKeyword(normalized, HELP_KEYWORDS);
   const hitChitchat = findFirstKeyword(normalized, CHITCHAT_KEYWORDS);
+
+  const hasCanvasComponent = CANVAS_COMPONENT_TERMS.some((term) => normalized.includes(term.toLowerCase()));
+  if (hitCanvas || hasCanvasComponent) {
+    return { intent: "CANVAS", reason: hitCanvas ? `keyword:${hitCanvas}` : "component_term_match" };
+  }
 
   if (hitVideo) {
     const product = extractProductKeyword(raw) || undefined;

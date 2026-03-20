@@ -1,7 +1,7 @@
 from functools import lru_cache
 from google.genai import types
-from core.config import MODEL_AGENT
-from services.genai_client import get_client
+from core.config import MODEL_AGENT, AGENT_MODEL_HTTP_PROXY, AGENT_MODEL_HTTPS_PROXY
+from services.genai_client import get_client, generate_content_with_proxy
 
 def simple_refine_prompt(user_prompt: str) -> str:
     p = (user_prompt or "").strip()
@@ -26,10 +26,12 @@ Rules:
 - Default constraints: keep composition/lighting/background unless specified.
 - Be explicit about what to change vs what to keep.
 """
-    resp = client.models.generate_content(
+    resp = generate_content_with_proxy(
         model=MODEL_AGENT,
         contents=[types.Part(text=SYSTEM), types.Part(text=f"User request: {user_prompt.strip()}")],
         config=types.GenerateContentConfig(temperature=0.0, max_output_tokens=220),
+        http_proxy=AGENT_MODEL_HTTP_PROXY,
+        https_proxy=AGENT_MODEL_HTTPS_PROXY,
     )
     text = resp.candidates[0].content.parts[0].text.strip()
     return text.strip("`").strip()

@@ -17,6 +17,27 @@ _REQUIRED_SEGMENT_MIN = {
 }
 
 _CAMERA_FALLBACKS = ("close_up", "wide", "over_shoulder", "top_down", "macro", "medium")
+_CAMERA_ALIASES = {
+    "close-up": "close_up",
+    "close up": "close_up",
+    "closeup": "close_up",
+    "close_up": "close_up",
+    "wide shot": "wide",
+    "wide": "wide",
+    "over shoulder": "over_shoulder",
+    "over-the-shoulder": "over_shoulder",
+    "over_the_shoulder": "over_shoulder",
+    "over shoulder shot": "over_shoulder",
+    "top down": "top_down",
+    "top-down": "top_down",
+    "top_down": "top_down",
+    "macro shot": "macro",
+    "macro": "macro",
+    "medium shot": "medium",
+    "medium": "medium",
+    "eye-level shot": "medium",
+    "eye level shot": "medium",
+}
 
 
 class StoryboardReviewerNode:
@@ -190,6 +211,8 @@ class StoryboardReviewerNode:
                 )
             if not shot.camera:
                 shot.camera = _CAMERA_FALLBACKS[idx % len(_CAMERA_FALLBACKS)]
+            else:
+                shot.camera = self._normalize_camera(shot.camera, idx)
             if not shot.scene:
                 shot.scene = f"{topic.angle}_场景"
             if not shot.action:
@@ -207,6 +230,30 @@ class StoryboardReviewerNode:
             shot.asset_requirements = self._normalize_asset_requirements(shot.asset_requirements, shot)
             normalized.append(shot)
         return normalized
+
+    def _normalize_camera(self, value: Any, idx: int) -> str:
+        text = str(value or "").strip().lower().replace("/", " ").replace("_", " ").replace("-", " ")
+        text = " ".join(text.split())
+        if not text:
+            return _CAMERA_FALLBACKS[idx % len(_CAMERA_FALLBACKS)]
+        alias_key = text.replace(" ", "_")
+        if alias_key in _CAMERA_ALIASES:
+            return _CAMERA_ALIASES[alias_key]
+        if text in _CAMERA_ALIASES:
+            return _CAMERA_ALIASES[text]
+        if "close" in text:
+            return "close_up"
+        if "wide" in text:
+            return "wide"
+        if "shoulder" in text:
+            return "over_shoulder"
+        if "top" in text:
+            return "top_down"
+        if "macro" in text:
+            return "macro"
+        if "medium" in text or "eye level" in text:
+            return "medium"
+        return _CAMERA_FALLBACKS[idx % len(_CAMERA_FALLBACKS)]
 
     def _normalize_segment(self, value: Any) -> str:
         text = str(value or "").strip().upper()

@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   ArrowLeft,
@@ -14,7 +14,10 @@ import {
 } from "lucide-react";
 import { Link } from "../router";
 import { useAuth } from "../auth/AuthProvider";
-import { resolveMemberAuthorizationInfo, viewAIChatModelParams } from "../api/aiChat";
+import AiChatAnchorStatusCard from "../components/AiChatAnchorStatusCard";
+import { resolveMemberAuthorizationInfo, submitAIChatImageTask, viewAIChatModelParams, viewAIChatModels } from "../api/aiChat";
+import { AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2 } from "../config";
+import { findAIChatModelIdByKeywords } from "../lib/aiChatModelResolver";
 
 const SWAP_MODE_META = {
   face: {
@@ -74,10 +77,14 @@ const SWAP_MODE_OPTIONS = [
 ];
 const DEFAULT_VIDEO_PROMPT =
   "画面轻微晃动，镜头产生呼吸感；画面中不出现任何额外元素，商品保持静止。";
-const AI_CHAT_IMAGE_MODEL_ID = "10";
+const LEGACY_AI_CHAT_IMAGE_MODEL_ID = "4";
 const AI_CHAT_I2V_MODEL_ID = "6";
 const DEFAULT_VIDEO_DURATION = 3;
 const DEFAULT_VIDEO_RESOLUTION = "1080p";
+const AI_CHAT_WORKFLOW_MODULE_ENUM = "3";
+const AI_CHAT_IMAGE_PART_ENUM = "203";
+const AI_CHAT_VIDEO_PART_ENUM = "204";
+const MOTION_FAILURE_MESSAGE = "当前网络波动或请求超时，请稍后重试。";
 const MOTION_RESOLUTION_OPTIONS = [
   { label: "480P", value: "480p" },
   { label: "720P", value: "720p" },
@@ -269,7 +276,9 @@ const PipelineSwapTrio = () => {
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [previewImage, setPreviewImage] = useState(null);
   const [previewVideo, setPreviewVideo] = useState(null);
-  const [aiChatImageModelId] = useState(AI_CHAT_IMAGE_MODEL_ID);
+  const [aiChatImageModelId, setAiChatImageModelId] = useState(
+    String(AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2 || "").trim() || LEGACY_AI_CHAT_IMAGE_MODEL_ID,
+  );
   const resultsSeedRef = useRef([]);
   const aiChatModelParamsCacheRef = useRef(new Map());
   const aiChatSessionIdRef = useRef("");
@@ -278,6 +287,35 @@ const PipelineSwapTrio = () => {
   const mainInputRef = useRef(null);
   const refInputRef = useRef(null);
   const activeMode = useMemo(() => SWAP_MODE_META[swapMode] || SWAP_MODE_META.face, [swapMode]);
+
+  useEffect(() => {
+    if (String(AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2 || "").trim()) return undefined;
+
+    const controller = new AbortController();
+    let cancelled = false;
+
+    const loadNanoBanana2ModelId = async () => {
+      try {
+        const data = await viewAIChatModels(
+          apiFetch,
+          { module_enum: Number(AI_CHAT_WORKFLOW_MODULE_ENUM), part_enum: Number(AI_CHAT_IMAGE_PART_ENUM) },
+          { signal: controller.signal },
+        );
+        const resolvedModelId = findAIChatModelIdByKeywords(data);
+        if (!cancelled && resolvedModelId) {
+          setAiChatImageModelId(resolvedModelId);
+        }
+      } catch {
+        // Keep the legacy model id when nano banana2 cannot be resolved.
+      }
+    };
+
+    void loadNanoBanana2ModelId();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [apiFetch]);
 
   const hasReadyInputs = mainImages.length > 0;
 
@@ -387,82 +425,50 @@ const PipelineSwapTrio = () => {
           try {
             const promptToUse = prompt?.trim() || activeMode.defaultPrompt;
             const inputImages = task.refUrl ? [task.inputUrl, task.refUrl] : [task.inputUrl];
-            let outputUrl = "";
             const memberAuth = resolveMemberAuthorizationInfo()?.value || "";
+            if (!memberAuth) throw new Error("缺少 member authorization，无法调用 ai_chat_image_via_curl");
+            if (!aiChatImageModelId) throw new Error("缺少图像模型ID，无法调用 ai_chat_image_via_curl");
 
-            if (memberAuth && aiChatImageModelId) {
-              try {
-                let paramList = aiChatModelParamsCacheRef.current.get(aiChatImageModelId);
-                if (!Array.isArray(paramList)) {
-                  const paramsData = await viewAIChatModelParams(
-                    apiFetch,
-                    { ai_chat_model_id: Number(aiChatImageModelId) || aiChatImageModelId },
-                    { preferApiFetchFirst: true },
-                  );
-                  paramList = Array.isArray(paramsData?.list)
-                    ? paramsData.list
-                    : Array.isArray(paramsData?.data?.list)
-                      ? paramsData.data.list
-                      : [];
-                  aiChatModelParamsCacheRef.current.set(aiChatImageModelId, paramList);
-                }
-
-                const proxyPayload = {
-                  authorization: memberAuth,
-                  history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
-                  module_enum: "1",
-                  part_enum: "2",
-                  message: promptToUse,
-                  ai_chat_session_id: aiChatSessionIdRef.current || "",
-                  ai_chat_model_id: aiChatImageModelId,
-                  ai_image_param_size_id: findAIChatParamValueId(paramList, ["size", "尺寸"], size),
-                  ai_image_param_ratio_id: findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比"], aspectRatio),
-                  images: inputImages,
-                };
-
-                const proxyResp = await apiFetch(`/api/ai_chat_image_via_curl`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  signal: controller.signal,
-                  body: JSON.stringify(proxyPayload),
-                });
-                const proxyData = await proxyResp.json().catch(() => ({}));
-                if (!proxyResp.ok) throw new Error(extractApiError(proxyData));
-                if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
-                if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
-                outputUrl =
-                  pickFirstImageUrl(proxyData?.image_url) ||
-                  pickFirstImageUrl(proxyData?.events) ||
-                  pickFirstImageUrl(proxyData?.text) ||
-                  "";
-                const doneErr = String(proxyData?.done_error || "").trim();
-                if (!outputUrl && doneErr) throw new Error(doneErr);
-              } catch {
-                outputUrl = "";
-              }
+            let paramList = aiChatModelParamsCacheRef.current.get(aiChatImageModelId);
+            if (!Array.isArray(paramList)) {
+              const paramsData = await viewAIChatModelParams(
+                apiFetch,
+                { ai_chat_model_id: Number(aiChatImageModelId) || aiChatImageModelId },
+                { preferApiFetchFirst: true },
+              );
+              paramList = Array.isArray(paramsData?.list)
+                ? paramsData.list
+                : Array.isArray(paramsData?.data?.list)
+                  ? paramsData.data.list
+                  : [];
+              aiChatModelParamsCacheRef.current.set(aiChatImageModelId, paramList);
             }
 
-            if (!outputUrl) {
-              const resp = await apiFetch(`/api/multi_image_generate`, {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  ...(memberAuth ? { "X-AI-Chat-Authorization": memberAuth } : {}),
-                },
-                signal: controller.signal,
-                body: JSON.stringify({
-                  prompt: promptToUse,
-                  images: inputImages,
-                  temperature: 0.7,
-                  size,
-                  aspect_ratio: aspectRatio,
-                }),
-              });
-              const data = await resp.json().catch(() => ({}));
-              if (!resp.ok) throw new Error(extractApiError(data));
-              outputUrl = data.image || data.images?.[0];
-            }
+            const proxyPayload = {
+              authorization: memberAuth,
+              history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
+              module_enum: AI_CHAT_WORKFLOW_MODULE_ENUM,
+              part_enum: AI_CHAT_IMAGE_PART_ENUM,
+              message: promptToUse,
+              ai_chat_session_id: aiChatSessionIdRef.current || "",
+              ai_chat_model_id: aiChatImageModelId,
+              ai_image_param_size_id: findAIChatParamValueId(paramList, ["size", "尺寸"], size),
+              ai_image_param_ratio_id: findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比"], aspectRatio),
+              images: inputImages,
+            };
 
+            const proxyData = await submitAIChatImageTask(apiFetch, proxyPayload, {
+              signal: controller.signal,
+            });
+            if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
+            if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
+            const outputUrl =
+              pickFirstImageUrl(proxyData?.image_url) ||
+              pickFirstImageUrl(proxyData?.events) ||
+              pickFirstImageUrl(proxyData?.text) ||
+              "";
+            const doneErr = String(proxyData?.done_error || "").trim();
+            if (!outputUrl && doneErr) throw new Error(doneErr);
             if (!outputUrl) throw new Error("未返回生成结果");
 
             updateResult(task.id, {
@@ -589,8 +595,8 @@ const PipelineSwapTrio = () => {
           const proxyPayload = {
             authorization: memberAuth,
             history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
-            module_enum: "1",
-            part_enum: "3",
+            module_enum: AI_CHAT_WORKFLOW_MODULE_ENUM,
+            part_enum: AI_CHAT_VIDEO_PART_ENUM,
             message: DEFAULT_VIDEO_PROMPT,
             ai_chat_session_id: aiChatSessionIdRef.current || "",
             ai_chat_model_id: AI_CHAT_I2V_MODEL_ID,
@@ -600,13 +606,7 @@ const PipelineSwapTrio = () => {
             images: [item.outputUrl],
           };
 
-          const proxyResp = await apiFetch(`/api/ai_chat_image_via_curl`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(proxyPayload),
-          });
-          const proxyData = await proxyResp.json().catch(() => ({}));
-          if (!proxyResp.ok) throw new Error(extractApiError(proxyData));
+          const proxyData = await submitAIChatImageTask(apiFetch, proxyPayload);
           if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
           if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
           outputUrl =
@@ -649,7 +649,7 @@ const PipelineSwapTrio = () => {
       if (!outputUrl) throw new Error("未返回动图结果");
       updateResult(item.id, { videoStatus: "success", videoUrl: outputUrl, videoError: null });
     } catch (err) {
-      updateResult(item.id, { videoStatus: "error", videoError: buildFriendlyErrorMessage(err, "动图生成") });
+      updateResult(item.id, { videoStatus: "error", videoError: MOTION_FAILURE_MESSAGE });
     }
   }, [apiFetch, aspectRatio, updateResult, videoResolution]);
 
@@ -1227,6 +1227,7 @@ const PipelineSwapTrio = () => {
           </div>
         </div>
       )}
+      <AiChatAnchorStatusCard />
     </div>
   );
 };

@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { Link } from "../router";
 import { useAuth } from "../auth/AuthProvider";
+import AiChatAnchorStatusCard from "../components/AiChatAnchorStatusCard";
 
 const DEFAULT_COPY_TEXT = "";
 // Keep defaults in sync with bananaflow/workflows/textoverlay.json.
@@ -50,6 +51,7 @@ const DEFAULT_VIDEO_PROMPT =
 const DEFAULT_VIDEO_DURATION = 3;
 const DEFAULT_VIDEO_RESOLUTION = "1080p";
 const DEFAULT_VIDEO_RATIO = "adaptive";
+const MOTION_FAILURE_MESSAGE = "当前网络波动或请求超时，请稍后重试。";
 const MOTION_RESOLUTION_OPTIONS = [
   { label: "480P", value: "480p" },
   { label: "720P", value: "720p" },
@@ -474,7 +476,7 @@ const PipelineBatchWordArt = () => {
       if (!outputUrl) throw new Error("未返回动图结果");
       updateResult(item.id, { videoStatus: "success", videoUrl: outputUrl, videoError: null });
     } catch (err) {
-      updateResult(item.id, { videoStatus: "error", videoError: err?.message || String(err) });
+      updateResult(item.id, { videoStatus: "error", videoError: MOTION_FAILURE_MESSAGE });
     }
   }, [apiFetch, updateResult, videoResolution]);
 
@@ -1241,6 +1243,7 @@ const PipelineBatchWordArt = () => {
           </div>
         </div>
       )}
+      <AiChatAnchorStatusCard />
     </div>
   );
 };

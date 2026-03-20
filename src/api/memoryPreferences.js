@@ -9,20 +9,25 @@ const extractApiError = (data) => {
 };
 
 async function requestJson(apiFetch, path, options = {}) {
+  console.log(`Requesting ${path} with options:`, options);
   apiFetch = window.microApp.getData().fetch || apiFetch; // 兼容老版本
-  if (typeof apiFetch !== "function") {
-    throw new Error("apiFetch is required");
+  try {
+    if (typeof apiFetch !== "function") {
+      throw new Error("apiFetch is required");
+    }
+    const headers = new Headers(options.headers || {});
+    if (!headers.has("Content-Type") && options.body) {
+      headers.set("Content-Type", "application/json");
+    }
+    const resp = await apiFetch(path, { ...options, headers });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      throw new Error(extractApiError(data));
+    }
+    return data;
+  } catch (error) {
+    console.error("API request error:", error);
   }
-  const headers = new Headers(options.headers || {});
-  if (!headers.has("Content-Type") && options.body) {
-    headers.set("Content-Type", "application/json");
-  }
-  const resp = await apiFetch(path, { ...options, headers });
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    throw new Error(extractApiError(data));
-  }
-  return data;
 }
 
 export async function listPreferences(apiFetch) {

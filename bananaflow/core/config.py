@@ -17,10 +17,13 @@ MODEL_GEMINI = "gemini-3-pro-image-preview"
 MODEL_DOUBAO = "doubao-seedream-4.5"
 MODEL_AGENT  = "gemini-3-flash-preview"
 MODEL_AGENT_CHAT = "gemini-2.5-flash-lite"
-AGENT_CHAT_HTTP_PROXY = os.getenv("AGENT_CHAT_HTTP_PROXY", "http://szdayu:123456@124.243.168.90:16607")
-AGENT_CHAT_HTTPS_PROXY = os.getenv("AGENT_CHAT_HTTPS_PROXY", "http://szdayu:123456@124.243.168.90:16607")
+AGENT_MODEL_HTTP_PROXY = os.getenv("AGENT_MODEL_HTTP_PROXY", "")
+AGENT_MODEL_HTTPS_PROXY = os.getenv("AGENT_MODEL_HTTPS_PROXY", "")
+AGENT_CHAT_HTTP_PROXY = os.getenv("AGENT_CHAT_HTTP_PROXY", "")
+AGENT_CHAT_HTTPS_PROXY = os.getenv("AGENT_CHAT_HTTPS_PROXY", "")
 MODEL_COMFYUI_OVERLAYTEXT = "comfyui-overlaytext"
 MODEL_COMFYUI_RMBG = "comfyui-rmbg"
+MODEL_COMFYUI_REMOVE_WATERMARK = "comfyui-remove-watermark"
 MODEL_COMFYUI_MULTI_ANGLESHOTS = "comfyui-multi-angleshots"
 MODEL_COMFYUI_VIDEO_UPSCALE = "comfyui-video-upscale"
 MODEL_COMFYUI_CONTROLNET = "comfyui-controlnet"
@@ -47,6 +50,11 @@ _default_rmbg = os.path.join(BASE_DIR, "workflows", "RMBG.json")
 if not os.path.exists(_default_rmbg):
     _default_rmbg = os.path.join(BASE_DIR, "bananaflow", "workflows", "RMBG.json")
 COMFYUI_RMBG_PATH = os.getenv("COMFYUI_RMBG_PATH", _default_rmbg)
+
+_default_remove_watermark = os.path.join(BASE_DIR, "workflows", "remove_watermark.json")
+if not os.path.exists(_default_remove_watermark):
+    _default_remove_watermark = os.path.join(BASE_DIR, "bananaflow", "workflows", "remove_watermark.json")
+COMFYUI_REMOVE_WATERMARK_PATH = os.getenv("COMFYUI_REMOVE_WATERMARK_PATH", _default_remove_watermark)
 
 _default_multi_angleshots = os.path.join(BASE_DIR, "workflows", "Multi-angleshots.json")
 if not os.path.exists(_default_multi_angleshots):
@@ -119,5 +127,15 @@ COMFYUI_VIDEO_QWEN_I2V_PATH = os.getenv("COMFYUI_VIDEO_QWEN_I2V_PATH", _default_
 
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 DEBUG_DIR = os.path.join(BASE_DIR, "debug_output")
+DATA_DIR = os.path.join(BASE_DIR, "data")
+TMP_DIR = os.path.join(BASE_DIR, "tmp")
+AI_CHAT_DOWNSTREAM_URL = os.getenv("AI_CHAT_DOWNSTREAM_URL", "http://192.168.20.217:16313/ai/aiChat").strip()
+AI_CHAT_TASK_DB_PATH = os.getenv("AI_CHAT_TASK_DB_PATH", os.path.join(DATA_DIR, "ai_chat_tasks.db"))
+AI_CHAT_TASK_TEMP_DIR = os.getenv("AI_CHAT_TASK_TEMP_DIR", os.path.join(TMP_DIR, "ai_chat_tasks"))
+AI_CHAT_TASK_TIMEOUT_SEC = int(os.getenv("AI_CHAT_TASK_TIMEOUT_SEC", "240"))
+AI_CHAT_TASK_MAX_RETRIES = int(os.getenv("AI_CHAT_TASK_MAX_RETRIES", "3"))
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(DEBUG_DIR, exist_ok=True)
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(TMP_DIR, exist_ok=True)
+os.makedirs(AI_CHAT_TASK_TEMP_DIR, exist_ok=True)

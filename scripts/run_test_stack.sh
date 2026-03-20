@@ -17,6 +17,7 @@ BACKEND_PID_FILE="$RUN_DIR/backend_${BACKEND_PORT}.pid"
 FRONTEND_PID_FILE="$RUN_DIR/frontend_${FRONTEND_PORT}.pid"
 BACKEND_LOG="$RUN_DIR/backend_${BACKEND_PORT}.log"
 FRONTEND_LOG="$RUN_DIR/frontend_${FRONTEND_PORT}.log"
+AGENT_PROXY_URL="${AGENT_PROXY_URL:-http://szdayu:123456@124.243.168.90:16607}"
 
 log() {
   echo "[test] $*"
@@ -50,15 +51,6 @@ ensure_worktree() {
     log "create worktree: $WORKTREE_ROOT ($BRANCH)"
     git -C "$SOURCE_REPO" worktree add "$WORKTREE_ROOT" "$BRANCH" >/dev/null
   fi
-}
-
-sync_latest_code() {
-  git -C "$WORKTREE_ROOT" remote get-url "$REMOTE_NAME" >/dev/null 2>&1 || die "git remote '$REMOTE_NAME' not found in $WORKTREE_ROOT"
-  log "fetch latest: ${REMOTE_NAME}/${BRANCH}"
-  git -C "$WORKTREE_ROOT" fetch "$REMOTE_NAME" "$BRANCH" --prune >/dev/null || die "failed to fetch ${REMOTE_NAME}/${BRANCH}"
-  git -C "$WORKTREE_ROOT" checkout "$BRANCH" >/dev/null 2>&1 || die "failed to checkout $BRANCH in $WORKTREE_ROOT"
-  git -C "$WORKTREE_ROOT" branch --set-upstream-to "${REMOTE_NAME}/${BRANCH}" "$BRANCH" >/dev/null 2>&1 || true
-  git -C "$WORKTREE_ROOT" pull --ff-only "$REMOTE_NAME" "$BRANCH" >/dev/null || die "failed to pull latest ${REMOTE_NAME}/${BRANCH}"
 }
 
 ensure_backend_env() {
@@ -104,6 +96,9 @@ start_backend() {
   (
     cd "$WORKTREE_ROOT/bananaflow"
     AUTH_DB_PATH="$AUTH_DB_PATH_VALUE" HOST="0.0.0.0" PORT="$BACKEND_PORT" WORKERS="1" \
+      AGENT_MODEL_HTTP_PROXY="$AGENT_PROXY_URL" AGENT_MODEL_HTTPS_PROXY="$AGENT_PROXY_URL" \
+      AGENT_CHAT_HTTP_PROXY="$AGENT_PROXY_URL" AGENT_CHAT_HTTPS_PROXY="$AGENT_PROXY_URL" \
+      IDEA_SCRIPT_HTTP_PROXY="$AGENT_PROXY_URL" IDEA_SCRIPT_HTTPS_PROXY="$AGENT_PROXY_URL" \
       BANANAFLOW_CORS_ALLOW_ORIGINS="$cors_origins" BANANAFLOW_CORS_ALLOW_CREDENTIALS="${BANANAFLOW_CORS_ALLOW_CREDENTIALS:-1}" \
       nohup "$WORKTREE_ROOT/.venv/bin/python" main.py >"$BACKEND_LOG" 2>&1 &
     echo $! >"$BACKEND_PID_FILE"
@@ -129,7 +124,6 @@ ensure_cmd git
 ensure_cmd python3
 ensure_cmd npm
 ensure_worktree
-sync_latest_code
 ensure_backend_env
 ensure_frontend_env
 start_backend

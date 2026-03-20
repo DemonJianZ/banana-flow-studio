@@ -117,6 +117,23 @@ const buildAgentHeaders = (meta) => {
   return headers;
 };
 
+const AGENT_IDEA_SCRIPT_TIMEOUT_MS = 90_000;
+
+const withAbortTimeout = async (task, timeoutMs, timeoutMessage) => {
+  const controller = new AbortController();
+  const timerId = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await task(controller.signal);
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(timeoutMessage);
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timerId);
+  }
+};
+
 export function extractProductKeyword(text) {
   const source = String(text || "").trim();
   if (!source) return "";
@@ -160,11 +177,12 @@ function normalizeProductCandidate(value) {
 
 export async function generateIdeaScriptMission(product, apiFetch, meta) {
   const call = createCaller(apiFetch);
-  const resp = await call("/api/agent/idea_script", {
+  const resp = await withAbortTimeout((signal) => call("/api/agent/idea_script", {
     method: "POST",
     body: JSON.stringify({ product: String(product || "").trim() }),
     headers: buildAgentHeaders(meta),
-  });
+    signal,
+  }), AGENT_IDEA_SCRIPT_TIMEOUT_MS, "生成脚本超时，请稍后重试。");
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
     throw new Error(extractApiError(data));
@@ -177,6 +195,29 @@ export async function generateAgentChitchat(message, apiFetch, meta) {
   const resp = await call("/api/agent/chitchat", {
     method: "POST",
     body: JSON.stringify({ message: String(message || "").trim() }),
+    headers: buildAgentHeaders(meta),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(extractApiError(data));
+  }
+  return data;
+}
+
+export async function planAgentCanvas(payload, apiFetch, meta) {
+  const call = createCaller(apiFetch);
+  const reqBody = {
+    prompt: String(payload?.prompt || "").trim(),
+    current_nodes: Array.isArray(payload?.currentNodes) ? payload.currentNodes : [],
+    current_connections: Array.isArray(payload?.currentConnections) ? payload.currentConnections : [],
+    selected_artifact: payload?.selectedArtifact || null,
+    canvas_id: String(payload?.canvasId || "").trim() || undefined,
+    thread_id: String(payload?.threadId || "").trim() || undefined,
+  };
+
+  const resp = await call("/api/agent/plan", {
+    method: "POST",
+    body: JSON.stringify(reqBody),
     headers: buildAgentHeaders(meta),
   });
   const data = await resp.json().catch(() => ({}));

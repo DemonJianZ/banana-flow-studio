@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import json
+import os
 import re
 from typing import Any, Dict, List, Optional
 
@@ -8,13 +10,14 @@ from google.genai import types
 
 try:
     from ...core.logging import sys_logger
-    from ...services.genai_client import call_genai_retry, get_client
+    from ...services.genai_client import call_genai_retry_with_proxy, get_client
 except Exception:  # pragma: no cover - 兼容 python bananaflow/main.py 直跑
     from core.logging import sys_logger
-    from services.genai_client import call_genai_retry, get_client
+    from services.genai_client import call_genai_retry_with_proxy, get_client
 
 
 DEFAULT_IDEA_SCRIPT_MODEL = "gemini-2.5-flash-lite"
+DEFAULT_IDEA_SCRIPT_TIMEOUT_SEC = 25
 
 
 def _to_float(value: Any) -> Optional[float]:
@@ -48,11 +51,17 @@ class IdeaScriptGeminiClient:
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        timeout_sec: Optional[int] = None,
+        http_proxy: Optional[str] = None,
+        https_proxy: Optional[str] = None,
     ) -> None:
         self.model = (model or DEFAULT_IDEA_SCRIPT_MODEL).strip() or DEFAULT_IDEA_SCRIPT_MODEL
         self.temperature = _to_float(temperature)
         self.top_p = _to_float(top_p)
         self.max_tokens = _to_int(max_tokens)
+        self.timeout_sec = max(1, int(timeout_sec or DEFAULT_IDEA_SCRIPT_TIMEOUT_SEC))
+        self.http_proxy = str(http_proxy or os.getenv("IDEA_SCRIPT_HTTP_PROXY") or "").strip() or None
+        self.https_proxy = str(https_proxy or os.getenv("IDEA_SCRIPT_HTTPS_PROXY") or "").strip() or None
 
     @classmethod
     def is_runtime_available(cls) -> bool:
@@ -126,12 +135,25 @@ class IdeaScriptGeminiClient:
         if self.max_tokens is not None and self.max_tokens > 0:
             cfg_kwargs["max_output_tokens"] = self.max_tokens
 
-        response = call_genai_retry(
-            contents=[types.Part(text=prompt)],
-            config=types.GenerateContentConfig(**cfg_kwargs),
-            req_id=f"idea_script:{self.model}",
-            model=self.model,
-        )
+        def _invoke():
+            return call_genai_retry_with_proxy(
+                contents=[types.Part(text=prompt)],
+                config=types.GenerateContentConfig(**cfg_kwargs),
+                req_id=f"idea_script:{self.model}",
+                model=self.model,
+                http_proxy=self.http_proxy,
+                https_proxy=self.https_proxy,
+            )
+
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(_invoke)
+        try:
+            response = future.result(timeout=self.timeout_sec)
+        except FutureTimeoutError as e:
+            future.cancel()
+            raise RuntimeError(f"idea_script_llm_timeout:{self.timeout_sec}s") from e
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
         text = self._extract_text(response)
         return self._extract_json(text)
 
@@ -321,6 +343,14 @@ class IdeaScriptGeminiClient:
             "\"asset_requirements\": [{\"type\":string,\"must_have\":string,\"avoid\":string,\"style\":string,\"aspect\":string}]"
             "}\n"
             "Constraints: cover HOOK>=1, VIEW>=1, STEPS>=2, PRODUCT>=1, CTA>=1; camera types >=3; duration total around 55~65.\n"
+            "Language rules:\n"
+            "- Keep enum fields in English only:\n"
+            "  segment must be one of HOOK|VIEW|STEPS|PRODUCT|CTA.\n"
+            "  camera must be one of close_up|wide|over_shoulder|top_down|macro|medium.\n"
+            "  asset_requirements.type must stay English, such as scene|product|overlay|camera|talent|prop|environment|graphic|animation|video|model.\n"
+            "- All human-readable fields must be Simplified Chinese:\n"
+            "  scene, action, emotion, overlay_text, keyword_tags, asset_requirements.must_have, asset_requirements.avoid, asset_requirements.style.\n"
+            "- Do not output English sentences for scene/action/overlay_text/keyword_tags unless the value is an enum field above.\n"
             f"Audience context: {json.dumps(audience_context, ensure_ascii=False)}\n"
             f"Topic: {json.dumps(topic, ensure_ascii=False)}\n"
             f"Retry: {bool(retry)}\n"
@@ -343,6 +373,7 @@ def build_idea_script_gemini_client(node_config: Optional[Any]) -> Optional[Idea
             temperature=getattr(node_config, "temperature", None),
             top_p=getattr(node_config, "top_p", None),
             max_tokens=getattr(node_config, "max_tokens", None),
+            timeout_sec=getattr(node_config, "timeout_sec", None),
         )
     except Exception as e:
         sys_logger.warning(f"[idea_script] build gemini client failed: {e}")

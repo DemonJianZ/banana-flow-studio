@@ -42,6 +42,7 @@ class NodeRuntimeConfig(BaseModel):
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None
+    timeout_sec: Optional[int] = None
 
     @classmethod
     def from_env(cls, node_name: str) -> "NodeRuntimeConfig":
@@ -51,6 +52,7 @@ class NodeRuntimeConfig(BaseModel):
             temperature=_as_float(os.getenv(f"IDEA_SCRIPT_{key}_TEMPERATURE")),
             top_p=_as_float(os.getenv(f"IDEA_SCRIPT_{key}_TOP_P")),
             max_tokens=_as_int(os.getenv(f"IDEA_SCRIPT_{key}_MAX_TOKENS")),
+            timeout_sec=_as_int(os.getenv(f"IDEA_SCRIPT_{key}_TIMEOUT_SEC")),
         )
 
 

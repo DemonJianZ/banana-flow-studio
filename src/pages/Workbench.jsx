@@ -68,11 +68,18 @@ import EditPlanView from "../components/agent-canvas/EditPlanView";
 import ExportPanel from "../components/agent-canvas/ExportPanel";
 import PreferenceSuggestionCard from "../components/agent-canvas/PreferenceSuggestionCard";
 import {
+  readAgentDevMode,
+  readAiChatAnchorDebugState,
+  writeAgentDevMode,
+  writeAiChatAnchorDebugState,
+} from "../lib/aiChatAnchorDebug";
+import {
   extractProductKeyword,
   generateAgentChitchat,
   exportIdeaScriptFfmpegBundle,
   generateIdeaScriptMission,
   generateIdeaScriptVideo,
+  planAgentCanvas,
 } from "../api/agentCanvas";
 import {
   listPreferences as listMemoryPreferences,
@@ -80,14 +87,23 @@ import {
 } from "../api/memoryPreferences";
 import { harvestEvalCase } from "../api/qualityFeedback";
 import {
+  aiChatAnchor,
   aiChatStream,
+  AI_CHAT_ANCHOR_OPERATE_ENUM_1,
+  AI_CHAT_PART_ENUM_203,
+  AI_CHAT_PART_ENUM_204,
+  AI_CHAT_PART_ENUM_207,
+  AI_CHAT_PART_ENUM_209,
+  AI_CHAT_PART_ENUM_210,
+  AI_CHAT_PART_ENUM_211,
   isLoginRequiredError,
   resolveMemberAuthorizationInfo,
+  submitAIChatImageTask,
   viewAIChatModelParams,
   viewAIChatModels,
 } from "../api/aiChat";
 import { viewMemberInfo } from "../api/memberInfo";
-import { hasUserAuth, USER_AUTHS_ENUM_1, viewUserAuths } from "../api/userAuths";
+import { viewUserAuths } from "../api/userAuths";
 import { detectIntent } from "../agent/router";
 import { detectPreferenceSuggestions } from "../agent/preferenceSuggestion";
 import { buildHitlFeedbackRows } from "../agent/hitlFeedbackHistory";
@@ -126,6 +142,20 @@ const AGENT_QUICK_ACTIONS = [
   { id: "help", label: "查看示例" },
 ];
 const AGENT_DEFAULT_QUICK_ACTION_IDS = ["script", "storyboard", "video", "export", "help"];
+const AGENT_SCRIPT_EXAMPLES = [
+  "帮我写一个洗面奶的爆款口播脚本，主打温和清洁和控油",
+  "帮我写一个防晒霜的小红书种草脚本，突出清爽不搓泥",
+  "帮我写一个眼霜的直播带货脚本，突出淡纹和保湿",
+  "帮我写一个面膜的15秒短视频脚本，强调急救补水",
+  "帮我写一个洗发水的对比型爆款脚本，突出去屑控油",
+];
+const AGENT_CANVAS_EXAMPLES = [
+  "帮我搭一个文生图接图生视频流程",
+  "帮我搭一个上传图片后去背景再输出",
+  "帮我搭一个本地文生图流程",
+  "帮我搭一个上传商品图后做多角度镜头",
+  "帮我搭一个上传图片后做特征提取再输出",
+];
 const AGENT_PRODUCT_CHIPS = [
   "洗面奶",
   "防晒",
@@ -205,6 +235,7 @@ const getChitchatReply = (text) => {
 
 const AGENT_HELP_TEXT = [
   "我可以帮你做：",
+  "0) 自动搭画布：输入“帮我搭一个文生图接图生视频流程”",
   "1) 爆款脚本：输入“帮我做一个洗面奶爆款脚本”",
   "2) 分镜查看：输入“给我生成分镜”",
   "3) 生成视频：输入“帮我生成成片视频”",
@@ -227,6 +258,18 @@ const createDefaultAgentSession = () => ({
 
 const cloneDeep = (obj) => JSON.parse(JSON.stringify(obj));
 
+const readFilesAsDataUrls = (files) =>
+  Promise.all(
+    Array.from(files || []).map(
+      (file) =>
+        new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result);
+          reader.readAsDataURL(file);
+        }),
+    ),
+  );
+
 const shortenSessionTitle = (text, maxLen = 16) => {
   const value = String(text || "").trim();
   if (!value) return "新会话";
@@ -245,9 +288,20 @@ const loadAgentStore = () => {
       const session = createDefaultAgentSession();
       return { sessions: [session], activeSessionId: session.id };
     }
+    const staleRunningError = "任务已中断：页面刷新或上次请求未完成，请重新发起。";
     const sessions = parsed.sessions.map((session) => ({
       ...session,
-      turns: Array.isArray(session?.turns) ? session.turns : [],
+      turns: Array.isArray(session?.turns)
+        ? session.turns.map((turn) =>
+            turn?.status === "running"
+              ? {
+                  ...turn,
+                  status: "error",
+                  error: turn?.error || staleRunningError,
+                }
+              : turn,
+          )
+        : [],
       pendingTask: session?.pendingTask || null,
     }));
     return {
@@ -411,7 +465,7 @@ const buildApiDebugDetailText = (event) => {
   return lines.join("\n").trim();
 };
 
-const API_DEBUG_DETAIL_KEYS = new Set(["aiChatLang", "aiChatImage", "userAuths"]);
+const API_DEBUG_DETAIL_KEYS = new Set(["aiChatLang", "aiChatImage", "userAuths", "aiChatAnchor"]);
 
 const API_DEBUG_STATUS_LABEL = {
   idle: "待执行",
@@ -711,6 +765,17 @@ const getDefaultVideoModelId = (options) => {
   return options.find((item) => item.id === VIDEO_MODEL_1_0)?.id || options[0].id;
 };
 
+const WORKBENCH_AI_CHAT_MODULE_ENUM = "3";
+
+const resolveWorkbenchAIChatPartEnum = ({ mode }) => {
+  if (mode === "img2video") return AI_CHAT_PART_ENUM_204;
+  if (mode === "feature_extract") return AI_CHAT_PART_ENUM_207;
+  if (mode === "workflow_swap") return AI_CHAT_PART_ENUM_209;
+  if (mode === "workflow_batch_video") return AI_CHAT_PART_ENUM_210;
+  if (mode === "workflow_batch_wordart") return AI_CHAT_PART_ENUM_211;
+  return AI_CHAT_PART_ENUM_203;
+};
+
 const extractModelParamList = (payload) => {
   if (Array.isArray(payload)) return payload;
   if (!payload || typeof payload !== "object") return EMPTY_LIST;
@@ -744,6 +809,23 @@ const resolveDefaultParamValueId = (paramItem) => {
   const valueId = first?.param_value_id;
   if (valueId === undefined || valueId === null || valueId === "") return "";
   return String(valueId);
+};
+
+const resolveAdminFlagFromUserAuths = (payload) => {
+  if (!payload || typeof payload !== "object") return false;
+  const queue = [payload];
+  const visited = new Set();
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || typeof current !== "object" || visited.has(current)) continue;
+    visited.add(current);
+    if (typeof current.is_ok === "boolean") return current.is_ok;
+    if (typeof current.isOk === "boolean") return current.isOk;
+    for (const value of Object.values(current)) {
+      if (value && typeof value === "object") queue.push(value);
+    }
+  }
+  return false;
 };
 
 const buildAIChatParamPayload = (paramList) => {
@@ -2288,24 +2370,20 @@ const NodeComponent = ({
   onRetry,
   onSelectArtifact,
   activeArtifact,
-  onIterateImg2Img
+  onIterateImg2Img,
+  onRunCompactRemoveWatermark,
 }) => {
   const [showCopied, setShowCopied] = useState(false);
+  const [compactActiveIndex, setCompactActiveIndex] = useState(0);
+  const [showCompactInputActions, setShowCompactInputActions] = useState(false);
+  const [compactRemovePending, setCompactRemovePending] = useState(false);
+  const nodeRootRef = useRef(null);
 
   const handleFileUpload = (e) => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
 
-    Promise.all(
-      files.map(
-        (file) =>
-          new Promise((resolve) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result);
-            reader.readAsDataURL(file);
-          })
-      )
-    ).then((newImages) => {
+    readFilesAsDataUrls(files).then((newImages) => {
       const currentImages = node.data.images || [];
       updateData(node.id, { images: [...currentImages, ...newImages] });
     });
@@ -2351,6 +2429,35 @@ const NodeComponent = ({
   const isAI = isProcessor || isPostProcessor || isVideoGen;
   const isInput = node.type === NODE_TYPES.INPUT;
   const isOutput = node.type === NODE_TYPES.OUTPUT;
+  const isCompactInput = isInput && !!node.data.compact;
+  const compactImages = isCompactInput ? (node.data.images || []) : EMPTY_LIST;
+  const compactActiveImage = compactImages[compactActiveIndex] || compactImages[0] || "";
+
+  useEffect(() => {
+    setCompactActiveIndex((prev) => {
+      const maxIndex = Math.max(0, compactImages.length - 1);
+      return Math.min(prev, maxIndex);
+    });
+  }, [compactImages.length]);
+
+  useEffect(() => {
+    setShowCompactInputActions(false);
+    setCompactActiveIndex(0);
+  }, [node.id]);
+
+  useEffect(() => {
+    if (!showCompactInputActions) return undefined;
+
+    const handleOutsideMouseDown = (event) => {
+      if (nodeRootRef.current?.contains(event.target)) return;
+      setShowCompactInputActions(false);
+    };
+
+    document.addEventListener("mousedown", handleOutsideMouseDown, true);
+    return () => {
+      document.removeEventListener("mousedown", handleOutsideMouseDown, true);
+    };
+  }, [showCompactInputActions]);
 
   let statusColor =
     "border-slate-800/85 shadow-[0_24px_56px_rgba(2,6,23,0.42)] hover:border-slate-700/90";
@@ -2366,7 +2473,7 @@ const NodeComponent = ({
   }
 
   let title = "Node";
-  if (isInput) title = `图片/视频上传 (${node.data.images?.length || 0})`;
+  if (isInput) title = isCompactInput ? (node.data.title || "图片编辑区") : `图片/视频上传 (${node.data.images?.length || 0})`;
   if (isOutput) title = node.data.angleLabel ? `${node.data.angleLabel} 输出 (${node.data.images?.length || 0})` : `输出 (${node.data.images?.length || 0})`;
   if (isProcessor) title = TOOL_CARDS[node.data.mode]?.name || "图片生成";
   if (isPostProcessor) title = TOOL_CARDS[node.data.mode]?.name || "后期增强";
@@ -2460,62 +2567,79 @@ const NodeComponent = ({
 
   return (
     <div
-      className={`absolute w-[280px] overflow-hidden rounded-[30px] border bg-[linear-gradient(155deg,rgba(6,12,24,0.98),rgba(10,19,35,0.96)_50%,rgba(7,15,29,0.98))] backdrop-blur-xl shadow-[0_30px_80px_rgba(2,6,23,0.48)] flex flex-col transition-colors transition-shadow duration-200 before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:h-14 before:bg-[linear-gradient(180deg,rgba(148,163,184,0.06),rgba(148,163,184,0))] ${statusColor}`}
+      ref={nodeRootRef}
+      className={`absolute ${isCompactInput ? "w-[292px] overflow-visible rounded-[22px] border-slate-800/70" : "w-[280px] overflow-hidden rounded-[30px]"} border bg-[linear-gradient(155deg,rgba(6,12,24,0.98),rgba(10,19,35,0.96)_50%,rgba(7,15,29,0.98))] backdrop-blur-xl shadow-[0_30px_80px_rgba(2,6,23,0.48)] flex flex-col transition-colors transition-shadow duration-200 ${isCompactInput ? "" : "before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:h-14 before:bg-[linear-gradient(180deg,rgba(148,163,184,0.06),rgba(148,163,184,0))]"} ${statusColor}`}
       style={{ left: node.x, top: node.y }}
       onMouseDown={onMouseDown}
     >
-      {/* Header */}
-      <div
-        className={`relative flex justify-between items-center px-4 py-3.5 border-b border-slate-800/80 bg-[linear-gradient(180deg,rgba(15,23,42,0.28),rgba(15,23,42,0.06))] handle cursor-grab active:cursor-grabbing ${
-          selected ? "bg-cyan-950/24" : ""
-        }`}
-      >
-        <div className="flex items-center gap-2 overflow-hidden">
-          <div className="flex h-8 w-8 items-center justify-center rounded-[14px] border border-slate-800/80 bg-slate-900/70 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
-            <Icon className={`w-4 h-4 ${theme.text}`} />
+      {!isCompactInput && (
+        <div
+          className={`relative flex justify-between items-center px-4 py-3.5 border-b border-slate-800/80 bg-[linear-gradient(180deg,rgba(15,23,42,0.28),rgba(15,23,42,0.06))] handle cursor-grab active:cursor-grabbing ${
+            selected ? "bg-cyan-950/24" : ""
+          }`}
+        >
+          <div className="flex items-center gap-2 overflow-hidden">
+            <div className="flex h-8 w-8 items-center justify-center rounded-[14px] border border-slate-800/80 bg-slate-900/70 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+              <Icon className={`w-4 h-4 ${theme.text}`} />
+            </div>
+            <span className="font-medium text-[13px] tracking-[0.01em] text-slate-100 truncate select-none">{title}</span>
+            {isReady && (
+              <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.85)]" title="Ready to Run" />
+            )}
           </div>
-          <span className="font-medium text-[13px] tracking-[0.01em] text-slate-100 truncate select-none">{title}</span>
-          {isReady && (
-            <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.85)]" title="Ready to Run" />
-          )}
-        </div>
-        <div className="flex gap-1">
-          {node.data.status === "error" && (
+          <div className="flex gap-1">
+            {node.data.status === "error" && (
+              <button
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRetry?.();
+                }}
+                className="rounded-full border border-red-900/70 bg-red-950/50 p-1.5 text-red-300 transition hover:border-red-800 hover:bg-red-900/60"
+                title="重试"
+                type="button"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+            )}
+
+            {isAI && (
+              <div className={`rounded-full border p-1.5 ${selected ? "border-slate-700/90 bg-slate-900/80 text-white" : "border-slate-800/80 bg-slate-900/55 text-slate-500"}`}>
+                <Settings2 className="w-3.5 h-3.5" />
+              </div>
+            )}
+
             <button
               onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => {
                 e.stopPropagation();
-                onRetry?.();
+                onDelete?.();
               }}
-              className="rounded-full border border-red-900/70 bg-red-950/50 p-1.5 text-red-300 transition hover:border-red-800 hover:bg-red-900/60"
-              title="重试"
+              className="rounded-full border border-slate-800/80 bg-slate-900/55 p-1.5 text-slate-500 transition-colors hover:border-red-900 hover:bg-red-950/55 hover:text-red-300"
               type="button"
             >
-              <RotateCcw className="w-3.5 h-3.5" />
+              <X className="w-3.5 h-3.5" />
             </button>
-          )}
-
-          {isAI && (
-            <div className={`rounded-full border p-1.5 ${selected ? "border-slate-700/90 bg-slate-900/80 text-white" : "border-slate-800/80 bg-slate-900/55 text-slate-500"}`}>
-              <Settings2 className="w-3.5 h-3.5" />
-            </div>
-          )}
-
-          <button
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={(e) => {
-              e.stopPropagation();
-              onDelete?.();
-            }}
-            className="rounded-full border border-slate-800/80 bg-slate-900/55 p-1.5 text-slate-500 transition-colors hover:border-red-900 hover:bg-red-950/55 hover:text-red-300"
-            type="button"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
+          </div>
         </div>
-      </div>
+      )}
 
-      <div className="space-y-3 p-4">
+      {isCompactInput && (
+        <button
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete?.();
+          }}
+          className="nodrag absolute right-2.5 top-2.5 z-20 rounded-full border border-slate-800/90 bg-slate-950/82 p-1.5 text-slate-300 transition hover:border-red-900 hover:bg-red-950/55 hover:text-red-300"
+          type="button"
+          title="删除"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      )}
+
+      <div className={`${isCompactInput ? "nodrag space-y-2 p-1.5" : "space-y-3 p-4"}`}>
         {/* Error */}
         {node.data.status === "error" && (
           <div className="rounded-[22px] border border-red-900/70 bg-[linear-gradient(180deg,rgba(69,10,10,0.7),rgba(28,10,10,0.76))] px-3 py-2.5 text-xs text-red-200 flex flex-col gap-2 animate-in fade-in zoom-in-95 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
@@ -2610,7 +2734,131 @@ const NodeComponent = ({
         )}
 
         {/* Input */}
-        {isInput && (
+        {isInput && isCompactInput && (
+          <div className="space-y-2">
+            <div className="relative overflow-visible">
+              <div className="overflow-hidden rounded-[18px] border border-slate-800/75 bg-[linear-gradient(160deg,rgba(5,9,18,0.98),rgba(11,18,32,0.96)_56%,rgba(7,13,24,0.98))] shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+                <button
+                  type="button"
+                  className={`nodrag relative block h-[286px] w-full overflow-hidden bg-black/35 transition-[transform,filter,box-shadow] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+                    showCompactInputActions
+                      ? "scale-[0.985] shadow-[0_18px_45px_rgba(8,15,34,0.5)]"
+                      : "hover:scale-[1.01] hover:brightness-105"
+                  }`}
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowCompactInputActions((prev) => !prev);
+                  }}
+                >
+                  {compactActiveImage ? (
+                    <img
+                      src={compactActiveImage}
+                      className={`h-full w-full object-contain transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+                        showCompactInputActions ? "scale-[1.015]" : "scale-100"
+                      }`}
+                      alt=""
+                    />
+                  ) : null}
+                  {compactRemovePending ? (
+                    <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
+                      <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(2,6,23,0.18),rgba(2,6,23,0.56))] backdrop-blur-[2px]" />
+                      <div className="absolute inset-y-0 left-1/2 w-[44%] -translate-x-1/2 bg-[linear-gradient(90deg,rgba(255,255,255,0),rgba(255,255,255,0.18),rgba(125,211,252,0.14),rgba(255,255,255,0))] opacity-80 blur-xl animate-pulse" />
+                      <div className="absolute inset-x-0 top-[18%] h-px bg-[linear-gradient(90deg,rgba(34,211,238,0),rgba(34,211,238,0.7),rgba(34,211,238,0))] shadow-[0_0_18px_rgba(34,211,238,0.35)] animate-pulse" />
+                      <div className="absolute inset-0 flex items-center justify-center">
+                        <div className="rounded-[20px] border border-white/14 bg-[linear-gradient(145deg,rgba(255,255,255,0.18),rgba(255,255,255,0.06))] px-4 py-3 text-center text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_16px_40px_rgba(2,6,23,0.24)] backdrop-blur-xl">
+                          <div className="flex items-center justify-center gap-2">
+                            <Loader2 className="h-4 w-4 animate-spin text-cyan-100" />
+                            <span className="text-[12px] font-medium tracking-[0.04em] text-slate-50">正在去除水印</span>
+                          </div>
+                          <div className="mt-1 text-[10px] text-slate-200/80">请稍候，图片正在轻量修复中</div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+                  <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_70%_35%,rgba(34,211,238,0.12),transparent_42%)] opacity-80 transition-opacity duration-300" />
+                  <div className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-black/60 via-black/10 to-transparent" />
+                </button>
+                {compactActiveImage ? (
+                  <button
+                    type="button"
+                    className="nodrag absolute bottom-3 right-3 z-10 flex h-9 w-9 items-center justify-center rounded-full border border-slate-700/80 bg-slate-950/78 text-slate-100 shadow-[0_12px_24px_rgba(2,6,23,0.35)] backdrop-blur-md transition duration-200 hover:-translate-y-0.5 hover:border-cyan-500/55 hover:bg-cyan-500/12 hover:text-cyan-100"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onPreview?.(compactActiveImage);
+                    }}
+                    title="放大预览"
+                  >
+                    <Maximize className="h-3.5 w-3.5" />
+                  </button>
+                ) : null}
+              </div>
+
+              {compactActiveImage ? (
+                <div
+                  className={`nodrag absolute left-full top-1/2 z-30 ml-3 -translate-y-1/2 rounded-[22px] border border-slate-700/80 bg-[linear-gradient(180deg,rgba(2,6,23,0.98),rgba(15,23,42,0.96))] p-2 shadow-[0_22px_54px_rgba(2,6,23,0.48)] backdrop-blur-xl transition-all duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+                    showCompactInputActions
+                      ? "pointer-events-auto translate-x-0 scale-100 opacity-100"
+                      : "pointer-events-none -translate-x-3 scale-95 opacity-0"
+                  }`}
+                  onMouseDown={(e) => e.stopPropagation()}
+                >
+                  <button
+                    type="button"
+                    disabled={compactRemovePending}
+                    className="rounded-full border border-white/18 bg-[linear-gradient(135deg,rgba(255,255,255,0.16),rgba(255,255,255,0.07))] px-4 py-2 text-[11px] font-medium text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_14px_28px_rgba(2,6,23,0.22)] backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-cyan-300/35 hover:bg-[linear-gradient(135deg,rgba(255,255,255,0.22),rgba(125,211,252,0.12))] hover:text-cyan-50 disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65 disabled:brightness-100"
+                    onClick={async () => {
+                      if (compactRemovePending) return;
+                      try {
+                        setCompactRemovePending(true);
+                        await onRunCompactRemoveWatermark?.(node.id, compactActiveIndex);
+                        setShowCompactInputActions(false);
+                      } catch (error) {
+                        console.error("[Workbench] remove_watermark_direct:error", error);
+                      } finally {
+                        setCompactRemovePending(false);
+                      }
+                    }}
+                  >
+                    {compactRemovePending ? "处理中..." : "去水印"}
+                  </button>
+                </div>
+              ) : null}
+            </div>
+
+            {compactImages.length > 1 ? (
+              <div className="flex gap-2 overflow-x-auto pb-1 custom-scrollbar">
+                {compactImages.map((img, index) => {
+                  const isThumbActive = index === compactActiveIndex;
+                  return (
+                    <button
+                      key={`${node.id}-${index}`}
+                      type="button"
+                      className={`nodrag relative h-16 w-16 shrink-0 overflow-hidden rounded-[16px] border transition duration-200 ${
+                        isThumbActive
+                          ? "border-cyan-500/60 ring-1 ring-cyan-400/25 shadow-[0_10px_24px_rgba(6,182,212,0.16)]"
+                          : "border-slate-800/85 hover:border-slate-700 hover:-translate-y-0.5"
+                      }`}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setCompactActiveIndex(index);
+                        setShowCompactInputActions(false);
+                      }}
+                    >
+                      <img src={img} className="h-full w-full object-cover" alt="" />
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
+          </div>
+        )}
+
+        {isInput && !isCompactInput && (
           <div className="relative flex h-32 flex-col overflow-hidden rounded-[24px] border border-slate-800/85 bg-[linear-gradient(160deg,rgba(5,9,18,0.98),rgba(11,18,32,0.96)_56%,rgba(7,13,24,0.98))] shadow-[inset_0_1px_0_rgba(255,255,255,0.02)] group transition-colors hover:border-cyan-800">
             <div className="flex-1 overflow-y-auto p-2 custom-scrollbar">
               {node.data.images?.length > 0 ? (
@@ -2800,6 +3048,7 @@ const Workbench = () => {
   const [selectionBox, setSelectionBox] = useState(null);
   const [connectingSource, setConnectingSource] = useState(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+  const [canvasDropActive, setCanvasDropActive] = useState(false);
 
   const [isRunning, setIsRunning] = useState(false);
   const [runScope, setRunScope] = useState("selected_downstream");
@@ -2828,14 +3077,12 @@ const Workbench = () => {
   const [agentStore, setAgentStore] = useState(() => loadAgentStore());
   const [agentInput, setAgentInput] = useState("");
   const [agentInputFocused, setAgentInputFocused] = useState(false);
-  const [activeComposerActionId, setActiveComposerActionId] = useState("script");
+  const [activeComposerActionId, setActiveComposerActionId] = useState("");
+  const [showScriptExamples, setShowScriptExamples] = useState(false);
+  const [showCanvasExamples, setShowCanvasExamples] = useState(false);
   const [agentComposerFiles, setAgentComposerFiles] = useState([]);
   const [agentDevMode, setAgentDevMode] = useState(() => {
-    try {
-      return localStorage.getItem("agent_dev_mode") === "true";
-    } catch {
-      return false;
-    }
+    return readAgentDevMode();
   });
   const [agentHistoryCollapsed, setAgentHistoryCollapsed] = useState(true);
   const [showPreferencesPanel, setShowPreferencesPanel] = useState(false);
@@ -2863,6 +3110,7 @@ const Workbench = () => {
     modelsLang: { status: "idle", message: "", detail: "", updatedAt: 0 },
     modelsImage: { status: "idle", message: "", detail: "", updatedAt: 0 },
     modelsVideo: { status: "idle", message: "", detail: "", updatedAt: 0 },
+    aiChatAnchor: { status: "idle", message: "", detail: "", updatedAt: 0 },
     aiChatLang: { status: "idle", message: "", detail: "", updatedAt: 0 },
     aiChatImage: { status: "idle", message: "", detail: "", updatedAt: 0 },
   }));
@@ -2878,6 +3126,8 @@ const Workbench = () => {
   const agentConversationBottomRef = useRef(null);
   const exportAgentPlanRef = useRef(null);
   const rightPanelResizeRef = useRef(null);
+  const nodeDragCleanupRef = useRef(null);
+  const previewOpenedBySpaceRef = useRef(false);
 
   const agentSessions = agentStore.sessions ?? EMPTY_LIST;
   const isLeftSidebarCollapsed = leftSidebarCollapsed;
@@ -2920,7 +3170,7 @@ const Workbench = () => {
   const memberAvatar = useMemo(() => resolveMemberAvatar(memberInfo), [memberInfo]);
   const memberPoint = useMemo(() => resolveMemberPoints(memberInfo, ["point"]), [memberInfo]);
   const memberTotalPoint = useMemo(() => resolveMemberPoints(memberInfo, ["total_point", "totalPoint"]), [memberInfo]);
-  const isAdminUser = useMemo(() => hasUserAuth(userAuths, USER_AUTHS_ENUM_1), [userAuths]);
+  const isAdminUser = useMemo(() => resolveAdminFlagFromUserAuths(userAuths), [userAuths]);
   const languageModelOptions = useMemo(
     () => (Array.isArray(aiChatModels.language) && aiChatModels.language.length ? aiChatModels.language : EMPTY_LIST),
     [aiChatModels.language],
@@ -2941,34 +3191,109 @@ const Workbench = () => {
   const defaultImageModelId = useMemo(() => getDefaultImageModelId(imageModelRecords), [imageModelRecords]);
   const defaultVideoModelId = useMemo(() => getDefaultVideoModelId(videoModelOptions), [videoModelOptions]);
   const updateApiDebugStatus = useCallback((key, next) => {
-    setApiDebugStatus((prev) => ({
-      ...prev,
-      [key]: {
+    if (key === "aiChatAnchor") {
+      const current = readAiChatAnchorDebugState();
+      writeAiChatAnchorDebugState({
+        ...current,
+        ...next,
+        updatedAt: Date.now(),
+      });
+    }
+    setApiDebugStatus((prev) => {
+      const merged = {
         ...(prev[key] || { status: "idle", message: "", detail: "", updatedAt: 0 }),
         ...next,
         updatedAt: Date.now(),
-      },
-    }));
+      };
+      return {
+        ...prev,
+        [key]: merged,
+      };
+    });
   }, []);
   const pushApiDebugDetail = useCallback((key, event) => {
     const nextDetail = buildApiDebugDetailText(event);
     if (!nextDetail) return;
+    if (key === "aiChatAnchor") {
+      const current = readAiChatAnchorDebugState();
+      const detail =
+        event?.type === "start" || !current.detail
+          ? nextDetail
+          : `${current.detail}\n\n[${event.type || "event"}]\n${nextDetail}`;
+      writeAiChatAnchorDebugState({
+        ...current,
+        detail,
+        updatedAt: Date.now(),
+      });
+    }
     setApiDebugStatus((prev) => {
       const current = prev[key] || { status: "idle", message: "", detail: "", updatedAt: 0 };
       const detail =
         event?.type === "start" || !current.detail
           ? nextDetail
           : `${current.detail}\n\n[${event.type || "event"}]\n${nextDetail}`;
+      const merged = {
+        ...current,
+        detail,
+        updatedAt: Date.now(),
+      };
       return {
         ...prev,
-        [key]: {
-          ...current,
-          detail,
-          updatedAt: Date.now(),
-        },
+        [key]: merged,
       };
     });
   }, []);
+
+  const triggerAIChatAnchor = useCallback(
+    async ({ partEnum, modelId = 1, from, to, debugLabel }) => {
+      const rawModelId = String(modelId ?? "").trim();
+      const numericModelId = Number(rawModelId);
+      const resolvedModelId = Number.isFinite(numericModelId) && numericModelId > 0 ? numericModelId : 1;
+      const payload = {
+        part_enum: Number(partEnum),
+        operate_enum: AI_CHAT_ANCHOR_OPERATE_ENUM_1,
+        ai_chat_model_id: resolvedModelId,
+        from: String(from || window.location.pathname || "/app"),
+        to: String(to || ""),
+      };
+
+      updateApiDebugStatus("aiChatAnchor", {
+        status: "loading",
+        message: `POST /ai/aiChatAnchor part=${payload.part_enum}`,
+      });
+
+      try {
+        const data = await aiChatAnchor(apiFetch, payload, {
+          onDebug: (event) => pushApiDebugDetail("aiChatAnchor", event),
+        });
+        updateApiDebugStatus("aiChatAnchor", {
+          status: "success",
+          message: `${debugLabel || payload.to || payload.part_enum} 已上报`,
+        });
+        return data;
+      } catch (error) {
+        updateApiDebugStatus("aiChatAnchor", {
+          status: isLoginRequiredError(error) ? "login_required" : "error",
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      }
+    },
+    [apiFetch, pushApiDebugDetail, updateApiDebugStatus],
+  );
+
+  const handleAnchorActionClick = useCallback(
+    ({ partEnum, modelId, to, debugLabel, action }) => {
+      void triggerAIChatAnchor({
+        partEnum,
+        modelId,
+        to,
+        debugLabel,
+      });
+      action?.();
+    },
+    [triggerAIChatAnchor],
+  );
 
   const resolveModelParamsForId = useCallback(
     async (modelId) => {
@@ -3040,7 +3365,8 @@ const Workbench = () => {
           didTimeout,
           message: error instanceof Error ? error.message : String(error),
         });
-        const ssoUrl = error?.ssoUrl || error?.data?.data?.sso_url || "";
+        // const ssoUrl = error?.ssoUrl || error?.data?.data?.sso_url || "";
+        const ssoUrl = 'http://test.dayukeji-inc.cn/aigc_test/#/dashboard'
         const isLoginRequired = isLoginRequiredError(error);
         if (ssoUrl) {
           setMemberInfoLoginUrl(ssoUrl);
@@ -3052,6 +3378,7 @@ const Workbench = () => {
           setMemberInfo(null);
           setMemberInfoLoading(false);
           if (isLoginRequired && ssoUrl) {
+            window.open(ssoUrl, "_blank", "noopener,noreferrer")
             setRunToast({
               type: "error",
               message: "会员服务未登录，请先完成 SSO 登录。",
@@ -3111,12 +3438,12 @@ const Workbench = () => {
         });
         if (cancelled) return;
         if (timeoutId) window.clearTimeout(timeoutId);
-        console.info("[userAuths] load:done", { attempt, data, isAdmin: hasUserAuth(data, USER_AUTHS_ENUM_1) });
+        console.info("[userAuths] load:done", { attempt, data, isAdmin: resolveAdminFlagFromUserAuths(data) });
         setUserAuths(data);
         setUserAuthsLoading(false);
         updateApiDebugStatus("userAuths", {
           status: "success",
-          message: hasUserAuth(data, USER_AUTHS_ENUM_1) ? "admin" : "loaded",
+          message: resolveAdminFlagFromUserAuths(data) ? "admin" : "loaded",
         });
       } catch (error) {
         if (timeoutId) window.clearTimeout(timeoutId);
@@ -3284,14 +3611,11 @@ const Workbench = () => {
   }, [defaultImageModelId, imageModelRecords.length, resolveModelParamsForId, updateApiDebugStatus]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem("agent_dev_mode", agentDevMode ? "true" : "false");
-    } catch {
-      // ignore localStorage write failure
-    }
+    writeAgentDevMode(agentDevMode);
   }, [agentDevMode]);
 
   const canvasRef = useRef(null);
+  const canvasDragDepthRef = useRef(0);
   const nodesRef = useRef(nodes);
   const connectionsRef = useRef(connections);
 
@@ -3595,6 +3919,17 @@ const Workbench = () => {
       if (["INPUT", "TEXTAREA"].includes(e.target.tagName)) return;
       switch (lowerKey) {
         case " ":
+          if (
+            !e.repeat &&
+            activeArtifact?.url &&
+            !isVideoContent(activeArtifact.url) &&
+            !previewImage
+          ) {
+            e.preventDefault();
+            previewOpenedBySpaceRef.current = true;
+            setPreviewImage(activeArtifact.url);
+            return;
+          }
           if (!e.repeat) setIsSpacePressed(true);
           break;
         case "z":
@@ -3640,7 +3975,14 @@ const Workbench = () => {
       }
     };
     const ku = (e) => {
-      if (e.key === " ") setIsSpacePressed(false);
+      if (e.key === " ") {
+        if (previewOpenedBySpaceRef.current) {
+          previewOpenedBySpaceRef.current = false;
+          setPreviewImage((current) => (current === activeArtifact?.url ? null : current));
+          return;
+        }
+        setIsSpacePressed(false);
+      }
     };
     window.addEventListener("keydown", kd);
     window.addEventListener("keyup", ku);
@@ -3649,7 +3991,7 @@ const Workbench = () => {
       window.removeEventListener("keyup", ku);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, history, historyStep, selectedNodeIds, selectedConnectionIds, toggleAgentHistoryPanel]);
+  }, [nodes, history, historyStep, selectedNodeIds, selectedConnectionIds, toggleAgentHistoryPanel, activeArtifact, previewImage]);
 
   const screenToCanvas = useCallback((sx, sy) => {
     const r = canvasRef.current?.getBoundingClientRect();
@@ -3721,6 +4063,39 @@ const handleNodeMouseDown = (e, nid) => {
     if (s.has(n.id) || n.id === nid) p[n.id] = { x: n.x, y: n.y };
   });
   setInitialNodePos(p);
+
+  if (nodeDragCleanupRef.current) {
+    nodeDragCleanupRef.current();
+  }
+
+  const startX = e.clientX;
+  const startY = e.clientY;
+
+  const onWindowMouseMove = (event) => {
+    const dx = (event.clientX - startX) / viewport.zoom;
+    const dy = (event.clientY - startY) / viewport.zoom;
+    setNodes((prev) =>
+      prev.map((n) => (p[n.id] ? { ...n, x: p[n.id].x + dx, y: p[n.id].y + dy } : n))
+    );
+  };
+
+  const cleanupDrag = () => {
+    window.removeEventListener("mousemove", onWindowMouseMove);
+    window.removeEventListener("mouseup", cleanupDrag, true);
+    window.removeEventListener("blur", cleanupDrag);
+    nodeDragCleanupRef.current = null;
+    setInteractionMode((prev) => {
+      if (prev === "dragging_node") pushHistory();
+      return "idle";
+    });
+    setSelectionBox(null);
+    setConnectingSource(null);
+  };
+
+  nodeDragCleanupRef.current = cleanupDrag;
+  window.addEventListener("mousemove", onWindowMouseMove);
+  window.addEventListener("mouseup", cleanupDrag, true);
+  window.addEventListener("blur", cleanupDrag);
 };
 
   const handleMouseMove = useCallback(
@@ -3741,7 +4116,11 @@ const handleNodeMouseDown = (e, nid) => {
     [interactionMode, dragStart, viewport, initialNodePos, screenToCanvas]
   );
 
-  const handleMouseUp = () => {
+  const handleMouseUp = useCallback(() => {
+    if (interactionMode === "dragging_node") {
+      nodeDragCleanupRef.current?.();
+      return;
+    }
     if (interactionMode === "dragging_node") pushHistory();
     if (interactionMode === "selecting" && selectionBox) {
       const x1 = Math.min(selectionBox.startX, selectionBox.curX);
@@ -3769,9 +4148,85 @@ const handleNodeMouseDown = (e, nid) => {
     setInteractionMode("idle");
     setSelectionBox(null);
     setConnectingSource(null);
-  };
+  }, [interactionMode, selectionBox, selectedNodeIds, nodes, selectedAgentCardIds, agentResultCards, activeAgentCardId, pushHistory]);
+
+  useEffect(() => {
+    if (!["panning", "selecting"].includes(interactionMode)) return undefined;
+
+    const handleWindowMouseMove = (event) => {
+      handleMouseMove(event);
+    };
+    const handleWindowMouseUp = () => {
+      handleMouseUp();
+    };
+
+    window.addEventListener("mousemove", handleWindowMouseMove);
+    window.addEventListener("mouseup", handleWindowMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", handleWindowMouseMove);
+      window.removeEventListener("mouseup", handleWindowMouseUp);
+    };
+  }, [interactionMode, handleMouseMove, handleMouseUp]);
 
   const getCursor = () => (interactionMode === "panning" || isSpacePressed ? "grab" : interactionMode === "dragging_node" ? "grabbing" : "default");
+
+  const createCompactInputNodeAt = useCallback((point, images) => {
+    const safeImages = Array.isArray(images) ? images.filter(Boolean) : [];
+    if (!safeImages.length) return;
+
+    pushHistory();
+    const nodeId = generateId();
+    const nextNode = {
+      id: nodeId,
+      type: NODE_TYPES.INPUT,
+      x: point.x - 118,
+      y: point.y - 88,
+      data: {
+        images: safeImages,
+        compact: true,
+        title: "图片编辑区",
+      },
+    };
+
+    setNodes((prev) => [...prev, nextNode]);
+    setSelectedNodeIds(new Set([nodeId]));
+    setSelectedConnectionIds(new Set());
+    setActiveNodeId(nodeId);
+  }, [pushHistory]);
+
+  const handleCanvasDragEnter = useCallback((e) => {
+    const hasImages = Array.from(e.dataTransfer?.items || []).some((item) => item.kind === "file" && String(item.type || "").startsWith("image/"));
+    if (!hasImages) return;
+    canvasDragDepthRef.current += 1;
+    setCanvasDropActive(true);
+  }, []);
+
+  const handleCanvasDragOver = useCallback((e) => {
+    const hasImages = Array.from(e.dataTransfer?.items || []).some((item) => item.kind === "file" && String(item.type || "").startsWith("image/"));
+    if (!hasImages) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    if (!canvasDropActive) setCanvasDropActive(true);
+  }, [canvasDropActive]);
+
+  const handleCanvasDragLeave = useCallback((e) => {
+    const nextTarget = e.relatedTarget;
+    if (nextTarget && canvasRef.current?.contains(nextTarget)) return;
+    canvasDragDepthRef.current = Math.max(0, canvasDragDepthRef.current - 1);
+    if (canvasDragDepthRef.current === 0) setCanvasDropActive(false);
+  }, []);
+
+  const handleCanvasDrop = useCallback(async (e) => {
+    const files = Array.from(e.dataTransfer?.files || []).filter((file) => String(file.type || "").startsWith("image/"));
+    canvasDragDepthRef.current = 0;
+    setCanvasDropActive(false);
+    if (!files.length) return;
+
+    e.preventDefault();
+    const point = screenToCanvas(e.clientX, e.clientY);
+    const droppedImages = await readFilesAsDataUrls(files);
+    createCompactInputNodeAt(point, droppedImages);
+  }, [createCompactInputNodeAt, screenToCanvas]);
 
   const addNode = (t, modePreset = null) => {
     if (t === NODE_TYPES.POST_PROCESSOR) return;
@@ -3958,6 +4413,57 @@ const handleNodeMouseDown = (e, nid) => {
     setConnections((prev) => [...prev, { id: generateId(), from: sourceNodeId, to: newNodeId }]);
     setSelectedNodeIds(new Set([newNodeId]));
   };
+
+  const runCompactRemoveWatermark = useCallback(
+    async (sourceNodeId, imageIndex = 0) => {
+      try {
+        const sourceNode = nodesRef.current.find((n) => n.id === sourceNodeId);
+        const images = Array.isArray(sourceNode?.data?.images) ? sourceNode.data.images : [];
+        const safeIndex = Math.max(0, Math.min(imageIndex, images.length - 1));
+        const sourceImage = images[safeIndex] || images[0] || "";
+        if (!sourceImage) {
+          throw new Error("缺少去水印输入图片");
+        }
+
+        const resp = await apiFetch(`/api/remove_watermark`, {
+          method: "POST",
+          skipAuth: true,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            image: sourceImage,
+            size: "1024x1024",
+            aspect_ratio: "1:1",
+          }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          throw new Error(extractApiError(data));
+        }
+
+        const nextImage = data.image || data.images?.[0] || "";
+        if (!nextImage) {
+          throw new Error("去水印未返回结果");
+        }
+
+        const nextImages = [...images];
+        nextImages[safeIndex] = nextImage;
+        pushHistory();
+        updateNodeData(sourceNodeId, {
+          images: nextImages,
+          status: "idle",
+          error: "",
+        });
+        setRunToast({ message: "去水印完成", type: "info" });
+        setTimeout(() => setRunToast(null), 2200);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error || "去水印失败");
+        setRunToast({ message: `去水印失败：${message}`, type: "error" });
+        setTimeout(() => setRunToast(null), 2600);
+        throw error;
+      }
+    },
+    [apiFetch, pushHistory],
+  );
 
   // ✅ 继续图生图：在“文生图(text2img)”后，自动接：输入 -> 图生图 -> 输出
 const createConnectedImg2ImgBranch = useCallback(
@@ -4609,6 +5115,41 @@ const createConnectedImg2ImgBranch = useCallback(
     [apiFetch, appendAssistantTurn, ensureAgentResultCard, updateActiveAgentSession],
   );
 
+  const runCanvasPlanMission = useCallback(
+    async (userText, routeMeta = {}) => {
+      const response = await planAgentCanvas(
+        {
+          prompt: userText,
+          currentNodes: cloneDeep(nodesRef.current || []),
+          currentConnections: cloneDeep(connectionsRef.current || []),
+          selectedArtifact: activeArtifact
+            ? {
+                url: activeArtifact.url,
+                kind: activeArtifact.kind || "image",
+                fromNodeId: activeArtifact.fromNodeId || null,
+                createdAt: activeArtifact.createdAt || Date.now(),
+                meta: activeArtifact.meta || {},
+              }
+            : null,
+          canvasId,
+          threadId: canvasId,
+        },
+        apiFetch,
+        routeMeta,
+      );
+
+      const patch = Array.isArray(response?.patch) ? response.patch : [];
+      if (!patch.length) {
+        throw new Error("Agent 未返回可执行的画布补丁");
+      }
+
+      pushHistory();
+      _applyPatch(patch);
+      return response;
+    },
+    [activeArtifact, apiFetch, canvasId, _applyPatch, pushHistory],
+  );
+
   const getLatestResultTurn = useCallback(() => {
     const turns = activeAgentSession?.turns || [];
     return [...turns].reverse().find((turn) => turn?.status === "done" && turn?.response) || null;
@@ -4866,6 +5407,42 @@ const createConnectedImg2ImgBranch = useCallback(
         return;
       }
 
+      if (route.intent === "CANVAS") {
+        appendAssistantTurn(missionText, "正在按你的要求自动搭建画布组件，请稍等。", {
+          userTextOverride: "",
+          routeDebug: buildRouteDebug(route, true),
+        });
+        try {
+          const response = await runCanvasPlanMission(missionText, {
+            intent: route.intent,
+            product: route.product || "",
+            sessionId,
+          });
+          appendAssistantTurn(
+            missionText,
+            String(response?.summary || "").trim() || "已根据你的需求完成画布自动搭建。",
+            {
+              userTextOverride: "",
+              routeDebug: buildRouteDebug(
+                { ...route, reason: response?.thought ? `${route.reason}|${response.thought}` : route.reason },
+                true,
+              ),
+            },
+          );
+        } catch (error) {
+          appendAssistantTurn(
+            missionText,
+            error?.message || "画布自动搭建失败，请稍后重试。",
+            {
+              userTextOverride: "",
+              routeDebug: buildRouteDebug(route, true),
+            },
+          );
+          setRunToast({ message: error?.message || "画布自动搭建失败", type: "error" });
+        }
+        return;
+      }
+
       if (route.intent === "SCRIPT") {
         const product = route.product || extractProductKeyword(missionText);
         if (!product) {
@@ -5051,6 +5628,7 @@ const createConnectedImg2ImgBranch = useCallback(
       sendAIChatLanguageStream,
       apiFetch,
       runVideoMissionOnTurn,
+      runCanvasPlanMission,
       setPendingTaskForActiveSession,
       updateActiveAgentSession,
     ],
@@ -5068,6 +5646,8 @@ const createConnectedImg2ImgBranch = useCallback(
       ? `\n\n[已附参考图片: ${agentComposerFiles.map((item) => item.name).join("，")}]`
       : "";
     setAgentInput("");
+    setShowScriptExamples(false);
+    setShowCanvasExamples(false);
     setAgentComposerFiles((prev) => {
       prev.forEach((item) => {
         if (item?.previewUrl) URL.revokeObjectURL(item.previewUrl);
@@ -5120,7 +5700,6 @@ const createConnectedImg2ImgBranch = useCallback(
   }, []);
 
   const composerQuickActions = [
-    { id: "script", label: "生成脚本", icon: Sparkles },
     { id: "storyboard", label: "生成分镜", icon: Clapperboard },
     { id: "video", label: "成片视频", icon: Film },
     { id: "export", label: "导出渲染包", icon: Download },
@@ -5129,12 +5708,9 @@ const createConnectedImg2ImgBranch = useCallback(
 
   const handleAgentQuickAction = useCallback(
     (actionId) => {
-      setActiveComposerActionId(actionId);
-      if (actionId === "script") {
-        setAgentInput("帮我设计一个洗面奶的爆款脚本");
-        agentInputRef.current?.focus();
-        return;
-      }
+      setActiveComposerActionId((prev) => (prev === actionId ? "" : actionId));
+      setShowScriptExamples(false);
+      setShowCanvasExamples(false);
       if (actionId === "storyboard") {
         void sendAgentMissionFromText("生成分镜");
         return;
@@ -5182,6 +5758,28 @@ const createConnectedImg2ImgBranch = useCallback(
     const nextText = String(text || "帮我用小红书语气设计洗面奶爆款脚本").trim();
     if (!nextText) return;
     setAgentInput(nextText);
+    agentInputRef.current?.focus();
+  }, []);
+
+  const handleCanvasExamplePick = useCallback((text) => {
+    const nextText = String(text || "").trim();
+    if (!nextText) return;
+    setActiveComposerActionId("canvas");
+    setShowScriptExamples(false);
+    setShowCanvasExamples(false);
+    setAgentInput(nextText);
+    setAgentInputFocused(true);
+    agentInputRef.current?.focus();
+  }, []);
+
+  const handleScriptExamplePick = useCallback((text) => {
+    const nextText = String(text || "").trim();
+    if (!nextText) return;
+    setActiveComposerActionId("script");
+    setShowCanvasExamples(false);
+    setShowScriptExamples(false);
+    setAgentInput(nextText);
+    setAgentInputFocused(true);
     agentInputRef.current?.focus();
   }, []);
 
@@ -5900,7 +6498,7 @@ const createConnectedImg2ImgBranch = useCallback(
 
                   updateApiDebugStatus("aiChatImage", {
                     status: "loading",
-                    message: "POST /ai/aiChat part=2",
+                    message: `POST /ai/aiChat part=${resolveWorkbenchAIChatPartEnum({ mode: "text2img" })}`,
                   });
 
                   const model4Option = imageModelOptions.find((item) => String(item?.id || "").trim() === "4");
@@ -5934,8 +6532,8 @@ const createConnectedImg2ImgBranch = useCallback(
                     const proxyPayload = {
                       authorization: authorizationInfo?.value || "",
                       history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
-                      module_enum: "1",
-                      part_enum: String(AI_CHAT_PART_ENUM_2),
+                      module_enum: WORKBENCH_AI_CHAT_MODULE_ENUM,
+                      part_enum: String(resolveWorkbenchAIChatPartEnum({ mode: "text2img" })),
                       ai_chat_session_id: aiChatSessionIdRef.current || "",
                       ai_chat_model_id: targetModelId,
                       message: promptToUse,
@@ -5954,16 +6552,9 @@ const createConnectedImg2ImgBranch = useCallback(
                       authorizationSource: authorizationInfo?.source || "none",
                     });
                     try {
-                      const proxyResp = await apiFetch("/api/ai_chat_image_via_curl", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(proxyPayload),
+                      const proxyData = await submitAIChatImageTask(apiFetch, proxyPayload, {
+                        onDebug: (event) => pushApiDebugDetail("aiChatImage", event),
                       });
-                      const proxyData = await proxyResp.json().catch(() => ({}));
-                      if (!proxyResp.ok) {
-                        const msg = proxyData?.detail || proxyData?.message || `HTTP ${proxyResp.status}`;
-                        throw new Error(msg);
-                      }
                       if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
                       if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
                       pushApiDebugDetail("aiChatImage", {
@@ -5992,8 +6583,8 @@ const createConnectedImg2ImgBranch = useCallback(
                         apiFetch,
                         {
                           history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || undefined,
-                          module_enum: "1",
-                          part_enum: String(AI_CHAT_PART_ENUM_2),
+                          module_enum: WORKBENCH_AI_CHAT_MODULE_ENUM,
+                          part_enum: String(resolveWorkbenchAIChatPartEnum({ mode: "text2img" })),
                           ai_chat_session_id: aiChatSessionIdRef.current || undefined,
                           ai_chat_model_id: targetModelId,
                           message: promptToUse,
@@ -6017,7 +6608,7 @@ const createConnectedImg2ImgBranch = useCallback(
                     if (canRetryWithModel4) {
                       updateApiDebugStatus("aiChatImage", {
                         status: "loading",
-                        message: `part=2 model=${modelId}失败，自动重试model=${fallbackModelId}`,
+                        message: `part=${resolveWorkbenchAIChatPartEnum({ mode: "text2img" })} model=${modelId}失败，自动重试model=${fallbackModelId}`,
                       });
                       aiChatResponse = await requestAIChatImage(fallbackModelId);
                       effectiveModelId = fallbackModelId;
@@ -6066,7 +6657,7 @@ const createConnectedImg2ImgBranch = useCallback(
                   }
                   updateApiDebugStatus("aiChatImage", {
                     status: "success",
-                    message: `part=2 model=${effectiveModelId} params=${effectiveParamCount}`,
+                    message: `part=${resolveWorkbenchAIChatPartEnum({ mode: "text2img" })} model=${effectiveModelId} params=${effectiveParamCount}`,
                   });
                 }
               } else if (
@@ -6105,7 +6696,7 @@ const createConnectedImg2ImgBranch = useCallback(
                 } else {
                   updateApiDebugStatus("aiChatImage", {
                     status: "loading",
-                    message: "POST /api/ai_chat_image_via_curl (img2video)",
+                    message: `POST /api/ai_chat_image_via_curl part=${resolveWorkbenchAIChatPartEnum({ mode: "img2video" })}`,
                   });
                   try {
                     const modelId = String(payload.model || "").trim();
@@ -6143,8 +6734,8 @@ const createConnectedImg2ImgBranch = useCallback(
                     const proxyPayload = {
                       authorization: authorizationInfo?.value || "",
                       history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
-                      module_enum: "1",
-                      part_enum: String(AI_CHAT_PART_ENUM_3),
+                      module_enum: WORKBENCH_AI_CHAT_MODULE_ENUM,
+                      part_enum: String(resolveWorkbenchAIChatPartEnum({ mode: "img2video" })),
                       ai_chat_session_id: aiChatSessionIdRef.current || "",
                       ai_chat_model_id: modelId,
                       message: payload.prompt || "natural motion",
@@ -6172,16 +6763,9 @@ const createConnectedImg2ImgBranch = useCallback(
                       },
                       authorizationSource: authorizationInfo?.source || "none",
                     });
-                    const proxyResp = await apiFetch("/api/ai_chat_image_via_curl", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify(proxyPayload),
+                    const proxyData = await submitAIChatImageTask(apiFetch, proxyPayload, {
+                      onDebug: (event) => pushApiDebugDetail("aiChatImage", event),
                     });
-                    const proxyData = await proxyResp.json().catch(() => ({}));
-                    if (!proxyResp.ok) {
-                      const msg = proxyData?.detail || proxyData?.message || `HTTP ${proxyResp.status}`;
-                      throw new Error(msg);
-                    }
                     if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
                     if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
                     pushApiDebugDetail("aiChatImage", {
@@ -6203,7 +6787,7 @@ const createConnectedImg2ImgBranch = useCallback(
                     }
                     updateApiDebugStatus("aiChatImage", {
                       status: "success",
-                      message: `img2video model=${modelId} params=${Object.keys(resolvedParamPayload).length}`,
+                      message: `part=${resolveWorkbenchAIChatPartEnum({ mode: "img2video" })} model=${modelId} params=${Object.keys(resolvedParamPayload).length}`,
                     });
                   } catch (proxyError) {
                     pushApiDebugDetail("aiChatImage", {
@@ -6245,7 +6829,7 @@ const createConnectedImg2ImgBranch = useCallback(
                 if (!modelId) throw new Error("缺少图像模型ID");
                 updateApiDebugStatus("aiChatImage", {
                   status: "loading",
-                  message: "POST /api/ai_chat_image_via_curl (img2img)",
+                  message: `POST /api/ai_chat_image_via_curl part=${resolveWorkbenchAIChatPartEnum({ mode: "multi_image_generate" })}`,
                 });
                 try {
                   const paramList = await resolveModelParamsForId(modelId);
@@ -6274,8 +6858,8 @@ const createConnectedImg2ImgBranch = useCallback(
                   const proxyPayload = {
                     authorization: authorizationInfo?.value || "",
                     history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
-                    module_enum: "1",
-                    part_enum: String(AI_CHAT_PART_ENUM_2),
+                    module_enum: WORKBENCH_AI_CHAT_MODULE_ENUM,
+                    part_enum: String(resolveWorkbenchAIChatPartEnum({ mode: "multi_image_generate" })),
                     ai_chat_session_id: aiChatSessionIdRef.current || "",
                     ai_chat_model_id: modelId,
                     message: promptToUse,
@@ -6295,16 +6879,9 @@ const createConnectedImg2ImgBranch = useCallback(
                     },
                     authorizationSource: authorizationInfo?.source || "none",
                   });
-                  const proxyResp = await apiFetch("/api/ai_chat_image_via_curl", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(proxyPayload),
+                  const proxyData = await submitAIChatImageTask(apiFetch, proxyPayload, {
+                    onDebug: (event) => pushApiDebugDetail("aiChatImage", event),
                   });
-                  const proxyData = await proxyResp.json().catch(() => ({}));
-                  if (!proxyResp.ok) {
-                    const msg = proxyData?.detail || proxyData?.message || `HTTP ${proxyResp.status}`;
-                    throw new Error(msg);
-                  }
                   if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
                   if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
                   pushApiDebugDetail("aiChatImage", {
@@ -6335,28 +6912,10 @@ const createConnectedImg2ImgBranch = useCallback(
                     message: proxyError instanceof Error ? proxyError.message : String(proxyError),
                   });
                   updateApiDebugStatus("aiChatImage", {
-                    status: "loading",
-                    message: "img2img 代理失败，回退 /api/multi_image_generate",
+                    status: "error",
+                    message: proxyError instanceof Error ? proxyError.message : String(proxyError),
                   });
-                  const selectedAspectRatio = procNode.data.templates?.aspect_ratio;
-                  const resp = await apiFetch(`/api/multi_image_generate`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      prompt: promptToUse,
-                      images: inputImages,
-                      temperature: 0.7,
-                      ...(selectedAspectRatio
-                        ? {
-                            size: procNode.data.templates?.size || "1024x1024",
-                            aspect_ratio: selectedAspectRatio,
-                          }
-                        : {}),
-                    }),
-                  });
-                  const data = await resp.json();
-                  if (!resp.ok) throw new Error(extractApiError(data));
-                  resultUrl = data.image;
+                  throw proxyError;
                 }
               } else if (procNode.data.mode === "rmbg") {
                 const resp = await apiFetch(`/api/rmbg`, {
@@ -6575,7 +7134,14 @@ const createConnectedImg2ImgBranch = useCallback(
             desc: "背景/手势/生成",
             color: "text-purple-400",
             bg: "bg-purple-500/10",
-            onClick: () => addNode(NODE_TYPES.PROCESSOR),
+            onClick: () =>
+              handleAnchorActionClick({
+                partEnum: AI_CHAT_PART_ENUM_203,
+                modelId: defaultImageModelId,
+                to: "node_image_generate",
+                debugLabel: "图片生成",
+                action: () => addNode(NODE_TYPES.PROCESSOR),
+              }),
           },
           {
             id: "node_video_generate",
@@ -6584,7 +7150,14 @@ const createConnectedImg2ImgBranch = useCallback(
             desc: "图生视频/动效",
             color: "text-rose-400",
             bg: "bg-rose-500/10",
-            onClick: () => addNode(NODE_TYPES.VIDEO_GEN),
+            onClick: () =>
+              handleAnchorActionClick({
+                partEnum: AI_CHAT_PART_ENUM_204,
+                modelId: defaultVideoModelId,
+                to: "node_video_generate",
+                debugLabel: "视频生成",
+                action: () => addNode(NODE_TYPES.VIDEO_GEN),
+              }),
           },
           {
             id: "node_output",
@@ -6617,7 +7190,14 @@ const createConnectedImg2ImgBranch = useCallback(
             desc: "面部/背景/服装首饰",
             color: "text-cyan-300",
             bg: "bg-cyan-500/10",
-            onClick: () => addNode(NODE_TYPES.PROCESSOR, "feature_extract"),
+            onClick: () =>
+              handleAnchorActionClick({
+                partEnum: AI_CHAT_PART_ENUM_207,
+                modelId: defaultImageModelId,
+                to: "skill_feature_extract",
+                debugLabel: "特征提取",
+                action: () => addNode(NODE_TYPES.PROCESSOR, "feature_extract"),
+              }),
           },
           {
             id: "skill_multi_angleshots",
@@ -6641,7 +7221,14 @@ const createConnectedImg2ImgBranch = useCallback(
             desc: "换脸/换背景/换装",
             color: "text-purple-300",
             bg: "bg-purple-500/10",
-            onClick: () => navigate("/app/swap"),
+            onClick: () =>
+              handleAnchorActionClick({
+                partEnum: AI_CHAT_PART_ENUM_209,
+                modelId: 4,
+                to: "workflow_swap",
+                debugLabel: "三合一换图",
+                action: () => navigate("/app/swap"),
+              }),
           },
           {
             id: "workflow_batch_video",
@@ -6650,7 +7237,14 @@ const createConnectedImg2ImgBranch = useCallback(
             desc: "单图生成短视频",
             color: "text-sky-400",
             bg: "bg-sky-500/10",
-            onClick: () => navigate("/app/batch-video"),
+            onClick: () =>
+              handleAnchorActionClick({
+                partEnum: AI_CHAT_PART_ENUM_210,
+                modelId: 4,
+                to: "workflow_batch_video",
+                debugLabel: "批量动图",
+                action: () => navigate("/app/batch-video"),
+              }),
           },
           {
             id: "workflow_batch_wordart",
@@ -6659,43 +7253,54 @@ const createConnectedImg2ImgBranch = useCallback(
             desc: "批量添加花字文案",
             color: "text-cyan-300",
             bg: "bg-cyan-500/10",
-            onClick: () => navigate("/app/batch-wordart"),
+            onClick: () =>
+              handleAnchorActionClick({
+                partEnum: AI_CHAT_PART_ENUM_211,
+                modelId: defaultVideoModelId,
+                to: "workflow_batch_wordart",
+                debugLabel: "批量花字",
+                action: () => navigate("/app/batch-wordart"),
+              }),
           },
         ],
       },
-      {
-        key: "learning",
-        title: "AI深度学习",
-        items: [
-          {
-            id: "workflow_local_text2img",
-            icon: ImagePlus,
-            label: "本地：文生图",
-            desc: "image_z_image_turbo 工作流",
-            color: "text-purple-300",
-            bg: "bg-purple-500/10",
-            onClick: () => createLocalText2ImgTemplate(),
-          },
-          {
-            id: "workflow_local_img2video",
-            icon: Film,
-            label: "本地：图生视频",
-            desc: "Qwen_i2v 工作流",
-            color: "text-sky-300",
-            bg: "bg-sky-500/10",
-            onClick: () => createLocalImg2VideoTemplate(),
-          },
-          {
-            id: "workflow_pose_control",
-            icon: Hand,
-            label: "视频：姿态控制",
-            desc: "参考图 + 姿态视频驱动",
-            color: "text-rose-300",
-            bg: "bg-rose-500/10",
-            onClick: () => navigate("/app/pose-control-video"),
-          },
-        ],
-      },
+      ...(isAdminUser
+        ? [
+            {
+              key: "learning",
+              title: "AI深度学习",
+              items: [
+                {
+                  id: "workflow_local_text2img",
+                  icon: ImagePlus,
+                  label: "本地：文生图",
+                  desc: "image_z_image_turbo 工作流",
+                  color: "text-purple-300",
+                  bg: "bg-purple-500/10",
+                  onClick: () => createLocalText2ImgTemplate(),
+                },
+                {
+                  id: "workflow_local_img2video",
+                  icon: Film,
+                  label: "本地：图生视频",
+                  desc: "Qwen_i2v 工作流",
+                  color: "text-sky-300",
+                  bg: "bg-sky-500/10",
+                  onClick: () => createLocalImg2VideoTemplate(),
+                },
+                {
+                  id: "workflow_pose_control",
+                  icon: Hand,
+                  label: "视频：姿态控制",
+                  desc: "参考图 + 姿态视频驱动",
+                  color: "text-rose-300",
+                  bg: "bg-rose-500/10",
+                  onClick: () => navigate("/app/pose-control-video"),
+                },
+              ],
+            },
+          ]
+        : []),
     ];
 
     const query = leftSidebarQuery.trim().toLowerCase();
@@ -6794,8 +7399,9 @@ const createConnectedImg2ImgBranch = useCallback(
     { key: "modelsLang", label: "models(part=1)" },
     { key: "modelsImage", label: "models(part=2)" },
     { key: "modelsVideo", label: "models(part=3)" },
+    { key: "aiChatAnchor", label: "aiChatAnchor(module=3)" },
     { key: "aiChatLang", label: "aiChat(part=1 语言)" },
-    { key: "aiChatImage", label: "aiChat(part=2 图片)" },
+    { key: "aiChatImage", label: "aiChat(module=3 图片/视频)" },
   ];
 
   const getApiDebugStatusClass = (status) => {
@@ -7468,6 +8074,10 @@ const createConnectedImg2ImgBranch = useCallback(
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
           onWheel={handleWheel}
+          onDragEnter={handleCanvasDragEnter}
+          onDragOver={handleCanvasDragOver}
+          onDragLeave={handleCanvasDragLeave}
+          onDrop={handleCanvasDrop}
         >
           <div
             className="absolute inset-0 pointer-events-none"
@@ -7489,6 +8099,15 @@ const createConnectedImg2ImgBranch = useCallback(
           />
           <div className="absolute inset-0 pointer-events-none" style={{ background: "radial-gradient(ellipse at center, rgba(2,6,23,0) 46%, rgba(2,6,23,0.34) 84%, rgba(2,6,23,0.56) 100%)" }} />
 
+          {canvasDropActive ? (
+            <div className="pointer-events-none absolute inset-6 z-20 rounded-[32px] border border-cyan-500/40 bg-cyan-500/8 shadow-[inset_0_0_0_1px_rgba(34,211,238,0.18)] backdrop-blur-[1px]">
+              <div className="absolute inset-x-8 top-8 rounded-[24px] border border-dashed border-cyan-400/35 bg-slate-950/55 px-6 py-4 text-center shadow-[0_18px_48px_rgba(8,145,178,0.12)]">
+                <div className="text-sm font-medium text-cyan-100">拖到这里创建图片编辑区</div>
+                <div className="mt-1 text-xs text-slate-300">落下后会在当前位置生成一个小型编辑卡片，可直接接图生图、去背景、图生视频。</div>
+              </div>
+            </div>
+          ) : null}
+
           {nodes.length === 0 && !hasAgentResultCards && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
               <div
@@ -7503,7 +8122,7 @@ const createConnectedImg2ImgBranch = useCallback(
                   </h2>
                   <div className="mb-3 text-[11px] font-normal tracking-[0.18em] text-slate-400/90">AI小禹无限画布</div>
                   <p className="mx-auto mb-8 max-w-xl text-sm leading-6 text-slate-400">
-                    选择下方模版快速开始，或者直接使用下方 Agent 输入框生成脚本、分镜和工作流。
+                    选择下方模版快速开始，直接把图片拖进画布生成编辑区，或者使用下方 Agent 输入框生成脚本、分镜和工作流。
                   </p>
                 </div>
 
@@ -7595,7 +8214,7 @@ const createConnectedImg2ImgBranch = useCallback(
                 onSelectArtifact={setActiveArtifact} // ✅ 修复：现在生效
                 activeArtifact={activeArtifact}
                 onIterateImg2Img={createConnectedImg2ImgBranch}
-
+                onRunCompactRemoveWatermark={runCompactRemoveWatermark}
               />
             ))}
 
@@ -7721,6 +8340,51 @@ const createConnectedImg2ImgBranch = useCallback(
             onMouseDown={(e) => e.stopPropagation()}
             onWheel={(e) => e.stopPropagation()}
           >
+            {showScriptExamples || showCanvasExamples ? (
+              <div className="absolute bottom-[calc(100%+1rem)] left-1/2 z-30 w-[min(92vw,760px)] -translate-x-1/2">
+                <div className="relative overflow-hidden rounded-[28px] border border-cyan-500/20 bg-[linear-gradient(145deg,rgba(4,10,20,0.98),rgba(8,18,30,0.96)_58%,rgba(4,8,16,0.98))] shadow-[0_24px_64px_rgba(2,8,23,0.56)]">
+                  <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.08),transparent_28%),linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.01)_36%,transparent_100%)]" />
+                  <div className="relative border-b border-white/8 px-5 py-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-[15px] font-semibold text-cyan-100">{showScriptExamples ? "生成脚本案例" : "画布编排案例"}</div>
+                        <div className="mt-1 text-[12px] leading-5 text-slate-400">
+                          {showScriptExamples
+                            ? "选择一条常用脚本需求，直接填入 Agent 输入框继续生成脚本。"
+                            : "选择一条常用案例，直接填入 Agent 输入框继续生成画布。"}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowScriptExamples(false);
+                          setShowCanvasExamples(false);
+                        }}
+                        className="rounded-full p-1.5 text-slate-400 transition-colors hover:bg-white/[0.06] hover:text-white"
+                        aria-label={showScriptExamples ? "关闭生成脚本案例" : "关闭画布编排案例"}
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="relative grid gap-3 p-4 md:grid-cols-2">
+                    {(showScriptExamples ? AGENT_SCRIPT_EXAMPLES : AGENT_CANVAS_EXAMPLES).map((example, index) => (
+                      <button
+                        key={example}
+                        type="button"
+                        onClick={() => (showScriptExamples ? handleScriptExamplePick(example) : handleCanvasExamplePick(example))}
+                        className="flex min-h-[84px] items-start gap-3 rounded-[22px] border border-slate-800/80 bg-white/[0.03] px-4 py-3 text-left transition-colors hover:border-cyan-500/35 hover:bg-cyan-500/8"
+                      >
+                        <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-cyan-500/12 text-[11px] font-semibold text-cyan-100">
+                          {index + 1}
+                        </span>
+                        <span className="text-[13px] leading-6 text-slate-200 whitespace-normal break-words">{example}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : null}
             <div
               className={`relative overflow-hidden border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))] shadow-[0_24px_60px_rgba(0,0,0,0.48),inset_0_1px_0_rgba(255,255,255,0.05)] transition-all duration-200 ${
                 agentInputFocused || agentInput.trim()
@@ -7819,6 +8483,46 @@ const createConnectedImg2ImgBranch = useCallback(
                   agentInputFocused || agentInput.trim() ? "mt-4 max-h-32 opacity-100" : "mt-0 max-h-0 overflow-hidden opacity-0"
                 }`}
               >
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const shouldClose = activeComposerActionId === "script" || showScriptExamples;
+                      setActiveComposerActionId((prev) => (prev === "script" ? "" : "script"));
+                      setShowCanvasExamples(false);
+                      setShowScriptExamples(!shouldClose);
+                      setAgentInputFocused(true);
+                    }}
+                    className={`inline-flex items-center gap-2 rounded-full border px-3.5 py-2 text-[12px] transition-all ${
+                      activeComposerActionId === "script" || showScriptExamples
+                        ? "border-amber-500/55 bg-amber-500/10 text-amber-100 shadow-[0_8px_20px_rgba(245,158,11,0.12)]"
+                        : "border-slate-800/90 bg-white/[0.03] text-slate-300 hover:bg-white/[0.05]"
+                    }`}
+                  >
+                    <Sparkles className="h-3.5 w-3.5" />
+                    生成脚本
+                  </button>
+                </div>
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const shouldClose = activeComposerActionId === "canvas" || showCanvasExamples;
+                      setActiveComposerActionId((prev) => (prev === "canvas" ? "" : "canvas"));
+                      setShowScriptExamples(false);
+                      setShowCanvasExamples(!shouldClose);
+                      setAgentInputFocused(true);
+                    }}
+                    className={`inline-flex items-center gap-2 rounded-full border px-3.5 py-2 text-[12px] transition-all ${
+                      activeComposerActionId === "canvas" || showCanvasExamples
+                        ? "border-cyan-500/55 bg-cyan-500/10 text-cyan-100 shadow-[0_8px_20px_rgba(6,182,212,0.12)]"
+                        : "border-slate-800/90 bg-white/[0.03] text-slate-300 hover:bg-white/[0.05]"
+                    }`}
+                  >
+                    <Layout className="h-3.5 w-3.5" />
+                    画布编排
+                  </button>
+                </div>
                 {composerQuickActions.map((action) => {
                   const Icon = action.icon;
                   const isActive = activeComposerActionId === action.id;

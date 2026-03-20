@@ -1,6 +1,11 @@
 import json, uuid
 from typing import Dict, Any
-from core.config import MODEL_GEMINI
+from core.config import (
+    MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO,
+    MODEL_COMFYUI_QWEN_I2V,
+    MODEL_GEMINI,
+    VIDEO_MODEL_1_0,
+)
 from core.logging import sys_logger
 import re
 
@@ -96,7 +101,7 @@ def normalize_patch(out: Dict[str, Any]) -> Dict[str, Any]:
 
             # ✅ model：只在缺失时补默认（不要覆盖前端选择）
             if ntype in ("processor", "post_processor") and "model" not in data:
-                data["model"] = MODEL_GEMINI
+                data["model"] = MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO if data.get("mode") == "local_text2img" else MODEL_GEMINI
 
             # ---- per type ----
             if ntype == "text_input":
@@ -110,6 +115,7 @@ def normalize_patch(out: Dict[str, Any]) -> Dict[str, Any]:
                 data.pop("templates", None)
             elif ntype == "video_gen":
                 data.setdefault("mode", "img2video")
+                data.setdefault("model", MODEL_COMFYUI_QWEN_I2V if data.get("mode") == "local_img2video" else VIDEO_MODEL_1_0)
                 tpl = _ensure_dict(data.get("templates"))
                 # 不覆盖已有 key，只补缺失
                 for k, v in DEFAULT_TPL_VIDEO.items():

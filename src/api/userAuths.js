@@ -27,6 +27,11 @@ const createApiError = (message, extras = {}) => {
   return error;
 };
 
+const shouldBypassFetchFallback = (e) => {
+  const ctorName = String(e?.constructor?.name || "").trim();
+  return ctorName === "HttpUserNotExistError" || ctorName === "HttpUserTokenExpiredError";
+};
+
 const emitDebug = (options, event) => {
   if (typeof options?.onDebug === "function") options.onDebug(event);
 };
@@ -230,6 +235,12 @@ export async function viewUserAuths(apiFetch, payload = {}, options = {}) {
   const requestPath = "/user/auths";
   const requestUrl = buildUrl(requestPath);
   const requestCandidates = [];
+  const windowFetchCandidate = {
+    source: "window.fetch(member-api)",
+    requestUrl,
+    timeoutMs: 0,
+    caller: (url, init) => fetch(url, init),
+  };
   if (typeof injectedFetch === "function") {
     requestCandidates.push({
       source: "microApp.fetch(member-api)",
@@ -238,6 +249,7 @@ export async function viewUserAuths(apiFetch, payload = {}, options = {}) {
       caller: (url, init) => injectedFetch(url, init),
     });
   }
+  requestCandidates.push(windowFetchCandidate);
   if (typeof apiFetch === "function" && apiFetch !== injectedFetch) {
     requestCandidates.push({
       source: "apiFetch(member-api-fallback)",
@@ -246,12 +258,6 @@ export async function viewUserAuths(apiFetch, payload = {}, options = {}) {
       caller: (url, init) => apiFetch(url, { ...init, skipAuth: true }),
     });
   }
-  requestCandidates.push({
-    source: "window.fetch(member-api)",
-    requestUrl,
-    timeoutMs: 0,
-    caller: (url, init) => fetch(url, init),
-  });
 
   console.info("[userAuths] request:start", {
     path: requestPath,
@@ -294,6 +300,7 @@ export async function viewUserAuths(apiFetch, payload = {}, options = {}) {
       break;
     } catch (error) {
       if (options.signal?.aborted) throw error;
+      if (shouldBypassFetchFallback(error)) throw error;
       lastError = error;
       console.warn("[userAuths] request:fallback", {
         source: candidate.source,
