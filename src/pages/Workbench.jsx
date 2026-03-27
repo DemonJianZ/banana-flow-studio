@@ -90,6 +90,7 @@ import {
   aiChatAnchor,
   aiChatStream,
   AI_CHAT_ANCHOR_OPERATE_ENUM_1,
+  AI_CHAT_PART_ENUM_6,
   AI_CHAT_PART_ENUM_203,
   AI_CHAT_PART_ENUM_204,
   AI_CHAT_PART_ENUM_207,
@@ -107,6 +108,8 @@ import { viewUserAuths } from "../api/userAuths";
 import { detectIntent } from "../agent/router";
 import { detectPreferenceSuggestions } from "../agent/preferenceSuggestion";
 import { buildHitlFeedbackRows } from "../agent/hitlFeedbackHistory";
+import { AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2 } from "../config";
+import { findAIChatModelIdByKeywords } from "../lib/aiChatModelResolver";
 
 const PreferencesPanel = React.lazy(() => import("../components/agent-canvas/PreferencesPanel"));
 
@@ -498,8 +501,10 @@ const formatAIChatErrorMessage = (error) => {
 };
 
 const IMAGE_URL_PATTERN = /(https?:\/\/[^\s"'<>]+?\.(?:png|jpe?g|webp|gif|bmp|svg)(?:\?[^\s"'<>]*)?)/i;
+const VIDEO_URL_PATTERN = /(https?:\/\/[^\s"'<>]+?\.(?:mp4|webm|mov|m4v|avi|mkv|m3u8)(?:\?[^\s"'<>]*)?)/i;
 const URL_PATTERN = /(https?:\/\/[^\s"'<>]+)/i;
 const RELATIVE_IMAGE_PATH_PATTERN = /(\/[^\s"'<>]+?\.(?:png|jpe?g|webp|gif|bmp|svg)(?:\?[^\s"'<>]*)?)/i;
+const RELATIVE_VIDEO_PATH_PATTERN = /(\/[^\s"'<>]+?\.(?:mp4|webm|mov|m4v|avi|mkv|m3u8)(?:\?[^\s"'<>]*)?)/i;
 const MARKDOWN_IMAGE_PATTERN = /!\[[^\]]*?\]\(([^)]+)\)/i;
 
 const isLikelyImageUrl = (value) => {
@@ -579,6 +584,85 @@ const pickFirstImageUrl = (payload) => {
   return "";
 };
 
+const isLikelyVideoUrl = (value) => {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  if (text.startsWith("data:video/")) return true;
+  if (VIDEO_URL_PATTERN.test(text)) return true;
+  if (text.startsWith("/") && RELATIVE_VIDEO_PATH_PATTERN.test(text)) return true;
+  if ((text.startsWith("http://") || text.startsWith("https://")) && /(video|mp4|webm|m3u8|play)/i.test(text)) return true;
+  return false;
+};
+
+const pickFirstVideoUrl = (payload) => {
+  if (!payload) return "";
+  if (typeof payload === "string") {
+    const text = payload.trim();
+    if (!text) return "";
+    if (isLikelyVideoUrl(text)) return text;
+    if ((text.startsWith("{") && text.endsWith("}")) || (text.startsWith("[") && text.endsWith("]"))) {
+      try {
+        const parsed = JSON.parse(text);
+        const nested = pickFirstVideoUrl(parsed);
+        if (nested) return nested;
+      } catch {
+        // ignore invalid JSON string
+      }
+    }
+    const matched = text.match(VIDEO_URL_PATTERN) || text.match(URL_PATTERN);
+    return isLikelyVideoUrl(matched?.[1] || "") ? matched[1] : "";
+  }
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const found = pickFirstVideoUrl(item);
+      if (found) return found;
+    }
+    return "";
+  }
+  if (typeof payload !== "object") return "";
+
+  const directKeys = [
+    "video",
+    "video_url",
+    "videoUrl",
+    "video_uri",
+    "videoUri",
+    "video_path",
+    "videoPath",
+    "output_video",
+    "outputVideo",
+    "play_url",
+    "playUrl",
+    "url",
+    "uri",
+    "src",
+    "path",
+    "file_url",
+    "download_url",
+    "cdn_url",
+    "oss_url",
+    "origin_url",
+    "result",
+    "output",
+  ];
+  for (const key of directKeys) {
+    const found = pickFirstVideoUrl(payload[key]);
+    if (found) return found;
+  }
+
+  const listKeys = ["videos", "video_list", "video_urls", "outputs", "results", "attachments", "files", "data", "list", "items"];
+  for (const key of listKeys) {
+    const found = pickFirstVideoUrl(payload[key]);
+    if (found) return found;
+  }
+
+  for (const value of Object.values(payload)) {
+    const found = pickFirstVideoUrl(value);
+    if (found) return found;
+  }
+  return "";
+};
+
 const summarizeAIChatResponse = (resp) => {
   try {
     const raw = JSON.stringify(resp || {});
@@ -631,6 +715,9 @@ const DEFAULT_VIDEO_MODELS = [
 
 const VIDEO_MODEL_1_0 = "Doubao-Seedance-1.0-pro";
 const VIDEO_MODEL_1_5 = "Doubao-Seedance-1.5-pro";
+const VOLC_VIDEO_HD_TEMPLATE_ENUM_1 = 1;
+const VOLC_VIDEO_HD_TEMPLATE_ENUM_2 = 2;
+const DEFAULT_VIDEO_HD_MODEL_ID = "1";
 const DEFAULT_IMAGE_MODEL_ID = DEFAULT_AI_MODELS[0].id;
 const DEFAULT_VIDEO_MODEL_ID = DEFAULT_VIDEO_MODELS[0].id;
 
@@ -768,6 +855,7 @@ const getDefaultVideoModelId = (options) => {
 const WORKBENCH_AI_CHAT_MODULE_ENUM = "3";
 
 const resolveWorkbenchAIChatPartEnum = ({ mode }) => {
+  if (mode === "video_upscale") return AI_CHAT_PART_ENUM_6;
   if (mode === "img2video") return AI_CHAT_PART_ENUM_204;
   if (mode === "feature_extract") return AI_CHAT_PART_ENUM_207;
   if (mode === "workflow_swap") return AI_CHAT_PART_ENUM_209;
@@ -1013,8 +1101,8 @@ const TOOL_CARDS = {
   },
   video_upscale: {
     id: "video_upscale",
-    name: "超分辨率视频",
-    short: "视频超分",
+    name: "视频超清",
+    short: "视频超清",
     icon: TrendingUp,
     desc: "视频清晰度增强（自动按 3 秒切片）",
     scenario: "低清视频修复",
@@ -1072,6 +1160,15 @@ const FEATURE_EXTRACT_PRESET_PROMPTS = {
   outfit: "提取画面中的服装与首饰，保留材质与纹理细节，弱化人物面部与背景，结果清晰自然。",
 };
 
+const THREE_VIEW_PROMPT =
+  "A character turnaround sheet on a pure white background, arranged horizontally from left to right: close-up portrait of the face, left side full-body view, front full-body view, back full-body view. Keep the subject's original appearance, hairstyle, outfit, proportions, and design details exactly consistent with the input image. Full-body shots for the side, front, and back views. The face close-up should clearly show the character's facial features and expression. No extra characters, no chibi figure, no additional objects, clean white background, character design sheet style.";
+
+const THREE_VIEW_DEFAULT_TEMPLATES = {
+  size: "1K",
+  aspect_ratio: "16:9",
+  note: "",
+};
+
 const MULTI_ANGLE_VARIANTS = [
   { key: "close_up", label: "特写", prompt: "Turn the camera to a close-up.", seed: "304838848282290", filename_prefix: "ComfyUI-close_up" },
   { key: "wide_shot", label: "广角", prompt: "Turn the camera to a wide-angle lens.", seed: "171478573572619", filename_prefix: "ComfyUI-wide_shot" },
@@ -1107,10 +1204,15 @@ const getProcessorModeDefaults = (mode) => {
     return { mode, prompt: "", templates: {} };
   }
   if (mode === "video_upscale") {
-    return { mode, prompt: "", templates: { segment_seconds: 3, output_resolution: 1440, workflow_batch_size: 1 } };
+    return { mode, prompt: "视频画质增强", model: DEFAULT_VIDEO_HD_MODEL_ID, templates: { template_enum: VOLC_VIDEO_HD_TEMPLATE_ENUM_1 } };
   }
   return { mode, prompt: "", templates: {} };
 };
+
+const VIDEO_HD_TEMPLATE_OPTIONS = [
+  { label: "2K", value: VOLC_VIDEO_HD_TEMPLATE_ENUM_1 },
+  { label: "4K", value: VOLC_VIDEO_HD_TEMPLATE_ENUM_2 },
+];
 
 const PROMPT_TEMPLATES = {
   bg_replace: {
@@ -1153,12 +1255,6 @@ const ASPECT_RATIOS = [
   { label: "9:16", w: 22, h: 40 },
 ];
 
-const VIDEO_UPSCALE_RESOLUTION_OPTIONS = [
-  { label: "1K", value: 1080 },
-  { label: "2K", value: 1440 },
-  { label: "4K", value: 2160 },
-];
-
 const extractApiError = (data) => {
   const d = data?.detail ?? data?.message ?? data;
   if (typeof d === "string") return d;
@@ -1170,7 +1266,8 @@ const extractApiError = (data) => {
 const isVideoContent = (url) => {
   if (!url) return false;
   if (url.startsWith("data:video")) return true;
-  if (url.includes(".mp4") || url.includes(".webm")) return true;
+  if (/\.(mp4|webm|mov|m4v|avi|mkv|m3u8)(?:$|\?)/i.test(url)) return true;
+  if (/\/video\b|output_video|play_url|m3u8|mime=video/i.test(url)) return true;
   return false;
 };
 
@@ -1536,6 +1633,7 @@ const PropertyPanel = ({
   const promptModes = ["text2img", "local_text2img", "multi_image_generate", "feature_extract", "local_img2video"];
   const isSkillProcessor = isProcessor && currentMode.category === "skill";
   const isMultiAnglesSkill = node?.data?.mode === "multi_angleshots";
+  const isVideoUpscaleSkill = node?.data?.mode === "video_upscale";
   const isLocalText2Img = node?.data?.mode === "local_text2img";
   const isLocalImg2Video = node?.data?.mode === "local_img2video";
   const isRemoteImg2Video = isVideoGen && !isLocalImg2Video && node?.data?.mode === "img2video";
@@ -1939,12 +2037,43 @@ const PropertyPanel = ({
             className="flex items-center justify-between text-xs text-slate-400 bg-slate-800/50 p-2 rounded hover:bg-slate-800 mt-2"
             type="button"
           >
-            <span>{isSkillProcessor ? "高级设置 (尺寸/比例/数量)" : "高级设置 (模型/尺寸/风格)"}</span>
+            <span>{isVideoUpscaleSkill ? "高级设置 (输出规格)" : (isSkillProcessor ? "高级设置 (尺寸/比例/数量)" : "高级设置 (模型/尺寸/风格)")}</span>
             {showAdvanced ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
           </button>
 
           {showAdvanced && (
             <div className="space-y-4 animate-in slide-in-from-top-2 duration-200">
+              {isProcessor && isVideoUpscaleSkill && (
+                <div className="space-y-2">
+                  <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">输出规格</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {VIDEO_HD_TEMPLATE_OPTIONS.map((item) => {
+                      const currentValue = parseInt(String(node.data.templates?.template_enum ?? VOLC_VIDEO_HD_TEMPLATE_ENUM_1), 10);
+                      const isSelected = currentValue === item.value;
+                      return (
+                        <button
+                          key={item.value}
+                          type="button"
+                          onClick={() => updateData(node.id, {
+                            templates: {
+                              ...(node.data.templates || {}),
+                              template_enum: item.value,
+                            },
+                          })}
+                          className={`px-2 py-1.5 rounded-md text-[10px] border transition-all ${
+                            isSelected
+                              ? "bg-rose-600 border-rose-500 text-white"
+                              : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-600"
+                          }`}
+                        >
+                          {item.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {((isProcessor && !isSkillProcessor && !isLocalText2Img) || isPostProcessor) && (
             <div className="space-y-2">
               <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center justify-between">
@@ -2084,69 +2213,6 @@ const PropertyPanel = ({
     </div>
   </div>
 )}
-
-          {isProcessor && node.data.mode === "video_upscale" && (
-            <div className="space-y-3">
-              <div className="space-y-2">
-                <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">输出分辨率</div>
-                <div className="grid grid-cols-3 gap-2">
-                  {VIDEO_UPSCALE_RESOLUTION_OPTIONS.map((item) => {
-                    const currentResolution = parseInt(String(node.data.templates?.output_resolution ?? 1440), 10) || 1440;
-                    const isSel = currentResolution === item.value;
-                    return (
-                      <button
-                        key={item.value}
-                        type="button"
-                        onClick={() => updateData(node.id, { templates: { ...(node.data.templates || {}), output_resolution: item.value } })}
-                        className={`px-2 py-1.5 rounded-md text-[10px] border transition-all ${
-                          isSel
-                            ? "bg-rose-600 border-rose-500 text-white"
-                            : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-600"
-                        }`}
-                      >
-                        {item.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-              <div className="space-y-2">
-                <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">切片时长 (秒)</div>
-                <input
-                  type="number"
-                  min={1}
-                  max={10}
-                  step={1}
-                  value={parseInt(String(node.data.templates?.segment_seconds ?? 3), 10)}
-                  onChange={(e) => {
-                    const v = parseInt(e.target.value, 10);
-                    const next = Math.min(10, Math.max(1, isNaN(v) ? 3 : v));
-                    updateData(node.id, { templates: { ...(node.data.templates || {}), segment_seconds: next } });
-                  }}
-                  className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-200 outline-none"
-                />
-              </div>
-              <div className="space-y-2">
-                <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Batch Size (工作流)</div>
-                <input
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={parseInt(String(node.data.templates?.workflow_batch_size ?? 1), 10)}
-                  onChange={(e) => {
-                    const v = parseInt(e.target.value, 10);
-                    const next = Math.max(1, isNaN(v) ? 1 : v);
-                    updateData(node.id, { templates: { ...(node.data.templates || {}), workflow_batch_size: next } });
-                  }}
-                  className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-200 outline-none"
-                />
-              </div>
-              <div className="text-[10px] text-slate-500">
-                1K/2K/4K 分别写入工作流参数 `resolution` 的 1080/1440/2160；Batch Size 会写入 `batch_size`。上传到 ComfyUI 前会先按切片时长分段处理。
-              </div>
-            </div>
-          )}
-
 
           {/* Size & Ratio */}
           {isProcessor &&
@@ -2372,11 +2438,16 @@ const NodeComponent = ({
   activeArtifact,
   onIterateImg2Img,
   onRunCompactRemoveWatermark,
+  onRunCompactThreeView,
+  onRunCompactVideoUpscale,
 }) => {
   const [showCopied, setShowCopied] = useState(false);
   const [compactActiveIndex, setCompactActiveIndex] = useState(0);
   const [showCompactInputActions, setShowCompactInputActions] = useState(false);
+  const [showCompactVideoUpscaleOptions, setShowCompactVideoUpscaleOptions] = useState(false);
   const [compactRemovePending, setCompactRemovePending] = useState(false);
+  const [compactThreeViewPending, setCompactThreeViewPending] = useState(false);
+  const [compactVideoUpscalePending, setCompactVideoUpscalePending] = useState(false);
   const nodeRootRef = useRef(null);
 
   const handleFileUpload = (e) => {
@@ -2432,6 +2503,8 @@ const NodeComponent = ({
   const isCompactInput = isInput && !!node.data.compact;
   const compactImages = isCompactInput ? (node.data.images || []) : EMPTY_LIST;
   const compactActiveImage = compactImages[compactActiveIndex] || compactImages[0] || "";
+  const compactActiveIsVideo = isVideoContent(compactActiveImage);
+  const hasCompactThreeViewResult = isCompactInput && !!String(node.data.compactThreeViewSourceImage || "").trim();
 
   useEffect(() => {
     setCompactActiveIndex((prev) => {
@@ -2442,8 +2515,15 @@ const NodeComponent = ({
 
   useEffect(() => {
     setShowCompactInputActions(false);
+    setShowCompactVideoUpscaleOptions(false);
     setCompactActiveIndex(0);
   }, [node.id]);
+
+  useEffect(() => {
+    if (!showCompactInputActions) {
+      setShowCompactVideoUpscaleOptions(false);
+    }
+  }, [showCompactInputActions]);
 
   useEffect(() => {
     if (!showCompactInputActions) return undefined;
@@ -2459,6 +2539,51 @@ const NodeComponent = ({
     };
   }, [showCompactInputActions]);
 
+  const handleCompactThreeViewClick = async () => {
+    if (compactRemovePending || compactThreeViewPending || compactVideoUpscalePending) return;
+    try {
+      setCompactThreeViewPending(true);
+      await onRunCompactThreeView?.(node.id, compactActiveIndex);
+      setShowCompactInputActions(false);
+    } catch (error) {
+      console.error("[Workbench] three_view_direct:error", error);
+    } finally {
+      setCompactThreeViewPending(false);
+    }
+  };
+
+  const handleCompactRemoveClick = async () => {
+    if (compactRemovePending || compactThreeViewPending || compactVideoUpscalePending) return;
+    try {
+      setCompactRemovePending(true);
+      await onRunCompactRemoveWatermark?.(node.id, compactActiveIndex);
+      setShowCompactInputActions(false);
+    } catch (error) {
+      console.error("[Workbench] remove_watermark_direct:error", error);
+    } finally {
+      setCompactRemovePending(false);
+    }
+  };
+
+  const handleCompactVideoUpscaleClick = async () => {
+    if (compactRemovePending || compactThreeViewPending || compactVideoUpscalePending) return;
+    setShowCompactVideoUpscaleOptions((prev) => !prev);
+  };
+
+  const handleCompactVideoUpscaleOptionClick = async (templateEnum) => {
+    if (compactRemovePending || compactThreeViewPending || compactVideoUpscalePending) return;
+    try {
+      setCompactVideoUpscalePending(true);
+      await onRunCompactVideoUpscale?.(node.id, compactActiveIndex, templateEnum);
+      setShowCompactVideoUpscaleOptions(false);
+      setShowCompactInputActions(false);
+    } catch (error) {
+      console.error("[Workbench] video_upscale_direct:error", error);
+    } finally {
+      setCompactVideoUpscalePending(false);
+    }
+  };
+
   let statusColor =
     "border-slate-800/85 shadow-[0_24px_56px_rgba(2,6,23,0.42)] hover:border-slate-700/90";
   if (node.data.status === "error") {
@@ -2473,11 +2598,11 @@ const NodeComponent = ({
   }
 
   let title = "Node";
-  if (isInput) title = isCompactInput ? (node.data.title || "图片编辑区") : `图片/视频上传 (${node.data.images?.length || 0})`;
-  if (isOutput) title = node.data.angleLabel ? `${node.data.angleLabel} 输出 (${node.data.images?.length || 0})` : `输出 (${node.data.images?.length || 0})`;
-  if (isProcessor) title = TOOL_CARDS[node.data.mode]?.name || "图片生成";
-  if (isPostProcessor) title = TOOL_CARDS[node.data.mode]?.name || "后期增强";
-  if (isVideoGen) title = TOOL_CARDS[node.data.mode]?.name || "视频生成";
+  if (isInput) title = node.data.title || (isCompactInput ? "图片编辑区" : `图片/视频上传 (${node.data.images?.length || 0})`);
+  if (isOutput) title = node.data.title || (node.data.angleLabel ? `${node.data.angleLabel} 输出 (${node.data.images?.length || 0})` : `输出 (${node.data.images?.length || 0})`);
+  if (isProcessor) title = node.data.title || TOOL_CARDS[node.data.mode]?.name || "图片生成";
+  if (isPostProcessor) title = node.data.title || TOOL_CARDS[node.data.mode]?.name || "后期增强";
+  if (isVideoGen) title = node.data.title || TOOL_CARDS[node.data.mode]?.name || "视频生成";
   if (node.type === NODE_TYPES.TEXT_INPUT) title = "提示词";
 
   const getThemeColor = () => {
@@ -2666,11 +2791,6 @@ const NodeComponent = ({
         {/* AI nodes */}
         {isAI && (
           <div className="space-y-2">
-            {isProcessor && node.data.mode === "video_upscale" && (
-              <div className="rounded-full border border-amber-900/65 bg-amber-950/55 px-2.5 py-1 text-[10px] text-amber-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
-                提醒：上传480P视频
-              </div>
-            )}
             {node.data.status === "loading" && (
               <div className="space-y-1.5 rounded-[22px] border border-slate-800/80 bg-slate-900/42 px-3 py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
                 <div className="flex justify-between text-[10px] text-slate-300">
@@ -2754,13 +2874,25 @@ const NodeComponent = ({
                   }}
                 >
                   {compactActiveImage ? (
-                    <img
-                      src={compactActiveImage}
-                      className={`h-full w-full object-contain transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
-                        showCompactInputActions ? "scale-[1.015]" : "scale-100"
-                      }`}
-                      alt=""
-                    />
+                    compactActiveIsVideo ? (
+                      <video
+                        src={compactActiveImage}
+                        className={`h-full w-full object-contain transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+                          showCompactInputActions ? "scale-[1.015]" : "scale-100"
+                        }`}
+                        muted
+                        loop
+                        playsInline
+                      />
+                    ) : (
+                      <img
+                        src={compactActiveImage}
+                        className={`h-full w-full object-contain transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+                          showCompactInputActions ? "scale-[1.015]" : "scale-100"
+                        }`}
+                        alt=""
+                      />
+                    )
                   ) : null}
                   {compactRemovePending ? (
                     <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
@@ -2774,6 +2906,22 @@ const NodeComponent = ({
                             <span className="text-[12px] font-medium tracking-[0.04em] text-slate-50">正在去除水印</span>
                           </div>
                           <div className="mt-1 text-[10px] text-slate-200/80">请稍候，图片正在轻量修复中</div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+                  {compactVideoUpscalePending ? (
+                    <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
+                      <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(15,23,42,0.24),rgba(2,6,23,0.62))] backdrop-blur-[2px]" />
+                      <div className="absolute inset-y-0 left-1/2 w-[46%] -translate-x-1/2 bg-[linear-gradient(90deg,rgba(255,255,255,0),rgba(251,113,133,0.16),rgba(244,63,94,0.22),rgba(255,255,255,0))] opacity-85 blur-xl animate-pulse" />
+                      <div className="absolute inset-x-0 top-[22%] h-px bg-[linear-gradient(90deg,rgba(244,63,94,0),rgba(251,113,133,0.7),rgba(244,63,94,0))] shadow-[0_0_18px_rgba(244,63,94,0.3)] animate-pulse" />
+                      <div className="absolute inset-0 flex items-center justify-center">
+                        <div className="rounded-[20px] border border-white/14 bg-[linear-gradient(145deg,rgba(255,255,255,0.18),rgba(255,255,255,0.06))] px-4 py-3 text-center text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_16px_40px_rgba(2,6,23,0.24)] backdrop-blur-xl">
+                          <div className="flex items-center justify-center gap-2">
+                            <Loader2 className="h-4 w-4 animate-spin text-rose-100" />
+                            <span className="text-[12px] font-medium tracking-[0.04em] text-slate-50">正在视频超清</span>
+                          </div>
+                          <div className="mt-1 text-[10px] text-slate-200/80">请稍候，正在直接生成清晰版本</div>
                         </div>
                       </div>
                     </div>
@@ -2806,25 +2954,54 @@ const NodeComponent = ({
                   }`}
                   onMouseDown={(e) => e.stopPropagation()}
                 >
-                  <button
-                    type="button"
-                    disabled={compactRemovePending}
-                    className="rounded-full border border-white/18 bg-[linear-gradient(135deg,rgba(255,255,255,0.16),rgba(255,255,255,0.07))] px-4 py-2 text-[11px] font-medium text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_14px_28px_rgba(2,6,23,0.22)] backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-cyan-300/35 hover:bg-[linear-gradient(135deg,rgba(255,255,255,0.22),rgba(125,211,252,0.12))] hover:text-cyan-50 disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65 disabled:brightness-100"
-                    onClick={async () => {
-                      if (compactRemovePending) return;
-                      try {
-                        setCompactRemovePending(true);
-                        await onRunCompactRemoveWatermark?.(node.id, compactActiveIndex);
-                        setShowCompactInputActions(false);
-                      } catch (error) {
-                        console.error("[Workbench] remove_watermark_direct:error", error);
-                      } finally {
-                        setCompactRemovePending(false);
-                      }
-                    }}
-                  >
-                    {compactRemovePending ? "处理中..." : "去水印"}
-                  </button>
+                  {compactActiveIsVideo ? (
+                    <div className="w-full space-y-2">
+                      <button
+                        type="button"
+                        disabled={compactRemovePending || compactThreeViewPending || compactVideoUpscalePending}
+                        className="flex w-full items-center justify-center gap-1.5 rounded-full border border-rose-300/20 bg-[linear-gradient(135deg,rgba(244,63,94,0.2),rgba(190,24,93,0.16))] px-4 py-2 text-[11px] font-medium text-rose-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_14px_28px_rgba(76,5,25,0.22)] backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-rose-300/35 hover:bg-[linear-gradient(135deg,rgba(251,113,133,0.24),rgba(244,63,94,0.18))] disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65 disabled:brightness-100"
+                        onClick={handleCompactVideoUpscaleClick}
+                      >
+                        {compactVideoUpscalePending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <TrendingUp className="h-3.5 w-3.5" />}
+                        {compactVideoUpscalePending ? "处理中..." : "视频超清"}
+                      </button>
+                      {showCompactVideoUpscaleOptions ? (
+                        <div className="grid grid-cols-2 gap-2">
+                          {VIDEO_HD_TEMPLATE_OPTIONS.map((item) => (
+                            <button
+                              key={item.value}
+                              type="button"
+                              disabled={compactVideoUpscalePending}
+                              className="rounded-[14px] border border-slate-700/80 bg-slate-950/72 px-3 py-2 text-[11px] font-medium text-slate-100 transition hover:-translate-y-0.5 hover:border-rose-400/45 hover:bg-rose-500/10 disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65"
+                              onClick={() => handleCompactVideoUpscaleOptionClick(item.value)}
+                            >
+                              {item.label}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        disabled={compactRemovePending || compactThreeViewPending || compactVideoUpscalePending}
+                        className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-full border border-cyan-300/20 bg-[linear-gradient(135deg,rgba(34,211,238,0.18),rgba(14,116,144,0.16))] px-4 py-2 text-[11px] font-medium text-cyan-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_14px_28px_rgba(8,47,73,0.22)] backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-cyan-300/35 hover:bg-[linear-gradient(135deg,rgba(34,211,238,0.24),rgba(56,189,248,0.18))] disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65 disabled:brightness-100"
+                        onClick={handleCompactThreeViewClick}
+                      >
+                        {compactThreeViewPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Layout className="h-3.5 w-3.5" />}
+                        {compactThreeViewPending ? "生成中..." : hasCompactThreeViewResult ? "重试三视图" : "三视图"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={compactRemovePending || compactThreeViewPending || compactVideoUpscalePending}
+                        className="rounded-full border border-white/18 bg-[linear-gradient(135deg,rgba(255,255,255,0.16),rgba(255,255,255,0.07))] px-4 py-2 text-[11px] font-medium text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_14px_28px_rgba(2,6,23,0.22)] backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-cyan-300/35 hover:bg-[linear-gradient(135deg,rgba(255,255,255,0.22),rgba(125,211,252,0.12))] hover:text-cyan-50 disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65 disabled:brightness-100"
+                        onClick={handleCompactRemoveClick}
+                      >
+                        {compactRemovePending ? "处理中..." : "去水印"}
+                      </button>
+                    </>
+                  )}
                 </div>
               ) : null}
             </div>
@@ -2849,7 +3026,11 @@ const NodeComponent = ({
                         setShowCompactInputActions(false);
                       }}
                     >
-                      <img src={img} className="h-full w-full object-cover" alt="" />
+                      {isVideoContent(img) ? (
+                        <video src={img} className="h-full w-full object-cover" muted loop playsInline />
+                      ) : (
+                        <img src={img} className="h-full w-full object-cover" alt="" />
+                      )}
                     </button>
                   );
                 })}
@@ -3093,6 +3274,26 @@ const Workbench = () => {
   const [savingFeedbackTargetId, setSavingFeedbackTargetId] = useState("");
   const [feedbackDialog, setFeedbackDialog] = useState(null);
   const [feedbackReasonChoice, setFeedbackReasonChoice] = useState(HITL_FEEDBACK_REASON_OPTIONS[0]);
+
+  const navigateToMemberLogin = useCallback(
+    (loginUrl = "") => {
+      try {
+        const microLogout = window.microApp?.getData?.()?.logout;
+        if (typeof microLogout === "function") {
+          microLogout();
+          return;
+        }
+      } catch (error) {
+        console.warn("[memberInfo] microApp logout failed", error);
+      }
+
+      const targetUrl = String(loginUrl || "").trim();
+      if (targetUrl) {
+        window.open(targetUrl, "_blank", "noopener,noreferrer");
+      }
+    },
+    [],
+  );
   const [feedbackReasonNote, setFeedbackReasonNote] = useState("");
   const [agentResultCards, setAgentResultCards] = useState([]);
   const [selectedAgentCardIds, setSelectedAgentCardIds] = useState(new Set());
@@ -3110,6 +3311,7 @@ const Workbench = () => {
     modelsLang: { status: "idle", message: "", detail: "", updatedAt: 0 },
     modelsImage: { status: "idle", message: "", detail: "", updatedAt: 0 },
     modelsVideo: { status: "idle", message: "", detail: "", updatedAt: 0 },
+    modelsVideoEnhance: { status: "idle", message: "", detail: "", updatedAt: 0 },
     aiChatAnchor: { status: "idle", message: "", detail: "", updatedAt: 0 },
     aiChatLang: { status: "idle", message: "", detail: "", updatedAt: 0 },
     aiChatImage: { status: "idle", message: "", detail: "", updatedAt: 0 },
@@ -3189,6 +3391,11 @@ const Workbench = () => {
   );
   const defaultLanguageModelId = useMemo(() => getDefaultLanguageModelId(languageModelOptions), [languageModelOptions]);
   const defaultImageModelId = useMemo(() => getDefaultImageModelId(imageModelRecords), [imageModelRecords]);
+  const threeViewImageModelId = useMemo(() => {
+    const preferred = String(AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2 || "").trim();
+    if (preferred) return preferred;
+    return findAIChatModelIdByKeywords(imageModelRecords) || defaultImageModelId;
+  }, [defaultImageModelId, imageModelRecords]);
   const defaultVideoModelId = useMemo(() => getDefaultVideoModelId(videoModelOptions), [videoModelOptions]);
   const updateApiDebugStatus = useCallback((key, next) => {
     if (key === "aiChatAnchor") {
@@ -3378,12 +3585,12 @@ const Workbench = () => {
           setMemberInfo(null);
           setMemberInfoLoading(false);
           if (isLoginRequired && ssoUrl) {
-            window.open(ssoUrl, "_blank", "noopener,noreferrer")
+            navigateToMemberLogin(ssoUrl);
             setRunToast({
               type: "error",
               message: "会员服务未登录，请先完成 SSO 登录。",
               actionLabel: "前往登录",
-              onAction: () => window.open(ssoUrl, "_blank", "noopener,noreferrer"),
+              onAction: () => navigateToMemberLogin(ssoUrl),
             });
           }
           return;
@@ -3407,7 +3614,7 @@ const Workbench = () => {
       if (timerId) window.clearTimeout(timerId);
       if (timeoutId) window.clearTimeout(timeoutId);
     };
-  }, [apiFetch, pushApiDebugDetail, updateApiDebugStatus]);
+  }, [apiFetch, navigateToMemberLogin, pushApiDebugDetail, updateApiDebugStatus]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3551,6 +3758,13 @@ const Workbench = () => {
         DEFAULT_VIDEO_MODELS,
         "modelsVideo",
         "视频",
+      );
+      if (cancelled || controller.signal.aborted) return;
+      await requestModelsWithTimeout(
+        AI_CHAT_PART_ENUM_6,
+        EMPTY_LIST,
+        "modelsVideoEnhance",
+        "视频超清",
       );
       if (cancelled || controller.signal.aborted) return;
 
@@ -4170,9 +4384,10 @@ const handleNodeMouseDown = (e, nid) => {
 
   const getCursor = () => (interactionMode === "panning" || isSpacePressed ? "grab" : interactionMode === "dragging_node" ? "grabbing" : "default");
 
-  const createCompactInputNodeAt = useCallback((point, images) => {
-    const safeImages = Array.isArray(images) ? images.filter(Boolean) : [];
-    if (!safeImages.length) return;
+  const createCompactInputNodeAt = useCallback((point, mediaItems) => {
+    const safeMediaItems = Array.isArray(mediaItems) ? mediaItems.filter(Boolean) : [];
+    if (!safeMediaItems.length) return;
+    const hasVideos = safeMediaItems.some((item) => isVideoContent(item));
 
     pushHistory();
     const nodeId = generateId();
@@ -4182,9 +4397,9 @@ const handleNodeMouseDown = (e, nid) => {
       x: point.x - 118,
       y: point.y - 88,
       data: {
-        images: safeImages,
+        images: safeMediaItems,
         compact: true,
-        title: "图片编辑区",
+        title: hasVideos ? "图片/视频编辑区" : "图片编辑区",
       },
     };
 
@@ -4195,15 +4410,23 @@ const handleNodeMouseDown = (e, nid) => {
   }, [pushHistory]);
 
   const handleCanvasDragEnter = useCallback((e) => {
-    const hasImages = Array.from(e.dataTransfer?.items || []).some((item) => item.kind === "file" && String(item.type || "").startsWith("image/"));
-    if (!hasImages) return;
+    const hasMediaFiles = Array.from(e.dataTransfer?.items || []).some(
+      (item) =>
+        item.kind === "file" &&
+        (String(item.type || "").startsWith("image/") || String(item.type || "").startsWith("video/")),
+    );
+    if (!hasMediaFiles) return;
     canvasDragDepthRef.current += 1;
     setCanvasDropActive(true);
   }, []);
 
   const handleCanvasDragOver = useCallback((e) => {
-    const hasImages = Array.from(e.dataTransfer?.items || []).some((item) => item.kind === "file" && String(item.type || "").startsWith("image/"));
-    if (!hasImages) return;
+    const hasMediaFiles = Array.from(e.dataTransfer?.items || []).some(
+      (item) =>
+        item.kind === "file" &&
+        (String(item.type || "").startsWith("image/") || String(item.type || "").startsWith("video/")),
+    );
+    if (!hasMediaFiles) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "copy";
     if (!canvasDropActive) setCanvasDropActive(true);
@@ -4217,15 +4440,17 @@ const handleNodeMouseDown = (e, nid) => {
   }, []);
 
   const handleCanvasDrop = useCallback(async (e) => {
-    const files = Array.from(e.dataTransfer?.files || []).filter((file) => String(file.type || "").startsWith("image/"));
+    const files = Array.from(e.dataTransfer?.files || []).filter(
+      (file) => String(file.type || "").startsWith("image/") || String(file.type || "").startsWith("video/"),
+    );
     canvasDragDepthRef.current = 0;
     setCanvasDropActive(false);
     if (!files.length) return;
 
     e.preventDefault();
     const point = screenToCanvas(e.clientX, e.clientY);
-    const droppedImages = await readFilesAsDataUrls(files);
-    createCompactInputNodeAt(point, droppedImages);
+    const droppedMediaItems = await readFilesAsDataUrls(files);
+    createCompactInputNodeAt(point, droppedMediaItems);
   }, [createCompactInputNodeAt, screenToCanvas]);
 
   const addNode = (t, modePreset = null) => {
@@ -4325,6 +4550,33 @@ const handleNodeMouseDown = (e, nid) => {
     pushHistory();
     const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 200, data: { images: [] } };
     const n2 = { id: generateId(), type: NODE_TYPES.VIDEO_GEN, x: 500, y: 200, data: { mode: "img2video",model: defaultVideoModelId, prompt: "", templates: { motion: "标准(Standard)", camera: "推近(Zoom In)", duration: 5, resolution: "1080p", ratio: "", note: "" ,generate_audio_new: true,}, batchSize: 1, status: "idle", refImage: null } };
+    const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
+    setNodes([n1, n2, n3]);
+    setConnections([
+      { id: generateId(), from: n1.id, to: n2.id },
+      { id: generateId(), from: n2.id, to: n3.id },
+    ]);
+    setViewport({ x: 0, y: 0, zoom: 1 });
+  };
+
+  const createVideoUpscaleTemplate = () => {
+    pushHistory();
+    const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 200, data: { images: [] } };
+    const n2 = {
+      id: generateId(),
+      type: NODE_TYPES.PROCESSOR,
+      x: 500,
+      y: 200,
+      data: {
+        mode: "video_upscale",
+        prompt: "视频画质增强",
+        templates: { template_enum: VOLC_VIDEO_HD_TEMPLATE_ENUM_1 },
+        batchSize: 1,
+        status: "idle",
+        refImage: null,
+        model: DEFAULT_VIDEO_HD_MODEL_ID,
+      },
+    };
     const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
     setNodes([n1, n2, n3]);
     setConnections([
@@ -4466,77 +4718,176 @@ const handleNodeMouseDown = (e, nid) => {
   );
 
   // ✅ 继续图生图：在“文生图(text2img)”后，自动接：输入 -> 图生图 -> 输出
-const createConnectedImg2ImgBranch = useCallback(
-  (sourceNodeId) => {
-    pushHistory();
+  const createConnectedImg2ImgBranch = useCallback(
+    (sourceNodeId) => {
+      pushHistory();
 
-    const sourceNode = nodesRef.current.find((n) => n.id === sourceNodeId);
-    if (!sourceNode) return;
+      const sourceNode = nodesRef.current.find((n) => n.id === sourceNodeId);
+      if (!sourceNode) return;
 
-    const imgs = sourceNode.data.images || [];
+      const imgs = sourceNode.data.images || [];
 
-    // 优先用你刚刚“点缩略图选中的产物”
-    const picked =
-      activeArtifact?.fromNodeId === sourceNodeId ? activeArtifact.url : (imgs[0] || null);
+      // 优先用你刚刚“点缩略图选中的产物”
+      const picked =
+        activeArtifact?.fromNodeId === sourceNodeId ? activeArtifact.url : (imgs[0] || null);
 
-    if (!picked) return;
+      if (!picked) return;
 
-    const inId = generateId();
-    const procId = generateId();
-    const outId = generateId();
+      const inId = generateId();
+      const procId = generateId();
+      const outId = generateId();
 
-    // 放到源节点右下方，避免重叠
-    const baseX = sourceNode.x + 350;
-    const baseY = sourceNode.y + 240;
+      // 放到源节点右下方，避免重叠
+      const baseX = sourceNode.x + 350;
+      const baseY = sourceNode.y + 240;
 
-    const inputNode = {
-      id: inId,
-      type: NODE_TYPES.INPUT,
-      x: baseX,
-      y: baseY,
-      data: { images: [picked] },
-    };
+      const inputNode = {
+        id: inId,
+        type: NODE_TYPES.INPUT,
+        x: baseX,
+        y: baseY,
+        data: { images: [picked] },
+      };
 
-    const img2imgNode = {
-      id: procId,
-      type: NODE_TYPES.PROCESSOR,
-      x: baseX + 350,
-      y: baseY,
-      data: {
-        mode: "multi_image_generate",
-        prompt: "",
-        templates: { size: "1024x1024", note: "" },
-        batchSize: 1,
-        uploadedImages: [],
+      const img2imgNode = {
+        id: procId,
+        type: NODE_TYPES.PROCESSOR,
+        x: baseX + 350,
+        y: baseY,
+        data: {
+          mode: "multi_image_generate",
+          prompt: "",
+          templates: { size: "1024x1024", note: "" },
+          batchSize: 1,
+          uploadedImages: [],
+          status: "idle",
+          refImage: null,
+          model: defaultImageModelId,
+        },
+      };
+
+      const outputNode = {
+        id: outId,
+        type: NODE_TYPES.OUTPUT,
+        x: baseX + 700,
+        y: baseY,
+        data: { images: [] },
+      };
+
+      setNodes((prev) => [...prev, inputNode, img2imgNode, outputNode]);
+
+      // 连起来：文生图 -> 输入(锁定图) -> 图生图 -> 输出
+      setConnections((prev) => [
+        ...prev,
+        { id: generateId(), from: sourceNodeId, to: inId },
+        { id: generateId(), from: inId, to: procId },
+        { id: generateId(), from: procId, to: outId },
+      ]);
+
+      setSelectedNodeIds(new Set([procId]));
+      setSelectedConnectionIds(new Set());
+    },
+    [pushHistory, activeArtifact, defaultImageModelId],
+  );
+
+  const runCompactVideoUpscale = useCallback(
+    async (sourceNodeId, imageIndex = 0, templateEnum = VOLC_VIDEO_HD_TEMPLATE_ENUM_1) => {
+      const sourceNode = nodesRef.current.find((node) => node.id === sourceNodeId);
+      const sourceImages = Array.isArray(sourceNode?.data?.images) ? sourceNode.data.images : [];
+      const safeIndex = Math.max(0, Math.min(imageIndex, sourceImages.length - 1));
+      const retrySources =
+        sourceNode?.data?.compactVideoUpscaleSources && typeof sourceNode.data.compactVideoUpscaleSources === "object"
+          ? sourceNode.data.compactVideoUpscaleSources
+          : {};
+      const retrySourceVideo = String(retrySources?.[safeIndex] || "").trim();
+      const sourceVideo = retrySourceVideo || sourceImages[safeIndex] || sourceImages[0] || "";
+      if (!sourceVideo || !isVideoContent(sourceVideo)) {
+        throw new Error("缺少可用于视频超清的视频素材");
+      }
+
+      const safeTemplateEnum =
+        parseInt(String(templateEnum ?? VOLC_VIDEO_HD_TEMPLATE_ENUM_1), 10) || VOLC_VIDEO_HD_TEMPLATE_ENUM_1;
+      const authorizationInfo = resolveMemberAuthorizationInfo();
+      const proxyPayload = {
+        authorization: authorizationInfo?.value || "",
+        history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
+        module_enum: WORKBENCH_AI_CHAT_MODULE_ENUM,
+        part_enum: String(resolveWorkbenchAIChatPartEnum({ mode: "video_upscale" })),
+        ai_chat_session_id: aiChatSessionIdRef.current || "",
+        ai_chat_model_id: DEFAULT_VIDEO_HD_MODEL_ID,
+        message: "视频画质增强",
+        template_enum: String(safeTemplateEnum),
+        async: "false",
+        files: [sourceVideo],
+      };
+
+      if (!proxyPayload.authorization) {
+        throw new Error("缺少 member authorization，无法调用后端curl代理");
+      }
+
+      updateApiDebugStatus("aiChatImage", {
+        status: "loading",
+        message: `POST /api/ai_chat_image_via_curl part=${resolveWorkbenchAIChatPartEnum({ mode: "video_upscale" })}`,
+      });
+      pushApiDebugDetail("aiChatImage", {
+        type: "start",
+        path: "/api/ai_chat_image_via_curl",
+        payload: {
+          ...proxyPayload,
+          authorization: `${proxyPayload.authorization.slice(0, 18)}...`,
+          files: ["count=1(video)"],
+        },
+        authorizationSource: authorizationInfo?.source || "none",
+      });
+
+      const proxyData = await submitAIChatImageTask(apiFetch, proxyPayload, {
+        onDebug: (event) => pushApiDebugDetail("aiChatImage", event),
+      });
+      if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
+      if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
+
+      const resultUrl =
+        pickFirstVideoUrl(proxyData?.video_url) ||
+        pickFirstVideoUrl(proxyData?.output_video) ||
+        pickFirstVideoUrl(proxyData?.events) ||
+        pickFirstVideoUrl(proxyData?.text) ||
+        pickFirstVideoUrl(proxyData) ||
+        pickFirstImageUrl(proxyData?.image_url) ||
+        pickFirstImageUrl(proxyData?.events) ||
+        pickFirstImageUrl(proxyData?.text) ||
+        "";
+      const doneErrMsg = String(proxyData?.done_error || "").trim();
+      if (!resultUrl && doneErrMsg) {
+        throw new Error(`AI Chat 返回错误：${doneErrMsg}`);
+      }
+      if (!resultUrl) {
+        const summary = summarizeAIChatResponse(proxyData);
+        throw new Error(`aiChat 视频超清未返回可解析URL${summary ? ` | 响应摘要: ${summary}` : ""}`);
+      }
+
+      pushHistory();
+      const nextImages = [...sourceImages];
+      nextImages[safeIndex] = resultUrl;
+      updateNodeData(sourceNodeId, {
+        images: nextImages,
+        compactVideoUpscaleSources: {
+          ...retrySources,
+          [safeIndex]: retrySourceVideo || sourceVideo,
+        },
+        compactVideoUpscaleLastResultVideo: resultUrl,
+        compactVideoUpscaleLastTemplateEnum: safeTemplateEnum,
         status: "idle",
-        refImage: null,
-        model: defaultImageModelId,
-      },
-    };
-
-    const outputNode = {
-      id: outId,
-      type: NODE_TYPES.OUTPUT,
-      x: baseX + 700,
-      y: baseY,
-      data: { images: [] },
-    };
-
-    setNodes((prev) => [...prev, inputNode, img2imgNode, outputNode]);
-
-    // 连起来：文生图 -> 输入(锁定图) -> 图生图 -> 输出
-    setConnections((prev) => [
-      ...prev,
-      { id: generateId(), from: sourceNodeId, to: inId },
-      { id: generateId(), from: inId, to: procId },
-      { id: generateId(), from: procId, to: outId },
-    ]);
-
-    setSelectedNodeIds(new Set([procId]));
-    setSelectedConnectionIds(new Set());
-  },
-  [pushHistory, activeArtifact, defaultImageModelId]
-);
+        error: "",
+      });
+      updateApiDebugStatus("aiChatImage", {
+        status: "success",
+        message: `part=${resolveWorkbenchAIChatPartEnum({ mode: "video_upscale" })} template=${safeTemplateEnum}`,
+      });
+      setRunToast({ message: `视频超清完成 (${safeTemplateEnum === VOLC_VIDEO_HD_TEMPLATE_ENUM_2 ? "4K" : "2K"})`, type: "info" });
+      setTimeout(() => setRunToast(null), 2200);
+    },
+    [apiFetch, pushHistory],
+  );
 
   const updateActiveAgentSession = useCallback((updater) => {
     setAgentStore((prev) => {
@@ -6775,6 +7126,11 @@ const createConnectedImg2ImgBranch = useCallback(
                       response: proxyData,
                     });
                     resultUrl =
+                      pickFirstVideoUrl(proxyData?.video_url) ||
+                      pickFirstVideoUrl(proxyData?.output_video) ||
+                      pickFirstVideoUrl(proxyData?.events) ||
+                      pickFirstVideoUrl(proxyData?.text) ||
+                      pickFirstVideoUrl(proxyData) ||
                       pickFirstImageUrl(proxyData?.image_url) ||
                       pickFirstImageUrl(proxyData?.events) ||
                       pickFirstImageUrl(proxyData?.text) ||
@@ -6891,6 +7247,11 @@ const createConnectedImg2ImgBranch = useCallback(
                     response: proxyData,
                   });
                   resultUrl =
+                    pickFirstVideoUrl(proxyData?.video_url) ||
+                    pickFirstVideoUrl(proxyData?.output_video) ||
+                    pickFirstVideoUrl(proxyData?.events) ||
+                    pickFirstVideoUrl(proxyData?.text) ||
+                    pickFirstVideoUrl(proxyData) ||
                     pickFirstImageUrl(proxyData?.image_url) ||
                     pickFirstImageUrl(proxyData?.events) ||
                     pickFirstImageUrl(proxyData?.text) ||
@@ -6950,51 +7311,83 @@ const createConnectedImg2ImgBranch = useCallback(
               } else if (procNode.data.mode === "video_upscale") {
                 const videoInput = inputImages[i];
                 if (!isVideoContent(videoInput)) {
-                  throw new Error("超分辨率视频技能仅支持视频输入");
+                  throw new Error("视频超清技能仅支持视频输入");
                 }
-                const startResp = await apiFetch(`/api/video_upscale/start`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    video: videoInput,
-                    segment_seconds: parseInt(String(procNode.data.templates?.segment_seconds ?? 3), 10) || 3,
-                    output_resolution: parseInt(String(procNode.data.templates?.output_resolution ?? 1440), 10) || 1440,
-                    workflow_batch_size: parseInt(String(procNode.data.templates?.workflow_batch_size ?? 1), 10) || 1,
-                  }),
+                updateApiDebugStatus("aiChatImage", {
+                  status: "loading",
+                  message: `POST /api/ai_chat_image_via_curl part=${resolveWorkbenchAIChatPartEnum({ mode: "video_upscale" })}`,
                 });
-                const startData = await startResp.json();
-                if (!startResp.ok) throw new Error(extractApiError(startData));
-                const taskId = startData.task_id;
-                if (!taskId) throw new Error("视频超分任务创建失败");
-
-                let guard = 0;
-                while (true) {
-                  await new Promise((r) => setTimeout(r, 1200));
-                  const statusResp = await apiFetch(`/api/video_upscale/status/${taskId}`);
-                  const statusData = await statusResp.json();
-                  if (!statusResp.ok) throw new Error(extractApiError(statusData));
-
-                  const totalChunks = Math.max(0, parseInt(String(statusData.total_chunks || 0), 10) || 0);
-                  const completedChunks = Math.max(0, parseInt(String(statusData.completed_chunks || 0), 10) || 0);
-                  if (totalChunks > 0) {
-                    applyNodeUpdate(procNode.id, {
-                      total: totalChunks,
-                      progress: Math.min(totalChunks, completedChunks),
-                    });
+                try {
+                  const authorizationInfo = resolveMemberAuthorizationInfo();
+                  const proxyPayload = {
+                    ...(agentDevMode ? { endpoint: "http://172.16.20.19:16313/ai/aiChat" } : {}),
+                    authorization: authorizationInfo?.value || "",
+                    module_enum: WORKBENCH_AI_CHAT_MODULE_ENUM,
+                    part_enum: String(resolveWorkbenchAIChatPartEnum({ mode: "video_upscale" })),
+                    ai_chat_model_id: String(procNode.data.model || DEFAULT_VIDEO_HD_MODEL_ID).trim() || DEFAULT_VIDEO_HD_MODEL_ID,
+                    message: String(procNode.data.prompt || "视频画质增强").trim() || "视频画质增强",
+                    template_enum: String(
+                      parseInt(String(procNode.data.templates?.template_enum ?? VOLC_VIDEO_HD_TEMPLATE_ENUM_1), 10)
+                        || VOLC_VIDEO_HD_TEMPLATE_ENUM_1,
+                    ),
+                    async: "false",
+                    files: [videoInput],
+                  };
+                  if (!proxyPayload.authorization) {
+                    throw new Error("缺少 member authorization，无法调用后端curl代理");
                   }
-
-                  if (statusData.status === "success") {
-                    resultUrl = statusData.video;
-                    break;
+                  pushApiDebugDetail("aiChatImage", {
+                    type: "start",
+                    path: "/api/ai_chat_image_via_curl",
+                    payload: {
+                      ...proxyPayload,
+                      authorization: `${proxyPayload.authorization.slice(0, 18)}...`,
+                      files: ["count=1(video)"],
+                    },
+                    authorizationSource: authorizationInfo?.source || "none",
+                  });
+                  const proxyData = await submitAIChatImageTask(apiFetch, proxyPayload, {
+                    onDebug: (event) => pushApiDebugDetail("aiChatImage", event),
+                  });
+                  if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
+                  if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
+                  pushApiDebugDetail("aiChatImage", {
+                    type: "success",
+                    path: "/api/ai_chat_image_via_curl",
+                    mode: "json",
+                    response: proxyData,
+                  });
+                  resultUrl =
+                    pickFirstVideoUrl(proxyData?.video_url) ||
+                    pickFirstVideoUrl(proxyData?.output_video) ||
+                    pickFirstVideoUrl(proxyData?.events) ||
+                    pickFirstVideoUrl(proxyData?.text) ||
+                    pickFirstVideoUrl(proxyData) ||
+                    pickFirstImageUrl(proxyData?.image_url) ||
+                    pickFirstImageUrl(proxyData?.events) ||
+                    pickFirstImageUrl(proxyData?.text) ||
+                    "";
+                  const doneErrMsg = String(proxyData?.done_error || "").trim();
+                  if (!resultUrl && doneErrMsg) throw new Error(`AI Chat 返回错误：${doneErrMsg}`);
+                  if (!resultUrl) {
+                    const summary = summarizeAIChatResponse(proxyData);
+                    throw new Error(`aiChat 视频超清未返回可解析URL${summary ? ` | 响应摘要: ${summary}` : ""}`);
                   }
-                  if (statusData.status === "error") {
-                    throw new Error(statusData.error || "视频超分失败");
-                  }
-
-                  guard += 1;
-                  if (guard > 1800) {
-                    throw new Error("视频超分任务轮询超时");
-                  }
+                  updateApiDebugStatus("aiChatImage", {
+                    status: "success",
+                    message: `part=${resolveWorkbenchAIChatPartEnum({ mode: "video_upscale" })} template=${proxyPayload.template_enum}`,
+                  });
+                } catch (proxyError) {
+                  pushApiDebugDetail("aiChatImage", {
+                    type: "error",
+                    path: "/api/ai_chat_image_via_curl",
+                    message: proxyError instanceof Error ? proxyError.message : String(proxyError),
+                  });
+                  updateApiDebugStatus("aiChatImage", {
+                    status: "error",
+                    message: proxyError instanceof Error ? proxyError.message : String(proxyError),
+                  });
+                  throw proxyError;
                 }
               } else if (procNode.data.mode === "multi_angleshots") {
                 const resp = await apiFetch(`/api/multi_angleshots`, {
@@ -7056,6 +7449,119 @@ const createConnectedImg2ImgBranch = useCallback(
       setIsRunning(false);
     }
   };
+
+  const runCompactThreeView = useCallback(
+    async (sourceNodeId, imageIndex = 0) => {
+      const sourceNode = nodesRef.current.find((node) => node.id === sourceNodeId);
+      const sourceImages = Array.isArray(sourceNode?.data?.images) ? sourceNode.data.images : [];
+      const safeIndex = Math.max(0, Math.min(imageIndex, sourceImages.length - 1));
+      const retrySourceImage = String(sourceNode?.data?.compactThreeViewSourceImage || "").trim();
+      const sourceImage = retrySourceImage || sourceImages[safeIndex] || sourceImages[0] || "";
+      if (!sourceImage) {
+        throw new Error("缺少三视图输入图片");
+      }
+
+      const modelId = String(threeViewImageModelId || "").trim();
+      if (!modelId) {
+        throw new Error("图片模型仍在加载，请稍后重试");
+      }
+
+      const paramList = await resolveModelParamsForId(modelId);
+      const resolvedParamPayload = buildAIChatParamPayload(paramList);
+      const matchedSizeId =
+        findAIChatParamValueId(paramList, ["size", "尺寸"], THREE_VIEW_DEFAULT_TEMPLATES.size) ||
+        findAIChatParamValueId(paramList, ["size", "尺寸"], "1024x1024");
+      const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比"], THREE_VIEW_DEFAULT_TEMPLATES.aspect_ratio);
+
+      if (!matchedSizeId) {
+        throw new Error(`未匹配到size参数ID: ${THREE_VIEW_DEFAULT_TEMPLATES.size}`);
+      }
+      if (!matchedRatioId) {
+        throw new Error(`未匹配到ratio参数ID: ${THREE_VIEW_DEFAULT_TEMPLATES.aspect_ratio}`);
+      }
+
+      resolvedParamPayload.ai_image_param_size_id = matchedSizeId;
+      resolvedParamPayload.ai_image_param_ratio_id = matchedRatioId;
+
+      const authorizationInfo = resolveMemberAuthorizationInfo();
+      const proxyPayload = {
+        authorization: authorizationInfo?.value || "",
+        history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
+        module_enum: WORKBENCH_AI_CHAT_MODULE_ENUM,
+        part_enum: String(resolveWorkbenchAIChatPartEnum({ mode: "multi_image_generate" })),
+        ai_chat_session_id: aiChatSessionIdRef.current || "",
+        ai_chat_model_id: modelId,
+        message: THREE_VIEW_PROMPT,
+        images: [sourceImage],
+        ...resolvedParamPayload,
+      };
+
+      if (!proxyPayload.authorization) {
+        throw new Error("缺少 member authorization，无法调用后端curl代理");
+      }
+
+      updateApiDebugStatus("aiChatImage", {
+        status: "loading",
+        message: `POST /api/ai_chat_image_via_curl part=${resolveWorkbenchAIChatPartEnum({ mode: "multi_image_generate" })}`,
+      });
+      pushApiDebugDetail("aiChatImage", {
+        type: "start",
+        path: "/api/ai_chat_image_via_curl",
+        payload: {
+          ...proxyPayload,
+          authorization: `${proxyPayload.authorization.slice(0, 18)}...`,
+          images: ["count=1"],
+        },
+        authorizationSource: authorizationInfo?.source || "none",
+      });
+
+      const proxyData = await submitAIChatImageTask(apiFetch, proxyPayload, {
+        onDebug: (event) => pushApiDebugDetail("aiChatImage", event),
+      });
+      if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
+      if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
+
+      const resultUrl =
+        pickFirstImageUrl(proxyData?.image_url) ||
+        pickFirstImageUrl(proxyData?.events) ||
+        pickFirstImageUrl(proxyData?.text) ||
+        "";
+      const doneErrMsg = String(proxyData?.done_error || "").trim();
+      if (!resultUrl && doneErrMsg) {
+        throw new Error(`AI Chat 返回错误：${doneErrMsg}`);
+      }
+      if (!resultUrl) {
+        const summary = summarizeAIChatResponse(proxyData);
+        throw new Error(`aiChat 三视图未返回可解析图片URL${summary ? ` | 响应摘要: ${summary}` : ""}`);
+      }
+
+      pushHistory();
+      const nextImages = [...sourceImages];
+      nextImages[safeIndex] = resultUrl;
+      updateNodeData(sourceNodeId, {
+        images: nextImages,
+        compactThreeViewSourceImage: retrySourceImage || sourceImage,
+        compactThreeViewLastResultImage: resultUrl,
+        status: "idle",
+        error: "",
+      });
+      updateApiDebugStatus("aiChatImage", {
+        status: "success",
+        message: `three-view model=${modelId} params=${Object.keys(resolvedParamPayload).length}`,
+      });
+      setRunToast({ message: "三视图生成完成", type: "info" });
+      setTimeout(() => setRunToast(null), 2200);
+    },
+    [
+      apiFetch,
+      pushApiDebugDetail,
+      pushHistory,
+      resolveModelParamsForId,
+      threeViewImageModelId,
+      updateApiDebugStatus,
+      updateNodeData,
+    ],
+  );
 
   const renderConnections = () =>
     connections.map((conn) => {
@@ -7208,6 +7714,22 @@ const createConnectedImg2ImgBranch = useCallback(
             bg: "bg-purple-500/10",
             onClick: () => addNode(NODE_TYPES.PROCESSOR, "multi_angleshots"),
           },
+          {
+            id: "skill_video_upscale",
+            icon: TrendingUp,
+            label: "视频超清",
+            desc: "视频画质增强",
+            color: "text-rose-300",
+            bg: "bg-rose-500/10",
+            onClick: () =>
+              handleAnchorActionClick({
+                partEnum: AI_CHAT_PART_ENUM_6,
+                modelId: 1,
+                to: "skill_video_upscale",
+                debugLabel: "视频超清",
+                action: () => addNode(NODE_TYPES.PROCESSOR, "video_upscale"),
+              }),
+          },
         ],
       },
       {
@@ -7218,7 +7740,7 @@ const createConnectedImg2ImgBranch = useCallback(
             id: "workflow_swap",
             icon: Layers,
             label: "三合一换图",
-            desc: "换脸/换背景/换装",
+            desc: "换脸/换背景/换装/视频超清",
             color: "text-purple-300",
             bg: "bg-purple-500/10",
             onClick: () =>
@@ -7234,7 +7756,7 @@ const createConnectedImg2ImgBranch = useCallback(
             id: "workflow_batch_video",
             icon: Film,
             label: "批量动图",
-            desc: "单图生成短视频",
+            desc: "单图生成短视频/视频超清",
             color: "text-sky-400",
             bg: "bg-sky-500/10",
             onClick: () =>
@@ -7399,6 +7921,7 @@ const createConnectedImg2ImgBranch = useCallback(
     { key: "modelsLang", label: "models(part=1)" },
     { key: "modelsImage", label: "models(part=2)" },
     { key: "modelsVideo", label: "models(part=3)" },
+    { key: "modelsVideoEnhance", label: "models(part=6)" },
     { key: "aiChatAnchor", label: "aiChatAnchor(module=3)" },
     { key: "aiChatLang", label: "aiChat(part=1 语言)" },
     { key: "aiChatImage", label: "aiChat(module=3 图片/视频)" },
@@ -7850,9 +8373,14 @@ const createConnectedImg2ImgBranch = useCallback(
                       <span className="text-[10px] opacity-70 shrink-0">{formatDebugTime(state.updatedAt)}</span>
                     </div>
                     {API_DEBUG_DETAIL_KEYS.has(item.key) && state.detail ? (
-                      <pre className="mt-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-[14px] bg-black/20 px-2 py-1.5 text-[9px] leading-4 text-slate-100/90">
-                        {state.detail}
-                      </pre>
+                      <details className="mt-1.5 rounded-[14px] border border-white/10 bg-black/10">
+                        <summary className="cursor-pointer list-none px-2 py-1.5 text-[9px] text-slate-200/85 [&::-webkit-details-marker]:hidden">
+                          查看详细信息
+                        </summary>
+                        <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all border-t border-white/10 px-2 py-1.5 text-[9px] leading-4 text-slate-100/90">
+                          {state.detail}
+                        </pre>
+                      </details>
                     ) : null}
                   </div>
                 );
@@ -7965,7 +8493,7 @@ const createConnectedImg2ImgBranch = useCallback(
                   {memberInfoLoginUrl ? (
                     <button
                       type="button"
-                      onClick={() => window.open(memberInfoLoginUrl, "_blank", "noopener,noreferrer")}
+                      onClick={() => navigateToMemberLogin(memberInfoLoginUrl)}
                       className="mt-2 w-full rounded-lg border border-cyan-700/70 bg-cyan-950/40 px-3 py-2 text-left text-[11px] text-cyan-100 hover:border-cyan-500/60 hover:bg-cyan-900/40"
                     >
                       前往会员登录
@@ -8025,7 +8553,7 @@ const createConnectedImg2ImgBranch = useCallback(
                 {memberInfoLoginUrl ? (
                   <button
                     type="button"
-                    onClick={() => window.open(memberInfoLoginUrl, "_blank", "noopener,noreferrer")}
+                    onClick={() => navigateToMemberLogin(memberInfoLoginUrl)}
                     className="mt-2 w-full rounded-xl border border-cyan-700/70 bg-cyan-950/40 px-3 py-2 text-[11px] text-cyan-100 hover:border-cyan-500/60 hover:bg-cyan-900/40 transition-colors"
                   >
                     前往会员登录
@@ -8101,9 +8629,70 @@ const createConnectedImg2ImgBranch = useCallback(
 
           {canvasDropActive ? (
             <div className="pointer-events-none absolute inset-6 z-20 rounded-[32px] border border-cyan-500/40 bg-cyan-500/8 shadow-[inset_0_0_0_1px_rgba(34,211,238,0.18)] backdrop-blur-[1px]">
-              <div className="absolute inset-x-8 top-8 rounded-[24px] border border-dashed border-cyan-400/35 bg-slate-950/55 px-6 py-4 text-center shadow-[0_18px_48px_rgba(8,145,178,0.12)]">
-                <div className="text-sm font-medium text-cyan-100">拖到这里创建图片编辑区</div>
-                <div className="mt-1 text-xs text-slate-300">落下后会在当前位置生成一个小型编辑卡片，可直接接图生图、去背景、图生视频。</div>
+              <div className="absolute inset-x-8 top-28 rounded-[24px] border border-dashed border-cyan-400/35 bg-slate-950/55 px-6 py-4 text-center shadow-[0_18px_48px_rgba(8,145,178,0.12)]">
+                <div className="text-sm font-medium text-cyan-100">拖到这里创建图片/视频编辑区</div>
+                <div className="mt-1 text-xs text-slate-300">落下后会在当前位置生成一个小型编辑卡片，图片可继续三视图、图生图、去水印，视频可直接一键接入视频超清。</div>
+              </div>
+            </div>
+          ) : null}
+
+          {nodes.length === 0 && !hasAgentResultCards ? (
+            <div className="absolute inset-x-0 top-6 z-20 flex justify-center px-6 pointer-events-none">
+              <div
+                className="pointer-events-auto flex w-full max-w-4xl items-center justify-center gap-3 px-2 py-2"
+                onMouseDown={(e) => e.stopPropagation()}
+              >
+                <button
+                  onClick={() => safeInvoke(createText2ImgTemplate, "打开文生图模板")}
+                  className="group flex min-w-[170px] items-center gap-3 rounded-[20px] border border-slate-800/80 bg-[linear-gradient(180deg,rgba(12,12,16,0.82),rgba(5,5,7,0.72))] px-4 py-3 text-left shadow-[0_12px_28px_rgba(0,0,0,0.28)] backdrop-blur-md transition-all hover:-translate-y-0.5 hover:border-slate-700 hover:bg-black"
+                >
+                  <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-white/[0.03] ring-1 ring-white/5 transition-colors group-hover:bg-white/[0.05]">
+                    <Wand2 className="h-5 w-5 text-slate-200" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-semibold text-slate-100">文生图</div>
+                    <div className="mt-0.5 text-[11px] leading-5 text-slate-500">从文字快速起图</div>
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => safeInvoke(createImg2ImgTemplate, "打开图生图模板")}
+                  className="group flex min-w-[170px] items-center gap-3 rounded-[20px] border border-slate-800/80 bg-[linear-gradient(180deg,rgba(12,12,16,0.82),rgba(5,5,7,0.72))] px-4 py-3 text-left shadow-[0_12px_28px_rgba(0,0,0,0.28)] backdrop-blur-md transition-all hover:-translate-y-0.5 hover:border-slate-700 hover:bg-black"
+                >
+                  <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-white/[0.03] ring-1 ring-white/5 transition-colors group-hover:bg-white/[0.05]">
+                    <Images className="h-5 w-5 text-slate-200" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-semibold text-slate-100">图生图</div>
+                    <div className="mt-0.5 text-[11px] leading-5 text-slate-500">基于现有素材重绘</div>
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => safeInvoke(createImg2VideoTemplate, "打开图生视频模板")}
+                  className="group flex min-w-[170px] items-center gap-3 rounded-[20px] border border-slate-800/80 bg-[linear-gradient(180deg,rgba(12,12,16,0.82),rgba(5,5,7,0.72))] px-4 py-3 text-left shadow-[0_12px_28px_rgba(0,0,0,0.28)] backdrop-blur-md transition-all hover:-translate-y-0.5 hover:border-slate-700 hover:bg-black"
+                >
+                  <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-white/[0.03] ring-1 ring-white/5 transition-colors group-hover:bg-white/[0.05]">
+                    <Clapperboard className="h-5 w-5 text-slate-200" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-semibold text-slate-100">图生视频</div>
+                    <div className="mt-0.5 text-[11px] leading-5 text-slate-500">从单图生成视频流程</div>
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => safeInvoke(createVideoUpscaleTemplate, "打开视频超清模板")}
+                  className="group flex min-w-[170px] items-center gap-3 rounded-[20px] border border-slate-800/80 bg-[linear-gradient(180deg,rgba(12,12,16,0.82),rgba(5,5,7,0.72))] px-4 py-3 text-left shadow-[0_12px_28px_rgba(0,0,0,0.28)] backdrop-blur-md transition-all hover:-translate-y-0.5 hover:border-slate-700 hover:bg-black"
+                >
+                  <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-white/[0.03] ring-1 ring-white/5 transition-colors group-hover:bg-white/[0.05]">
+                    <TrendingUp className="h-5 w-5 text-slate-200" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-semibold text-slate-100">视频超清</div>
+                    <div className="mt-0.5 text-[11px] leading-5 text-slate-500">上传视频后直接做画质增强</div>
+                  </div>
+                </button>
               </div>
             </div>
           ) : null}
@@ -8111,60 +8700,32 @@ const createConnectedImg2ImgBranch = useCallback(
           {nodes.length === 0 && !hasAgentResultCards && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
               <div
-                className="pointer-events-auto relative max-w-2xl overflow-hidden rounded-[32px] border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))] px-8 py-8 text-center shadow-[0_24px_60px_rgba(0,0,0,0.48),inset_0_1px_0_rgba(255,255,255,0.05)]"
+                className="pointer-events-auto relative max-w-xl overflow-hidden rounded-[32px] border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))] px-8 py-8 text-center shadow-[0_24px_60px_rgba(0,0,0,0.48),inset_0_1px_0_rgba(255,255,255,0.05)]"
                 onMouseDown={(e) => e.stopPropagation()}
               >
                 <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.03),transparent_24%),linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.008)_34%,transparent_100%)]" />
                 <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-white/18" />
                 <div className="relative">
-                  <h2 className="mb-2 truncate bg-[linear-gradient(135deg,rgba(248,250,252,0.94)_0%,rgba(203,213,225,0.86)_48%,rgba(148,163,184,0.72)_100%)] bg-clip-text text-[30px] font-normal leading-tight tracking-[0.10em] text-transparent [font-family:'STXingkai','Xingkai_SC','STKaiti','KaiTi','Georgia',serif] [text-shadow:0_0_14px_rgba(148,163,184,0.06)]">
-                    Yu Canvas
-                  </h2>
-                  <div className="mb-3 text-[11px] font-normal tracking-[0.18em] text-slate-400/90">AI小禹无限画布</div>
-                  <p className="mx-auto mb-8 max-w-xl text-sm leading-6 text-slate-400">
-                    选择下方模版快速开始，直接把图片拖进画布生成编辑区，或者使用下方 Agent 输入框生成脚本、分镜和工作流。
+                  <div className="mx-auto mb-6 flex w-fit items-center gap-4 rounded-[28px] border border-slate-800/80 bg-[linear-gradient(180deg,rgba(10,16,28,0.94),rgba(5,8,16,0.88))] px-5 py-4 shadow-[0_18px_38px_rgba(2,6,23,0.34)]">
+                    <div className="flex h-16 w-16 items-center justify-center rounded-[20px] border border-cyan-500/20 bg-cyan-500/10">
+                      <MousePointer2 className="h-7 w-7 text-cyan-200" />
+                    </div>
+                    <div className="flex flex-col items-center gap-2">
+                      <ArrowRight className="h-4 w-4 text-slate-500" />
+                      <div className="h-1 w-12 rounded-full bg-[linear-gradient(90deg,rgba(34,211,238,0),rgba(34,211,238,0.75),rgba(34,211,238,0))]" />
+                    </div>
+                    <div className="relative flex h-20 w-28 items-center justify-center rounded-[22px] border border-dashed border-cyan-400/35 bg-[linear-gradient(180deg,rgba(8,15,28,0.84),rgba(4,8,18,0.72))]">
+                      <div className="absolute inset-2 rounded-[16px] border border-white/5" />
+                      <Upload className="h-7 w-7 text-cyan-200" />
+                      <div className="absolute bottom-2 text-[9px] tracking-[0.18em] text-cyan-100/75">CANVAS</div>
+                    </div>
+                  </div>
+                  <p className="mx-auto max-w-md text-sm leading-6 text-slate-300">
+                    将图片拖拽到画布中，即可开始快捷编辑。
                   </p>
-                </div>
-
-                <div className="relative grid grid-cols-1 gap-4 md:grid-cols-3">
-                  <button
-                    onClick={() => safeInvoke(createText2ImgTemplate, "打开文生图模板")}
-                    className="group flex flex-col items-center gap-3 rounded-[28px] border border-slate-800/90 bg-[linear-gradient(180deg,rgba(12,12,16,0.88),rgba(5,5,7,0.82))] px-5 py-5 transition-all hover:-translate-y-1 hover:border-slate-700 hover:bg-black"
-                  >
-                    <div className="flex h-14 w-14 items-center justify-center rounded-[18px] bg-white/[0.03] ring-1 ring-white/5 transition-colors group-hover:bg-white/[0.05]">
-                      <Wand2 className="w-6 h-6 text-slate-200" />
-                    </div>
-                    <div>
-                      <div className="text-sm font-semibold text-slate-100">文生图</div>
-                      <div className="mt-1 text-[11px] leading-5 text-slate-500">从文字描述快速创建图像生成流程</div>
-                    </div>
-                  </button>
-
-                  <button
-                    onClick={() => safeInvoke(createImg2ImgTemplate, "打开图生图模板")}
-                    className="group flex flex-col items-center gap-3 rounded-[28px] border border-slate-800/90 bg-[linear-gradient(180deg,rgba(12,12,16,0.88),rgba(5,5,7,0.82))] px-5 py-5 transition-all hover:-translate-y-1 hover:border-slate-700 hover:bg-black"
-                  >
-                    <div className="flex h-14 w-14 items-center justify-center rounded-[18px] bg-white/[0.03] ring-1 ring-white/5 transition-colors group-hover:bg-white/[0.05]">
-                      <Images className="w-6 h-6 text-slate-200" />
-                    </div>
-                    <div>
-                      <div className="text-sm font-semibold text-slate-100">图生图</div>
-                      <div className="mt-1 text-[11px] leading-5 text-slate-500">基于已有素材继续扩展、重绘和变体生成</div>
-                    </div>
-                  </button>
-
-                  <button
-                    onClick={() => safeInvoke(createImg2VideoTemplate, "打开图生视频模板")}
-                    className="group flex flex-col items-center gap-3 rounded-[28px] border border-slate-800/90 bg-[linear-gradient(180deg,rgba(12,12,16,0.88),rgba(5,5,7,0.82))] px-5 py-5 transition-all hover:-translate-y-1 hover:border-slate-700 hover:bg-black"
-                  >
-                    <div className="flex h-14 w-14 items-center justify-center rounded-[18px] bg-white/[0.03] ring-1 ring-white/5 transition-colors group-hover:bg-white/[0.05]">
-                      <Clapperboard className="w-6 h-6 text-slate-200" />
-                    </div>
-                    <div>
-                      <div className="text-sm font-semibold text-slate-100">图生视频</div>
-                      <div className="mt-1 text-[11px] leading-5 text-slate-500">从单张图片出发，生成可直接继续编辑的视频流程</div>
-                    </div>
-                  </button>
+                  <div className="mt-3 text-[11px] leading-6 text-slate-500">
+                    支持一键三视图、图生图、去水印、图生视频。
+                  </div>
                 </div>
               </div>
             </div>
@@ -8215,6 +8776,8 @@ const createConnectedImg2ImgBranch = useCallback(
                 activeArtifact={activeArtifact}
                 onIterateImg2Img={createConnectedImg2ImgBranch}
                 onRunCompactRemoveWatermark={runCompactRemoveWatermark}
+                onRunCompactThreeView={runCompactThreeView}
+                onRunCompactVideoUpscale={runCompactVideoUpscale}
               />
             ))}
 
