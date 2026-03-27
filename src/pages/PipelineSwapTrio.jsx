@@ -9,6 +9,7 @@ import {
   RotateCcw,
   Square,
   Trash2,
+  TrendingUp,
   Upload,
   X,
 } from "lucide-react";
@@ -79,12 +80,20 @@ const DEFAULT_VIDEO_PROMPT =
   "画面轻微晃动，镜头产生呼吸感；画面中不出现任何额外元素，商品保持静止。";
 const LEGACY_AI_CHAT_IMAGE_MODEL_ID = "4";
 const AI_CHAT_I2V_MODEL_ID = "6";
+const AI_CHAT_VIDEO_HD_MODEL_ID = "1";
 const DEFAULT_VIDEO_DURATION = 3;
 const DEFAULT_VIDEO_RESOLUTION = "1080p";
 const AI_CHAT_WORKFLOW_MODULE_ENUM = "3";
 const AI_CHAT_IMAGE_PART_ENUM = "203";
 const AI_CHAT_VIDEO_PART_ENUM = "204";
+const AI_CHAT_VIDEO_HD_PART_ENUM = "6";
 const MOTION_FAILURE_MESSAGE = "当前网络波动或请求超时，请稍后重试。";
+const VIDEO_HD_TEMPLATE_ENUM_2K = "1";
+const VIDEO_HD_TEMPLATE_ENUM_4K = "2";
+const VIDEO_HD_TEMPLATE_OPTIONS = [
+  { label: "2K", value: VIDEO_HD_TEMPLATE_ENUM_2K },
+  { label: "4K", value: VIDEO_HD_TEMPLATE_ENUM_4K },
+];
 const MOTION_RESOLUTION_OPTIONS = [
   { label: "480P", value: "480p" },
   { label: "720P", value: "720p" },
@@ -234,6 +243,51 @@ const pickFirstImageUrl = (payload) => {
   return "";
 };
 
+const pickFirstVideoUrl = (payload) => {
+  const normalizeVideoUrl = (raw) => {
+    const text = String(raw || "").trim();
+    return text || "";
+  };
+  const isLikelyVideoUrl = (raw) => {
+    const text = String(raw || "").trim();
+    if (!text) return false;
+    if (/^data:video\//i.test(text)) return true;
+    if (/\.(mp4|webm|mov|m4v|avi|mkv|m3u8)(?:$|[?#])/i.test(text)) return true;
+    if (/video|play_url|output_video|mime=video|content_type=video|hdai_chat/i.test(text)) return true;
+    return false;
+  };
+  if (!payload) return "";
+  if (typeof payload === "string") {
+    const matched = payload.match(/https?:\/\/[^\s"'<>]+/i);
+    const value = matched?.[0] || "";
+    return isLikelyVideoUrl(value) ? normalizeVideoUrl(value) : "";
+  }
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const found = pickFirstVideoUrl(item);
+      if (found) return found;
+    }
+    return "";
+  }
+  if (typeof payload === "object") {
+    const ext = String(payload?.ext || "").trim().toLowerCase();
+    if (ext === ".bin" || ext === "bin") {
+      const directBinUrl = normalizeVideoUrl(payload?.url || payload?.video_url || payload?.output_video || "");
+      if (directBinUrl) return directBinUrl;
+    }
+    const directKeys = ["video_url", "videoUrl", "video", "output_video", "outputVideo", "play_url", "playUrl", "url"];
+    for (const key of directKeys) {
+      const found = pickFirstVideoUrl(payload[key]);
+      if (found) return found;
+    }
+    for (const value of Object.values(payload)) {
+      const found = pickFirstVideoUrl(value);
+      if (found) return found;
+    }
+  }
+  return "";
+};
+
 const readFileAsDataUrl = (file) =>
   new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -258,6 +312,10 @@ const buildResultsSeed = (mainItems, refItems) =>
       videoUrl: null,
       videoStatus: "idle",
       videoError: null,
+      upscaledVideoUrl: null,
+      upscaleStatus: "idle",
+      upscaleError: null,
+      upscaleTemplateEnum: VIDEO_HD_TEMPLATE_ENUM_2K,
     })),
   );
 
@@ -420,7 +478,17 @@ const PipelineSwapTrio = () => {
         while (true) {
           const task = nextTask();
           if (!task) break;
-          updateResult(task.id, { status: "running", error: null, videoUrl: null, videoStatus: "idle", videoError: null });
+          updateResult(task.id, {
+            status: "running",
+            error: null,
+            videoUrl: null,
+            videoStatus: "idle",
+            videoError: null,
+            upscaledVideoUrl: null,
+            upscaleStatus: "idle",
+            upscaleError: null,
+            upscaleTemplateEnum: VIDEO_HD_TEMPLATE_ENUM_2K,
+          });
 
           try {
             const promptToUse = prompt?.trim() || activeMode.defaultPrompt;
@@ -478,6 +546,10 @@ const PipelineSwapTrio = () => {
               videoUrl: null,
               videoStatus: "idle",
               videoError: null,
+              upscaledVideoUrl: null,
+              upscaleStatus: "idle",
+              upscaleError: null,
+              upscaleTemplateEnum: VIDEO_HD_TEMPLATE_ENUM_2K,
             });
           } catch (err) {
             if (controller.signal.aborted) {
@@ -610,9 +682,15 @@ const PipelineSwapTrio = () => {
           if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
           if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
           outputUrl =
+            pickFirstVideoUrl(proxyData?.video_url) ||
+            pickFirstVideoUrl(proxyData?.output_video) ||
+            pickFirstVideoUrl(proxyData?.events) ||
+            pickFirstVideoUrl(proxyData?.text) ||
+            pickFirstVideoUrl(proxyData) ||
             pickFirstImageUrl(proxyData?.image_url) ||
             pickFirstImageUrl(proxyData?.events) ||
             pickFirstImageUrl(proxyData?.text) ||
+            pickFirstImageUrl(proxyData) ||
             "";
           const doneErr = String(proxyData?.done_error || "").trim();
           if (!outputUrl && doneErr) throw new Error(doneErr);
@@ -647,11 +725,70 @@ const PipelineSwapTrio = () => {
         outputUrl = data.video || data.image || data.images?.[0];
       }
       if (!outputUrl) throw new Error("未返回动图结果");
-      updateResult(item.id, { videoStatus: "success", videoUrl: outputUrl, videoError: null });
+      updateResult(item.id, {
+        videoStatus: "success",
+        videoUrl: outputUrl,
+        videoError: null,
+        upscaledVideoUrl: null,
+        upscaleStatus: "idle",
+        upscaleError: null,
+        upscaleTemplateEnum: item.upscaleTemplateEnum || VIDEO_HD_TEMPLATE_ENUM_2K,
+      });
     } catch (err) {
       updateResult(item.id, { videoStatus: "error", videoError: MOTION_FAILURE_MESSAGE });
     }
   }, [apiFetch, aspectRatio, updateResult, videoResolution]);
+
+  const handleUpscaleVideo = useCallback(async (item) => {
+    if (!item?.videoUrl) return;
+    if (item.upscaleStatus === "running") return;
+
+    const selectedTemplateEnum = String(item.upscaleTemplateEnum || VIDEO_HD_TEMPLATE_ENUM_2K);
+    updateResult(item.id, { upscaleStatus: "running", upscaleError: null });
+    try {
+      const memberAuth = resolveMemberAuthorizationInfo()?.value || "";
+      if (!memberAuth) throw new Error("缺少会员授权，无法执行视频超清");
+
+      const proxyPayload = {
+        authorization: memberAuth,
+        module_enum: AI_CHAT_WORKFLOW_MODULE_ENUM,
+        part_enum: AI_CHAT_VIDEO_HD_PART_ENUM,
+        ai_chat_model_id: AI_CHAT_VIDEO_HD_MODEL_ID,
+        message: "视频画质增强",
+        template_enum: selectedTemplateEnum,
+        async: "false",
+        files: [item.videoUrl],
+      };
+
+      const proxyData = await submitAIChatImageTask(apiFetch, proxyPayload);
+      if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
+      if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
+      const outputUrl =
+        pickFirstVideoUrl(proxyData?.video_url) ||
+        pickFirstVideoUrl(proxyData?.output_video) ||
+        pickFirstVideoUrl(proxyData?.events) ||
+        pickFirstVideoUrl(proxyData?.text) ||
+        pickFirstVideoUrl(proxyData) ||
+        pickFirstImageUrl(proxyData?.image_url) ||
+        pickFirstImageUrl(proxyData?.events) ||
+        pickFirstImageUrl(proxyData?.text) ||
+        pickFirstImageUrl(proxyData) ||
+        "";
+      const doneErr = String(proxyData?.done_error || "").trim();
+      if (!outputUrl && doneErr) throw new Error(doneErr);
+      if (!outputUrl) throw new Error("未返回超清视频结果");
+
+      updateResult(item.id, {
+        upscaledVideoUrl: outputUrl,
+        upscaleStatus: "success",
+        upscaleError: null,
+        upscaleTemplateEnum: selectedTemplateEnum,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err || "视频超清失败");
+      updateResult(item.id, { upscaleStatus: "error", upscaleError: message });
+    }
+  }, [apiFetch, updateResult]);
 
   const handleGenerateAllMotion = useCallback(async () => {
     if (motionTargets.length === 0) return;
@@ -1131,20 +1268,60 @@ const PipelineSwapTrio = () => {
                         <div className="space-y-2">
                           <div className="flex items-center justify-between">
                             <div className="text-[11px] text-slate-500">动图结果</div>
-                            {item.videoUrl && (
-                              <button
-                                onClick={() => {
-                                  const link = document.createElement("a");
-                                  link.href = item.videoUrl;
-                                  link.download = `motion-${item.id}.mp4`;
-                                  link.click();
-                                }}
-                                className="text-[11px] px-2 py-0.5 rounded border border-slate-700 text-slate-400 hover:text-white hover:border-purple-500 transition-colors"
-                              >
-                                <Download className="w-3 h-3 inline-block mr-1" />
-                                下载
-                              </button>
-                            )}
+                            <div className="flex items-center gap-1.5">
+                              {item.videoUrl && (
+                                <div className="flex items-center gap-1">
+                                  <div className="flex items-center rounded border border-slate-800 bg-slate-950/70 p-0.5">
+                                    {VIDEO_HD_TEMPLATE_OPTIONS.map((option) => {
+                                      const isSelected = String(item.upscaleTemplateEnum || VIDEO_HD_TEMPLATE_ENUM_2K) === option.value;
+                                      return (
+                                        <button
+                                          key={option.value}
+                                          onClick={() => updateResult(item.id, { upscaleTemplateEnum: option.value })}
+                                          disabled={item.upscaleStatus === "running"}
+                                          className={`rounded px-1.5 py-0.5 text-[10px] transition-colors ${
+                                            isSelected
+                                              ? "bg-fuchsia-500/20 text-fuchsia-200"
+                                              : "text-slate-500 hover:text-slate-200"
+                                          }`}
+                                        >
+                                          {option.label}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                  <button
+                                    onClick={() => handleUpscaleVideo(item)}
+                                    disabled={item.upscaleStatus === "running"}
+                                    className={`text-[11px] px-2 py-0.5 rounded border transition-colors ${
+                                      item.upscaleStatus === "running"
+                                        ? "border-slate-800 text-slate-600 cursor-not-allowed"
+                                        : "border-slate-700 text-slate-400 hover:text-white hover:border-purple-500"
+                                    }`}
+                                  >
+                                    {item.upscaleStatus === "running" ? (
+                                      <Loader2 className="w-3 h-3 inline-block animate-spin" />
+                                    ) : (
+                                      <TrendingUp className="w-3 h-3 inline-block" />
+                                    )}
+                                  </button>
+                                </div>
+                              )}
+                              {item.videoUrl && (
+                                <button
+                                  onClick={() => {
+                                    const link = document.createElement("a");
+                                    link.href = item.videoUrl;
+                                    link.download = `motion-${item.id}.mp4`;
+                                    link.click();
+                                  }}
+                                  className="text-[11px] px-2 py-0.5 rounded border border-slate-700 text-slate-400 hover:text-white hover:border-purple-500 transition-colors"
+                                >
+                                  <Download className="w-3 h-3 inline-block mr-1" />
+                                  下载
+                                </button>
+                              )}
+                            </div>
                           </div>
                           <div className="relative">
                             {item.videoStatus === "running" && (
@@ -1167,6 +1344,49 @@ const PipelineSwapTrio = () => {
                               </div>
                             )}
                           </div>
+                          {(item.upscaledVideoUrl || item.upscaleStatus === "running" || item.upscaleError) && (
+                            <div className="space-y-2">
+                              <div className="flex items-center justify-between">
+                                <div className="text-[11px] text-slate-500">超清结果</div>
+                                {item.upscaledVideoUrl && (
+                                  <button
+                                    onClick={() => {
+                                      const link = document.createElement("a");
+                                      link.href = item.upscaledVideoUrl;
+                                      link.download = `motion-hd-${item.id}.mp4`;
+                                      link.click();
+                                    }}
+                                    className="text-[11px] px-2 py-0.5 rounded border border-slate-700 text-slate-400 hover:text-white hover:border-purple-500 transition-colors"
+                                  >
+                                    <Download className="w-3 h-3 inline-block mr-1" />
+                                    下载
+                                  </button>
+                                )}
+                              </div>
+                              <div className="relative">
+                                {item.upscaleStatus === "running" && (
+                                  <div className="absolute inset-0 flex items-center justify-center bg-black/40 rounded-lg z-10">
+                                    <Loader2 className="w-5 h-5 animate-spin" />
+                                  </div>
+                                )}
+                                {item.upscaledVideoUrl ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => setPreviewVideo(item.upscaledVideoUrl)}
+                                    className="block w-full h-40 rounded-lg border border-slate-800 overflow-hidden"
+                                    title="点击放大预览"
+                                  >
+                                    <video src={item.upscaledVideoUrl} className="w-full h-full object-cover" muted loop playsInline />
+                                  </button>
+                                ) : (
+                                  <div className="w-full h-40 rounded-lg border border-dashed border-slate-800 flex items-center justify-center text-xs text-slate-600">
+                                    {item.upscaleError ? "超清失败" : "等待超清"}
+                                  </div>
+                                )}
+                              </div>
+                              {item.upscaleError && <div className="text-[11px] text-rose-300">{item.upscaleError}</div>}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>

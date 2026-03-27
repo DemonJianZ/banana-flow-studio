@@ -285,8 +285,11 @@ class AIChatCurlProxyRequest(BaseModel):
     ai_video_param_ratio_id: Optional[str] = ""
     ai_video_param_resolution_id: Optional[str] = ""
     ai_video_param_duration_id: Optional[str] = ""
+    template_enum: Optional[str] = ""
+    async_flag: Optional[str] = Field(default="", alias="async")
     tusd_file_remote_ids: Optional[List[str]] = Field(default_factory=list)
     images: Optional[List[str]] = Field(default_factory=list)
+    files: Optional[List[str]] = Field(default_factory=list)
     timeout_seconds: Optional[int] = 120
 
 
@@ -368,7 +371,7 @@ def clean_form_value(value: Any) -> str:
 
 def _sanitize_ai_chat_proxy_request(req: AIChatCurlProxyRequest) -> AIChatCurlProxyRequest:
     payload = req.model_dump()
-    list_fields = {"tusd_file_remote_ids", "images"}
+    list_fields = {"tusd_file_remote_ids", "images", "files"}
     for key, value in list(payload.items()):
         if key in list_fields:
             payload[key] = [clean_form_value(item) for item in list(value or []) if clean_form_value(item)]
@@ -402,6 +405,8 @@ def _build_ai_chat_request_form(req: AIChatCurlProxyRequest) -> Dict[str, Any]:
         "ai_video_param_ratio_id": clean_form_value(clean_req.ai_video_param_ratio_id),
         "ai_video_param_resolution_id": clean_form_value(clean_req.ai_video_param_resolution_id),
         "ai_video_param_duration_id": clean_form_value(clean_req.ai_video_param_duration_id),
+        "template_enum": clean_form_value(clean_req.template_enum),
+        "async": clean_form_value(clean_req.async_flag),
         "tusd_file_remote_ids": [clean_form_value(item) for item in list(clean_req.tusd_file_remote_ids or []) if clean_form_value(item)],
         "timeout_seconds": max(10, min(int(clean_req.timeout_seconds or AI_CHAT_TASK_TIMEOUT_SEC), 300)),
     }
@@ -561,13 +566,15 @@ async def _parse_ai_chat_submission_request(request: Request, task_id: str) -> t
         req = _sanitize_ai_chat_proxy_request(AIChatCurlProxyRequest(**(payload or {})))
         form_payload = _build_ai_chat_request_form(req)
         stored_files: List[Dict[str, Any]] = []
-        for idx, image_value in enumerate(req.images or []):
+        file_values = list(req.files or req.images or [])
+        for idx, image_value in enumerate(file_values):
             stored_files.append(_materialize_image_to_task_file(image_value, task_id=task_id, index=idx))
         return req, form_payload, stored_files
 
     form = await request.form()
     scalar_fields: Dict[str, str] = {}
     image_values: List[str] = []
+    file_values: List[str] = []
     remote_ids: List[str] = []
     stored_files: List[Dict[str, Any]] = []
     upload_index = 0
@@ -583,6 +590,9 @@ async def _parse_ai_chat_submission_request(request: Request, task_id: str) -> t
             continue
         if normalized_key in {"images", "images[]"}:
             image_values.append(cleaned)
+            continue
+        if normalized_key in {"files", "files[]"}:
+            file_values.append(cleaned)
             continue
         if normalized_key in {"tusd_file_remote_ids", "tusd_file_remote_ids[]"}:
             remote_ids.append(cleaned)
@@ -605,13 +615,16 @@ async def _parse_ai_chat_submission_request(request: Request, task_id: str) -> t
             ai_video_param_ratio_id=scalar_fields.get("ai_video_param_ratio_id", ""),
             ai_video_param_resolution_id=scalar_fields.get("ai_video_param_resolution_id", ""),
             ai_video_param_duration_id=scalar_fields.get("ai_video_param_duration_id", ""),
+            template_enum=scalar_fields.get("template_enum", ""),
+            **{"async": scalar_fields.get("async", "")},
             tusd_file_remote_ids=remote_ids,
             images=image_values,
+            files=file_values,
             timeout_seconds=scalar_fields.get("timeout_seconds", str(AI_CHAT_TASK_TIMEOUT_SEC)),
         )
     )
     form_payload = _build_ai_chat_request_form(req)
-    for idx, image_value in enumerate(req.images or [], start=len(stored_files)):
+    for idx, image_value in enumerate(list(req.files or req.images or []), start=len(stored_files)):
         stored_files.append(_materialize_image_to_task_file(image_value, task_id=task_id, index=idx))
     return req, form_payload, stored_files
 
@@ -684,6 +697,8 @@ def _build_ai_chat_curl_command(req_id: str, req: AIChatCurlProxyRequest) -> tup
         ("ai_video_param_ratio_id", req.ai_video_param_ratio_id),
         ("ai_video_param_resolution_id", req.ai_video_param_resolution_id),
         ("ai_video_param_duration_id", req.ai_video_param_duration_id),
+        ("template_enum", req.template_enum),
+        ("async", req.async_flag),
     ]
 
     cmd: List[str] = [
@@ -714,7 +729,7 @@ def _build_ai_chat_curl_command(req_id: str, req: AIChatCurlProxyRequest) -> tup
 
     temp_files: List[str] = []
     materialize_items: List[Dict[str, Any]] = []
-    for idx, image_value in enumerate(req.images or []):
+    for idx, image_value in enumerate(req.files or req.images or []):
         if not str(image_value or "").strip():
             continue
         item_started_at = time.perf_counter()
@@ -762,7 +777,12 @@ def _pick_first_image_url(payload: Any) -> str:
         if not text:
             return ""
         matched = re.search(r"https?://[^\s\"'<>]+", text, re.IGNORECASE)
-        return matched.group(0) if matched else ""
+        if not matched:
+            return ""
+        candidate = matched.group(0)
+        if _looks_like_video_url(candidate):
+            return ""
+        return candidate
     if isinstance(payload, list):
         for item in payload:
             found = _pick_first_image_url(item)
@@ -776,6 +796,62 @@ def _pick_first_image_url(payload: Any) -> str:
                 return found
         for value in payload.values():
             found = _pick_first_image_url(value)
+            if found:
+                return found
+    return ""
+
+
+def _looks_like_video_url(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if text.startswith("data:video/"):
+        return True
+    if re.search(r"\.(mp4|webm|mov|m4v|avi|mkv|m3u8)(?:$|[?#])", text, re.IGNORECASE):
+        return True
+    if re.search(r"(?:^|[/_])video(?:$|[/_])|output_video|play_url|mime=video|content_type=video", text, re.IGNORECASE):
+        return True
+    return False
+
+
+def _pick_first_video_url(payload: Any) -> str:
+    if payload is None:
+        return ""
+    if isinstance(payload, str):
+        text = payload.strip()
+        if not text:
+            return ""
+        if _looks_like_video_url(text):
+            return text
+        matched = re.search(r"https?://[^\s\"'<>]+", text, re.IGNORECASE)
+        if not matched:
+            return ""
+        candidate = matched.group(0)
+        return candidate if _looks_like_video_url(candidate) else ""
+    if isinstance(payload, list):
+        for item in payload:
+            found = _pick_first_video_url(item)
+            if found:
+                return found
+        return ""
+    if isinstance(payload, dict):
+        for key in [
+            "video",
+            "video_url",
+            "videoUrl",
+            "output_video",
+            "outputVideo",
+            "play_url",
+            "playUrl",
+            "url",
+            "result_url",
+            "resultUrl",
+        ]:
+            found = _pick_first_video_url(payload.get(key))
+            if found:
+                return found
+        for value in payload.values():
+            found = _pick_first_video_url(value)
             if found:
                 return found
     return ""
@@ -802,9 +878,123 @@ def _extract_image_url_from_events(events: List[Dict[str, Any]]) -> str:
                     if not isinstance(content_item, dict):
                         continue
                     direct_url = str(content_item.get("url") or content_item.get("image_url") or content_item.get("imageUrl") or "").strip()
-                    if direct_url:
+                    if direct_url and not _looks_like_video_url(direct_url):
                         return direct_url
     return ""
+
+
+def _extract_video_url_from_events(events: List[Dict[str, Any]]) -> str:
+    for item in reversed(events):
+        payload = item.get("data", item)
+        if isinstance(payload, dict):
+            content = payload.get("content")
+            if isinstance(content, list):
+                for content_item in content:
+                    if not isinstance(content_item, dict):
+                        continue
+                    direct_url = str(
+                        content_item.get("video_url")
+                        or content_item.get("videoUrl")
+                        or content_item.get("output_video")
+                        or content_item.get("outputVideo")
+                        or content_item.get("play_url")
+                        or content_item.get("playUrl")
+                        or content_item.get("url")
+                        or ""
+                    ).strip()
+                    if _looks_like_video_url(direct_url):
+                        return direct_url
+    return ""
+
+
+def _extract_any_url_from_events(events: List[Dict[str, Any]]) -> str:
+    for item in reversed(events):
+        payload = item.get("data", item)
+        if not isinstance(payload, dict):
+            continue
+        content = payload.get("content")
+        if isinstance(content, list):
+            for content_item in content:
+                if not isinstance(content_item, dict):
+                    continue
+                direct_url = str(
+                    content_item.get("url")
+                    or content_item.get("video_url")
+                    or content_item.get("videoUrl")
+                    or content_item.get("image_url")
+                    or content_item.get("imageUrl")
+                    or ""
+                ).strip()
+                if direct_url:
+                    return direct_url
+    return ""
+
+
+def _sanitize_media_url_candidate(value: Any, *, endpoint: str = "") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("data:"):
+        return text
+    if not re.match(r"^https?://", text, re.IGNORECASE):
+        return ""
+    if re.search(r"/ai/aiChat(?:$|[?#])", text, re.IGNORECASE):
+        return ""
+    endpoint_text = str(endpoint or "").strip()
+    if endpoint_text:
+        try:
+            target = urlparse(text)
+            source = urlparse(endpoint_text)
+            if (
+                target.scheme.lower() == source.scheme.lower()
+                and target.netloc.lower() == source.netloc.lower()
+                and target.path == source.path
+            ):
+                return ""
+        except Exception:
+            pass
+    return text
+
+
+def _recover_media_urls_from_result_payload(payload: Dict[str, Any], prefer_video: bool = False) -> tuple[str, str]:
+    events = payload.get("events")
+    events_list = events if isinstance(events, list) else []
+    raw_text = str(payload.get("raw_text") or "").strip()
+    text = str(payload.get("text") or "").strip()
+    endpoint = str(payload.get("endpoint") or "").strip()
+
+    image_url = _sanitize_media_url_candidate(payload.get("image_url"), endpoint=endpoint)
+    video_url = _sanitize_media_url_candidate(payload.get("video_url"), endpoint=endpoint)
+
+    if not image_url:
+        image_url = _sanitize_media_url_candidate(
+            _extract_image_url_from_events(events_list)
+            or _pick_first_image_url(events_list)
+            or _pick_first_image_url(text)
+            or _pick_first_image_url(raw_text)
+            ,
+            endpoint=endpoint,
+        )
+    if not video_url:
+        video_url = _sanitize_media_url_candidate(
+            _extract_video_url_from_events(events_list)
+            or _pick_first_video_url(events_list)
+            or _pick_first_video_url(text)
+            or _pick_first_video_url(raw_text)
+            ,
+            endpoint=endpoint,
+        )
+
+    # Some downstream video-upscale responses provide .bin URLs only in content.url.
+    any_url = _sanitize_media_url_candidate(_extract_any_url_from_events(events_list), endpoint=endpoint)
+    if not video_url and prefer_video and any_url:
+        video_url = any_url
+    if not image_url and not prefer_video and any_url:
+        image_url = any_url
+    if not image_url and not video_url and any_url:
+        image_url = any_url
+
+    return image_url, video_url
 
 
 def _extract_session_meta_from_events(events: List[Dict[str, Any]]) -> Dict[str, str]:
@@ -881,12 +1071,17 @@ def _parse_sse_output(raw_text: str) -> Dict[str, Any]:
             content_parts.append(trimmed)
 
     text = "".join(content_parts)
-    done_error = _extract_done_error(events)
     image_url = (
         _extract_image_url_from_events(events)
         or _pick_first_image_url(events)
         or _pick_first_image_url(text)
     )
+    video_url = (
+        _extract_video_url_from_events(events)
+        or _pick_first_video_url(events)
+        or _pick_first_video_url(text)
+    )
+    done_error = "" if (image_url or video_url) else _extract_done_error(events)
     meta = _extract_session_meta_from_events(events)
     return {
         "mode": "stream" if saw_sse else "text",
@@ -894,6 +1089,7 @@ def _parse_sse_output(raw_text: str) -> Dict[str, Any]:
         "events": events,
         "done_error": done_error,
         "image_url": image_url,
+        "video_url": video_url,
         **meta,
     }
 
@@ -923,10 +1119,21 @@ def _extract_fast_result_from_stream_line(line: str) -> tuple[str, str]:
             for content_item in content:
                 if not isinstance(content_item, dict):
                     continue
-                direct_url = str(content_item.get("url") or content_item.get("image_url") or content_item.get("imageUrl") or "").strip()
-                if direct_url:
+                direct_url = str(
+                    content_item.get("video_url")
+                    or content_item.get("videoUrl")
+                    or content_item.get("output_video")
+                    or content_item.get("outputVideo")
+                    or content_item.get("play_url")
+                    or content_item.get("playUrl")
+                    or content_item.get("url")
+                    or content_item.get("image_url")
+                    or content_item.get("imageUrl")
+                    or ""
+                ).strip()
+                if direct_url and (_looks_like_video_url(direct_url) or _pick_first_image_url(direct_url)):
                     return direct_url, ""
-        url = _pick_first_image_url(payload)
+        url = _pick_first_video_url(payload) or _pick_first_image_url(payload)
         if url:
             return url, ""
         for key in ["errMsg", "error", "message", "detail"]:
@@ -934,7 +1141,7 @@ def _extract_fast_result_from_stream_line(line: str) -> tuple[str, str]:
             if msg:
                 return "", msg
     elif isinstance(payload, str):
-        url = _pick_first_image_url(payload)
+        url = _pick_first_video_url(payload) or _pick_first_image_url(payload)
         if url:
             return url, ""
 
@@ -1572,9 +1779,12 @@ def _call_ai_chat_image_via_curl(req_id: str, req: AIChatCurlProxyRequest) -> Di
     parse_started_perf = time.perf_counter()
     parsed = _parse_sse_output(stdout_text)
     parse_ms = int((time.perf_counter() - parse_started_perf) * 1000)
-    done_error = fast_done_error or str(parsed.get("done_error") or "").strip()
-    image_url = fast_image_url or str(parsed.get("image_url") or "").strip()
-    ok = bool(image_url) and not done_error
+    image_url = str(parsed.get("image_url") or "").strip()
+    video_url = fast_image_url if _looks_like_video_url(fast_image_url) else str(parsed.get("video_url") or "").strip()
+    if fast_image_url and not video_url:
+        image_url = fast_image_url
+    done_error = "" if (image_url or video_url) else fast_done_error or str(parsed.get("done_error") or "").strip()
+    ok = bool(image_url or video_url) and not done_error
     timings = {
         "build_ms": int(build_metrics.get("build_ms") or 0),
         "first_chunk_ms": first_chunk_ms,
@@ -1612,8 +1822,11 @@ def _call_ai_chat_image_via_curl(req_id: str, req: AIChatCurlProxyRequest) -> Di
         "duration_ms": elapsed_ms,
         "request_form": request_form,
         "request_files_count": len(temp_files),
+        "request_file_field": "files",
+        "request_file_fields": ["files"] * len(temp_files),
         "mode": parsed.get("mode", "text"),
         "image_url": image_url,
+        "video_url": video_url,
         "done_error": done_error,
         "source_session_id": parsed.get("source_session_id", ""),
         "source_history_record_id": parsed.get("source_history_record_id", ""),
@@ -1666,6 +1879,8 @@ def _call_ai_chat_image_via_curl_from_task(
         "ai_video_param_ratio_id",
         "ai_video_param_resolution_id",
         "ai_video_param_duration_id",
+        "template_enum",
+        "async",
     ]:
         quoted = _to_quoted_form_value(request_form.get(key))
         if not quoted:
@@ -1800,9 +2015,12 @@ def _call_ai_chat_image_via_curl_from_task(
     parse_started_perf = time.perf_counter()
     parsed = _parse_sse_output(stdout_text)
     parse_ms = int((time.perf_counter() - parse_started_perf) * 1000)
-    done_error = fast_done_error or str(parsed.get("done_error") or "").strip()
-    image_url = fast_image_url or str(parsed.get("image_url") or "").strip()
-    ok = bool(image_url) and not done_error
+    image_url = str(parsed.get("image_url") or "").strip()
+    video_url = fast_image_url if _looks_like_video_url(fast_image_url) else str(parsed.get("video_url") or "").strip()
+    if fast_image_url and not video_url:
+        image_url = fast_image_url
+    done_error = "" if (image_url or video_url) else fast_done_error or str(parsed.get("done_error") or "").strip()
+    ok = bool(image_url or video_url) and not done_error
     timings = {
         "build_ms": int(build_metrics.get("build_ms") or 0),
         "first_chunk_ms": first_chunk_ms,
@@ -1818,8 +2036,11 @@ def _call_ai_chat_image_via_curl_from_task(
         "duration_ms": elapsed_ms,
         "request_form": request_form_dump,
         "request_files_count": len(request_files),
+        "request_file_field": "files",
+        "request_file_fields": ["files"] * len(request_files),
         "mode": parsed.get("mode", "text"),
         "image_url": image_url,
+        "video_url": video_url,
         "done_error": done_error,
         "source_session_id": parsed.get("source_session_id", ""),
         "source_history_record_id": parsed.get("source_history_record_id", ""),
@@ -1895,6 +2116,8 @@ async def _call_ai_chat_image_via_httpx_once(
         "ai_video_param_ratio_id",
         "ai_video_param_resolution_id",
         "ai_video_param_duration_id",
+        "template_enum",
+        "async",
     ]:
         value = clean_form_value(request_form.get(key))
         if value:
@@ -2001,18 +2224,24 @@ async def _call_ai_chat_image_via_httpx_once(
                 "text": raw_text,
                 "mode": "json",
                 "image_url": _pick_first_image_url(parsed_json),
+                "video_url": _pick_first_video_url(parsed_json),
                 "done_error": _extract_error_message_from_payload(parsed_json.get("done_error") if isinstance(parsed_json, dict) else ""),
                 "source_session_id": str(parsed_json.get("source_session_id") or parsed_json.get("ai_chat_session_id") or "") if isinstance(parsed_json, dict) else "",
                 "source_history_record_id": str(parsed_json.get("source_history_record_id") or parsed_json.get("history_ai_chat_record_id") or "") if isinstance(parsed_json, dict) else "",
             }
-            if isinstance(parsed_json, dict) and not parsed["done_error"]:
+            if parsed["image_url"] or parsed["video_url"]:
+                parsed["done_error"] = ""
+            elif isinstance(parsed_json, dict) and not parsed["done_error"]:
                 parsed["done_error"] = _extract_error_message_from_payload(parsed_json.get("error") or parsed_json.get("message") or parsed_json.get("detail"))
         else:
             parsed = _parse_sse_output(raw_text)
         parse_ms = int((time.perf_counter() - parse_started_perf) * 1000)
-        done_error = fast_done_error or str(parsed.get("done_error") or "").strip()
-        image_url = fast_image_url or str(parsed.get("image_url") or "").strip()
-        ok = bool(image_url) and not done_error
+        image_url = str(parsed.get("image_url") or "").strip()
+        video_url = fast_image_url if _looks_like_video_url(fast_image_url) else str(parsed.get("video_url") or "").strip()
+        if fast_image_url and not video_url:
+            image_url = fast_image_url
+        done_error = "" if (image_url or video_url) else fast_done_error or str(parsed.get("done_error") or "").strip()
+        ok = bool(image_url or video_url) and not done_error
         total_ms = int((time.perf_counter() - started_perf) * 1000)
 
         return {
@@ -2021,8 +2250,11 @@ async def _call_ai_chat_image_via_httpx_once(
             "duration_ms": total_ms,
             "request_form": request_form,
             "request_files_count": len(request_files),
+            "request_file_field": "files",
+            "request_file_fields": ["files"] * len(request_files),
             "mode": parsed.get("mode", "text"),
             "image_url": image_url,
+            "video_url": video_url,
             "done_error": done_error,
             "source_session_id": parsed.get("source_session_id", ""),
             "source_history_record_id": parsed.get("source_history_record_id", ""),
@@ -2057,7 +2289,7 @@ async def _run_ai_chat_image_task(task_id: str) -> None:
 
     request_form = dict(task.get("request_form_json") or {})
     request_files = list(task.get("request_files_json") or [])
-    request_images = list(request_form.get("images") or [])
+    request_images = list(request_form.get("files") or request_form.get("images") or [])
     req_id = str(task.get("req_id") or uuid.uuid4().hex[:8])
     ai_chat_model_id = clean_form_value(request_form.get("ai_chat_model_id"))
     image_count = int(task.get("image_count") or len(request_files))
@@ -2111,6 +2343,8 @@ async def _run_ai_chat_image_task(task_id: str) -> None:
                     ai_video_param_ratio_id=str(request_form.get("ai_video_param_ratio_id") or ""),
                     ai_video_param_resolution_id=str(request_form.get("ai_video_param_resolution_id") or ""),
                     ai_video_param_duration_id=str(request_form.get("ai_video_param_duration_id") or ""),
+                    template_enum=str(request_form.get("template_enum") or ""),
+                    **{"async": str(request_form.get("async") or "")},
                     tusd_file_remote_ids=list(request_form.get("tusd_file_remote_ids") or []),
                     images=request_images,
                     timeout_seconds=int(request_form.get("timeout_seconds") or AI_CHAT_TASK_TIMEOUT_SEC),
@@ -2125,11 +2359,29 @@ async def _run_ai_chat_image_task(task_id: str) -> None:
                     request_files=request_files,
                 )
             done_error = str(result.get("done_error") or "").strip()
-            image_url = str(result.get("image_url") or "").strip()
+            part_enum = clean_form_value(request_form.get("part_enum"))
+            prefer_video = part_enum == "6"
+            image_url, video_url = _recover_media_urls_from_result_payload(result, prefer_video=prefer_video)
+            if prefer_video and image_url and not video_url:
+                video_url = image_url
+            if image_url and not str(result.get("image_url") or "").strip():
+                result["image_url"] = image_url
+            if video_url and not str(result.get("video_url") or "").strip():
+                result["video_url"] = video_url
+            media_url = video_url or image_url
             if done_error:
                 raise _AIChatNonRetryableError(done_error, raw_text=str(result.get("raw_text") or ""))
-            if not image_url:
-                raise _AIChatNonRetryableError("下游未返回图片结果", raw_text=str(result.get("raw_text") or ""))
+            if not media_url:
+                stderr_text = str(result.get("stderr") or "").strip()
+                if re.search(r"(timeout|timed out|operation timed out|超时)", stderr_text, re.IGNORECASE):
+                    raise _AIChatRetryableError(
+                        "下游请求超时",
+                        raw_text=str(result.get("raw_text") or ""),
+                        error_type="TIMEOUT",
+                    )
+                if str(result.get("ok")).strip().lower() == "false" and stderr_text:
+                    raise _AIChatNonRetryableError(stderr_text[:500], raw_text=str(result.get("raw_text") or ""))
+                raise _AIChatNonRetryableError("下游未返回可解析媒体结果", raw_text=str(result.get("raw_text") or ""))
 
             duration_ms = int((time.perf_counter() - attempt_started) * 1000)
             finished_at_iso = _now_iso()
@@ -2510,6 +2762,7 @@ async def ai_chat_image_via_curl(request: Request):
     request_form = {
         **request_form,
         "images": list(parsed_req.images or []),
+        "files": list(parsed_req.files or []),
         "tusd_file_remote_ids": list(parsed_req.tusd_file_remote_ids or []),
     }
 

@@ -3,13 +3,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# clip 1 (SHOT001) missing primary_asset, skipped
-# clip 2 (SHOT002) missing primary_asset, skipped
-# clip 3 (SHOT003) missing primary_asset, skipped
-# clip 4 (SHOT004) missing primary_asset, skipped
-# clip 5 (SHOT005) missing primary_asset, skipped
-# clip 6 (SHOT006) missing primary_asset, skipped
-# clip 7 (SHOT007) missing primary_asset, skipped
+# clip 1 (HOOK_001) missing primary_asset, skipped
+# clip 2 (VIEW_001) missing primary_asset, skipped
+# clip 3 (STEPS_001) missing primary_asset, skipped
+# clip 4 (STEPS_002) missing primary_asset, skipped
+# clip 5 (STEPS_003) missing primary_asset, skipped
+# clip 6 (PRODUCT_001) missing primary_asset, skipped
+# clip 7 (CTA_001) missing primary_asset, skipped
 
 if [ ! -s "concat_list.txt" ]; then
   echo "No valid segments to concat."

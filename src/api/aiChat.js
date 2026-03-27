@@ -240,6 +240,7 @@ export const AI_CHAT_ANCHOR_OPERATE_ENUM_3 = 3; // 切换对话模式
 export const AI_CHAT_ANCHOR_OPERATE_ENUM_4 = 4; // 打开页面
 export const AI_CHAT_ANCHOR_OPERATE_ENUM_5 = 5; // 刷新页面
 
+export const AI_CHAT_PART_ENUM_6 = 6; // 视频画质增强
 export const AI_CHAT_PART_ENUM_203 = 203; // 图片生成
 export const AI_CHAT_PART_ENUM_204 = 204; // 视频生成
 export const AI_CHAT_PART_ENUM_207 = 207; // 特征提取
@@ -622,6 +623,8 @@ export async function aiChatStream(apiFetch, payload = {}, options = {}) {
       ai_video_param_ratio_id: toQuotedFormValue(payload.ai_video_param_ratio_id),
       ai_video_param_resolution_id: toQuotedFormValue(payload.ai_video_param_resolution_id),
       ai_video_param_duration_id: toQuotedFormValue(payload.ai_video_param_duration_id),
+      template_enum: toQuotedFormValue(payload.template_enum),
+      async: toQuotedFormValue(payload.async),
       files_count: files.length,
     },
     authorizationSource: auth.source || "none",
@@ -639,6 +642,8 @@ export async function aiChatStream(apiFetch, payload = {}, options = {}) {
   appendQuotedFormValue(formData, "ai_video_param_ratio_id", payload.ai_video_param_ratio_id);
   appendQuotedFormValue(formData, "ai_video_param_resolution_id", payload.ai_video_param_resolution_id);
   appendQuotedFormValue(formData, "ai_video_param_duration_id", payload.ai_video_param_duration_id);
+  appendQuotedFormValue(formData, "template_enum", payload.template_enum);
+  appendQuotedFormValue(formData, "async", payload.async);
 
   files.forEach((file) => {
     if (file) formData.append("files", file);
