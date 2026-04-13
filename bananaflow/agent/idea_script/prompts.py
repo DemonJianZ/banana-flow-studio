@@ -4,10 +4,10 @@ from typing import Iterable, Sequence
 
 
 INFERENCE_CONFIDENCE_THRESHOLD = 0.75
-GENERATION_ANGLES = ("persona", "scene", "misconception")
+GENERATION_TOPIC_COUNT = 3
 SCRIPT_STRUCTURE_TAGS = ("[HOOK]", "[VIEW]", "[STEPS]", "[PRODUCT]", "[CTA]")
 STORYBOARD_SEGMENTS = ("HOOK", "VIEW", "STEPS", "PRODUCT", "CTA")
-PROMPT_VERSION = "idea_script_prompt_v3_1"
+PROMPT_VERSION = "idea_script_prompt_v4_0"
 
 # persona 必须具体，禁止泛化表述
 GENERIC_PERSONA_BANNED_TERMS = (
@@ -23,40 +23,77 @@ GENERIC_PERSONA_BANNED_TERMS = (
 )
 
 INFERENCE_RULES = """
-你是 Audience Inference 节点。目标：从 product 推断一个“具体到可拍短视频”的受众画像。
-规则：
-1) persona 必须具体，禁止使用宽泛表述（如大多数人/消费者/女性群体/护肤人群）。
-2) 输出 pain_points 要优先写显性痛点（能直接感知、可被镜头展示）。
-3) 输出 scenes 要具体到使用/购买/决策场景。
-4) confidence 为 0~1；信息不足时允许低分，但仍要给出最佳猜测。
-5) unsafe_claim_risk 仅评估文案夸大/医疗化风险，不做效果保证。
-6) 避免夸大、医疗化、绝对化表述。
+You are the audience inference step inside the china-growth-ops workflow.
+Treat the external skill instructions and attached reference snippets as the source of truth.
+
+Goal:
+- lock one concrete commercial unit for one product
+- infer one narrow target buyer that fits the product and the primary platform-first test
+- keep the output useful for downstream China-market growth copy generation
+
+Rules:
+1) persona must be specific, concrete, and shootable; never use generic audience labels.
+2) pain_points must be visible or decision-critical, not abstract brand language.
+3) scenes must map to real purchase, usage, or comparison moments.
+4) prefer one SKU, one buyer, one primary platform-first assumption.
+5) confidence stays in 0~1; lower it when assumptions are thin.
+6) unsafe_claim_risk only evaluates copy/compliance risk, not product quality.
+7) do not invent medical, legal, guaranteed-income, or absolute claims.
+8) all human-readable fields must be in Simplified Chinese.
+Return JSON only.
 """.strip()
 
 INFERENCE_RETRY_RULES = """
-这是 retry 推断。请优先补全“显性痛点”和“具体场景”，尽量把 persona 收窄到可操作的人群。
-如果仍然信息不足，保持低 confidence，但不要编造专业结论。
+This is a retry pass.
+Tighten the buyer definition, make pain points more visible, and make scenes more operational.
+Do not fall back to generic copy. If evidence is still weak, keep confidence low.
 """.strip()
 
 GENERATOR_RULES = """
-你是 Idea + Script Generator 节点。必须固定输出 3 个角度：
-1) persona
-2) scene
-3) misconception
+You are the copy generation step inside the china-growth-ops workflow.
+Treat the external skill instructions and attached references as the source of truth.
 
-每个选题包含：title / hook / script_60s。
-script_60s 必须严格包含并按顺序使用这 5 个标签段落：
-[HOOK]...[VIEW]...[STEPS]...[PRODUCT]...[CTA]...
-避免夸大、医疗化、绝对化表述。
+Task:
+- generate exactly 3 candidate angles from one shared commercial brief
+- keep the angle labels in the skill's own wording; do not map them to internal taxonomy labels
+- make the copy feel platform-aware for Chinese-market growth operations
+- return the full skill-native package whenever possible
+
+Preferred JSON shape:
+{
+  "offer_decision": {...},
+  "candidate_angles": [
+    {
+      "angle": string,
+      "title": string,
+      "hook": string,
+      "script_60s": string,
+      "visual_keywords": string[]
+    }
+  ],
+  "selected_angle": string,
+  "platform_plan": {...},
+  "copy_pack": {...},
+  "browser_ready_fields": {...},
+  "risks_and_blockers": string[],
+  "kpi_checklist": string[]
+}
+
+If your skill-native structure uses different field names, keep the same meaning and stay consistent.
+
+Rules:
+1) All human-readable fields must be in Simplified Chinese.
+2) Do not reuse generic house-style templates.
+3) Derive all three angles from the same product, buyer, pain, price band, conversion goal, and platform pair.
+4) Keep claims compliant: no medical, legal, guaranteed, or absolute promises.
+5) Return JSON only.
+6) The 3 angle labels must be distinct and commercially meaningful in the skill's own language.
 """.strip()
 
 GENERATOR_RETRY_SUFFIX = """
-这是 generation retry。请优先修复 reviewer 指出的 blocking 问题，不要只是改写措辞或重复生成。
-必须确保：
-1) 固定输出 3 个 topic
-2) angle 恰好覆盖 persona / scene / misconception 且不重复
-3) 每个 topic 都有完整的 title / hook / script_60s
-4) persona 不泛化
+This is a generation retry.
+Fix the blocking issues directly instead of paraphrasing the same output.
+You must still return exactly 3 topics with distinct angle labels.
 """.strip()
 
 REVIEWER_RULES = """
@@ -68,16 +105,6 @@ REVIEWER_RULES = """
 5) persona 不能泛化
 6) script_60s 要包含 [HOOK][VIEW][STEPS][PRODUCT][CTA] 标签结构（缺失可记为 non-blocking）
 必要时做轻量修正（不改变核心意思）。
-""".strip()
-
-GENERATOR_FEW_SHOT = """
-few_shot_example:
-{
-  "angle": "scene",
-  "title": "早晚高峰地铁通勤下，怎么判断耳机值不值",
-  "hook": "同一款耳机，换场景体验差很大",
-  "script_60s": "[HOOK] 你在地铁里觉得降噪不够，先别急着下结论。\\n[VIEW] 先看场景里的关键失败点，再决定值不值。\\n[STEPS] 第一步记下你最常遇到的噪声；第二步对比通话清晰度；第三步连续佩戴30分钟看舒适度。\\n[PRODUCT] 如果这款耳机在通勤噪声和通话都稳定，就进入候选。\\n[CTA] 想要我这套对比清单，先收藏。"
-}
 """.strip()
 
 RISK_SCANNER_RULES = """
@@ -121,11 +148,35 @@ STORYBOARD_REVIEWER_RULES = """
 """.strip()
 
 
-def build_inference_prompt(product: str, retry: bool = False, previous_persona: str | None = None) -> str:
+def _brief_lines(brief_context: dict | None = None) -> list[str]:
+    brief = dict(brief_context or {})
+    mapping = (
+        ("audience", "target_audience"),
+        ("price_band", "price_band"),
+        ("conversion_goal", "conversion_goal"),
+        ("primary_platform", "primary_platform"),
+        ("secondary_platform", "secondary_platform"),
+        ("selected_angle", "preferred_angle"),
+    )
+    lines: list[str] = []
+    for source_key, label in mapping:
+        text = str(brief.get(source_key) or "").strip()
+        if text:
+            lines.append(f"{label}: {text}")
+    return lines
+
+
+def build_inference_prompt(
+    product: str,
+    retry: bool = False,
+    previous_persona: str | None = None,
+    brief_context: dict | None = None,
+) -> str:
     parts = [INFERENCE_RULES]
     if retry:
         parts.append(INFERENCE_RETRY_RULES)
     parts.append(f"product: {product}")
+    parts.extend(_brief_lines(brief_context))
     if previous_persona:
         parts.append(f"previous_persona: {previous_persona}")
     return "\n\n".join(parts)
@@ -138,16 +189,18 @@ def build_generator_prompt(
     scenes: Iterable[str],
     retry: bool = False,
     blocking_issues: Sequence[str] | None = None,
+    brief_context: dict | None = None,
 ) -> str:
     prompt = (
         f"{GENERATOR_RULES}\n\n"
         f"product: {product}\n"
         f"persona: {persona}\n"
         f"pain_points: {list(pain_points)}\n"
-        f"scenes: {list(scenes)}\n\n"
-        f"{GENERATOR_FEW_SHOT}\n\n"
-        f"required_script_tags: {list(SCRIPT_STRUCTURE_TAGS)}"
+        f"scenes: {list(scenes)}"
     )
+    brief_lines = _brief_lines(brief_context)
+    if brief_lines:
+        prompt += "\n" + "\n".join(brief_lines)
     if retry:
         prompt += f"\n\n{GENERATOR_RETRY_SUFFIX}"
         if blocking_issues:

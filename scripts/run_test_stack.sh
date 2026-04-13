@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+INTERNAL_NO_PROXY="127.0.0.1,localhost,::1,0.0.0.0,192.168.20.30,192.168.20.30:8188,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+export no_proxy="${no_proxy:+${no_proxy},}${INTERNAL_NO_PROXY}"
+export NO_PROXY="${NO_PROXY:+${NO_PROXY},}${INTERNAL_NO_PROXY}"
 
 BRANCH="dev"
 REMOTE_NAME="${REMOTE_NAME:-origin}"
@@ -18,6 +21,9 @@ FRONTEND_PID_FILE="$RUN_DIR/frontend_${FRONTEND_PORT}.pid"
 BACKEND_LOG="$RUN_DIR/backend_${BACKEND_PORT}.log"
 FRONTEND_LOG="$RUN_DIR/frontend_${FRONTEND_PORT}.log"
 AGENT_PROXY_URL="${AGENT_PROXY_URL:-http://szdayu:123456@124.243.168.90:16607}"
+USE_LOCAL_OLLAMA_AGENT="${USE_LOCAL_OLLAMA_AGENT:-0}"
+LOCAL_OLLAMA_MODEL="${LOCAL_OLLAMA_MODEL:-gemma4:latest}"
+LOCAL_OLLAMA_BASE_URL="${LOCAL_OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
 
 log() {
   echo "[test] $*"
@@ -92,7 +98,20 @@ start_backend() {
   stop_if_running "$BACKEND_PID_FILE"
   mkdir -p "$RUN_DIR"
   local cors_origins
-  cors_origins="${BANANAFLOW_CORS_ALLOW_ORIGINS:-http://test.dayukeji-inc.cn,http://${DISPLAY_HOST}:${FRONTEND_PORT},http://localhost:${FRONTEND_PORT},http://127.0.0.1:${FRONTEND_PORT}}"
+  cors_origins="${BANANAFLOW_CORS_ALLOW_ORIGINS:-http://meta.dayukeji-inc.cn,https://meta.dayukeji-inc.cn,http://test.dayukeji-inc.cn,https://test.dayukeji-inc.cn,http://${DISPLAY_HOST}:${FRONTEND_PORT},http://localhost:${FRONTEND_PORT},http://127.0.0.1:${FRONTEND_PORT}}"
+  if [[ "${USE_LOCAL_OLLAMA_AGENT}" =~ ^(1|true|yes|on)$ ]]; then
+    export BANANAFLOW_OLLAMA_ENABLE="1"
+    export BANANAFLOW_OLLAMA_BASE_URL="${LOCAL_OLLAMA_BASE_URL}"
+    export MODEL_AGENT="${MODEL_AGENT:-ollama:${LOCAL_OLLAMA_MODEL}}"
+    export MODEL_AGENT_CHAT="${MODEL_AGENT_CHAT:-ollama:${LOCAL_OLLAMA_MODEL}}"
+    export IDEA_SCRIPT_DEFAULT_MODEL="${IDEA_SCRIPT_DEFAULT_MODEL:-ollama:${LOCAL_OLLAMA_MODEL}}"
+    export IDEA_SCRIPT_INFERENCE_MODEL="${IDEA_SCRIPT_INFERENCE_MODEL:-ollama:${LOCAL_OLLAMA_MODEL}}"
+    export IDEA_SCRIPT_GENERATION_MODEL="${IDEA_SCRIPT_GENERATION_MODEL:-ollama:${LOCAL_OLLAMA_MODEL}}"
+    export IDEA_SCRIPT_RISK_SCAN_MODEL="${IDEA_SCRIPT_RISK_SCAN_MODEL:-ollama:${LOCAL_OLLAMA_MODEL}}"
+    export IDEA_SCRIPT_SAFE_REWRITE_MODEL="${IDEA_SCRIPT_SAFE_REWRITE_MODEL:-ollama:${LOCAL_OLLAMA_MODEL}}"
+    export IDEA_SCRIPT_SCORE_MODEL="${IDEA_SCRIPT_SCORE_MODEL:-ollama:${LOCAL_OLLAMA_MODEL}}"
+    export IDEA_SCRIPT_STORYBOARD_GENERATE_MODEL="${IDEA_SCRIPT_STORYBOARD_GENERATE_MODEL:-ollama:${LOCAL_OLLAMA_MODEL}}"
+  fi
   (
     cd "$WORKTREE_ROOT/bananaflow"
     AUTH_DB_PATH="$AUTH_DB_PATH_VALUE" HOST="0.0.0.0" PORT="$BACKEND_PORT" WORKERS="1" \

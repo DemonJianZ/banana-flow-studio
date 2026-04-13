@@ -142,7 +142,7 @@ class ComplianceGuardNode:
                 spans.append(
                     RiskySpan(
                         topic_index=topic_index,
-                        angle=angle if angle in {"persona", "scene", "misconception"} else None,
+                        angle=(angle or "").strip() or None,
                         field=field,  # type: ignore[arg-type]
                         text=snippet,
                         reason=rule.reason,

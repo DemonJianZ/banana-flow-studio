@@ -26,10 +26,12 @@ from core.config import (
     COMFYUI_VIDEO_WAN_I2V_PATH,
     COMFYUI_VIDEO_QWEN_I2V_PATH,
     COMFYUI_UPSCALE_PATH,
+    COMFYUI_LINEART_PATH,
     COMFYUI_CONTROLNET_PATH,
     COMFYUI_OUTPUT_NODE_ID,
     COMFYUI_TIMEOUT_SEC,
     COMFYUI_VIDEO_UPSCALE_TIMEOUT_SEC,
+    COMFYUI_VIDEO_LINEART_TIMEOUT_SEC,
     COMFYUI_POLL_INTERVAL_SEC,
 )
 from core.logging import sys_logger
@@ -58,15 +60,26 @@ def _load_workflow(path: str) -> Dict[str, Any]:
 def _upload_file(file_bytes: bytes, filename: str, mime_type: str = "application/octet-stream") -> str:
     files = {"image": (filename, file_bytes, mime_type)}
     data = {"overwrite": "true", "type": "input"}
-    resp = requests.post(f"{COMFYUI_URL}/upload/image", files=files, data=data, timeout=30)
-    if resp.status_code != 200:
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        resp = requests.post(f"{COMFYUI_URL}/upload/image", files=files, data=data, timeout=30)
+        if resp.status_code == 200:
+            payload = resp.json()
+            return payload.get("name") or filename
+        if resp.status_code in {502, 503, 504} and attempt < max_attempts - 1:
+            backoff_sec = 0.4 * (attempt + 1)
+            sys_logger.warning(
+                f"ComfyUI upload transient error {resp.status_code} on attempt {attempt + 1}/{max_attempts}, "
+                f"retrying in {backoff_sec:.1f}s"
+            )
+            time.sleep(backoff_sec)
+            continue
         raise ComfyUiError(f"ComfyUI upload failed: {resp.status_code} {resp.text}")
-    payload = resp.json()
-    return payload.get("name") or filename
+    raise ComfyUiError("ComfyUI upload failed after retries")
 
 
-def _upload_image(img_bytes: bytes, filename: str) -> str:
-    return _upload_file(img_bytes, filename, "image/png")
+def _upload_image(img_bytes: bytes, filename: str, mime_type: str = "image/png") -> str:
+    return _upload_file(img_bytes, filename, mime_type)
 
 
 def _queue_prompt(workflow: Dict[str, Any], client_id: str) -> str:
@@ -169,6 +182,15 @@ def _download_file(file_info: Dict[str, Any]) -> bytes:
 
 def _download_image(image_info: Dict[str, Any]) -> bytes:
     return _download_file(image_info)
+
+
+def _image_mime_from_ext(ext: str) -> str:
+    ext = (ext or "").lower().strip(".")
+    if ext in {"jpg", "jpeg"}:
+        return "image/jpeg"
+    if ext == "webp":
+        return "image/webp"
+    return "image/png"
 
 
 def _set_node_input(workflow: Dict[str, Any], node_id: str, key: str, value: Any) -> None:
@@ -642,6 +664,77 @@ def _concat_video_segments(segment_paths: List[str], temp_dir: str, req_id: str)
         return output_path
 
 
+def _trim_video_segment(
+    input_path: str,
+    output_path: str,
+    start_sec: float,
+    end_sec: float,
+    req_id: str,
+    segment_index: int,
+) -> None:
+    start_sec = max(0.0, float(start_sec or 0.0))
+    end_sec = max(start_sec, float(end_sec or 0.0))
+    duration_sec = max(0.05, end_sec - start_sec)
+    trim_cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        f"{start_sec:.3f}",
+        "-i",
+        input_path,
+        "-t",
+        f"{duration_sec:.3f}",
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "18",
+        "-c:a",
+        "aac",
+        "-movflags",
+        "+faststart",
+        output_path,
+    ]
+    _run_ffmpeg(trim_cmd, req_id, f"trim(segment_{segment_index:02d})")
+
+
+def run_video_split_workflow(
+    *,
+    req_id: str,
+    video_input: str,
+    segments: List[Dict[str, Any]],
+) -> tuple[List[bytes], str]:
+    if not segments:
+        raise ComfyUiError("No video segments provided")
+
+    with tempfile.TemporaryDirectory(prefix="comfyui-video-split-") as temp_dir:
+        source_path = _materialize_video_input(video_input, temp_dir)
+        output_dir = os.path.join(temp_dir, "split_outputs")
+        os.makedirs(output_dir, exist_ok=True)
+
+        output_bytes_list: List[bytes] = []
+        for index, segment in enumerate(segments, start=1):
+            start_sec = max(0.0, float(segment.get("start_sec") or 0.0))
+            end_sec = float(segment.get("end_sec") or 0.0)
+            if end_sec <= start_sec:
+                raise ComfyUiError(f"Invalid segment range at index {index}: end_sec must be greater than start_sec")
+
+            output_path = os.path.join(output_dir, f"segment_{index:03d}.mp4")
+            _trim_video_segment(source_path, output_path, start_sec, end_sec, req_id, index)
+            with open(output_path, "rb") as f:
+                payload = f.read()
+            if not payload:
+                raise ComfyUiError(f"Empty video segment generated at index {index}")
+            output_bytes_list.append(payload)
+
+        return output_bytes_list, "video/mp4"
+
+
 def run_overlaytext_workflow(
     *,
     req_id: str,
@@ -716,7 +809,7 @@ def run_overlaytext_workflow(
 
     upload_name = f"textoverlay-{uuid.uuid4().hex}.{ext}"
     sys_logger.info(f"[{req_id}] Uploading image to ComfyUI: {upload_name}")
-    uploaded = _upload_image(img_bytes, upload_name)
+    uploaded = _upload_image(img_bytes, upload_name, _image_mime_from_ext(ext))
 
     _set_node_input(workflow, "2", "image", uploaded)
 
@@ -816,7 +909,7 @@ def run_rmbg_workflow(
 
     upload_name = f"rmbg-{uuid.uuid4().hex}.{ext}"
     sys_logger.info(f"[{req_id}] Uploading image to ComfyUI: {upload_name}")
-    uploaded = _upload_image(img_bytes, upload_name)
+    uploaded = _upload_image(img_bytes, upload_name, _image_mime_from_ext(ext))
 
     _set_node_input(workflow, "3", "image", uploaded)
 
@@ -851,7 +944,7 @@ def run_remove_watermark_workflow(
 
     upload_name = f"remove-watermark-{uuid.uuid4().hex}.{ext}"
     sys_logger.info(f"[{req_id}] Uploading image to ComfyUI: {upload_name}")
-    uploaded = _upload_image(img_bytes, upload_name)
+    uploaded = _upload_image(img_bytes, upload_name, _image_mime_from_ext(ext))
 
     load_node_id = _find_workflow_node_id(workflow, ["LoadImage"], ["image"]) or "78"
     _set_node_input(workflow, load_node_id, "image", uploaded)
@@ -887,7 +980,7 @@ def run_multi_angleshots_workflow(
 
     upload_name = f"multi-angleshots-{uuid.uuid4().hex}.{ext}"
     sys_logger.info(f"[{req_id}] Uploading image to ComfyUI: {upload_name}")
-    uploaded = _upload_image(img_bytes, upload_name)
+    uploaded = _upload_image(img_bytes, upload_name, _image_mime_from_ext(ext))
     _set_node_input(workflow, "25", "image", uploaded)
 
     _set_node_input(
@@ -1394,3 +1487,74 @@ def run_video_upscale_workflow(
         if final_mime == "application/octet-stream":
             final_mime = "video/mp4"
         return final_bytes, final_mime
+
+
+def run_video_lineart_workflow(
+    *,
+    req_id: str,
+    video_input: str,
+    line_strength: int = 2,
+    line_color: str = "black",
+) -> tuple[bytes, str]:
+    workflow = _load_workflow(COMFYUI_LINEART_PATH)
+    workflow = copy.deepcopy(workflow)
+    load_node_id = _find_workflow_node_id(
+        workflow,
+        ["LoadVideo", "VHS_LoadVideo", "VHS_LoadVideoPath"],
+        required_inputs=["file"],
+    ) or ("1" if str("1") in workflow else None)
+    sketch_node_id = _find_workflow_node_id(
+        workflow,
+        ["Sketch_Assistant"],
+        required_inputs=["line_strength", "line_color"],
+    ) or ("3" if str("3") in workflow else None)
+    save_node_id = _find_workflow_node_id(
+        workflow,
+        ["SaveVideo", "VHS_VideoCombine"],
+        required_inputs=["filename_prefix"],
+    ) or ("10" if str("10") in workflow else None)
+
+    if not load_node_id:
+        raise ComfyUiError(
+            f"Lineart workflow missing video load node (class_type in LoadVideo/VHS_LoadVideo/VHS_LoadVideoPath). "
+            f"workflow={COMFYUI_LINEART_PATH}"
+        )
+    if not sketch_node_id:
+        raise ComfyUiError(
+            f"Lineart workflow missing sketch node (class_type=Sketch_Assistant). workflow={COMFYUI_LINEART_PATH}"
+        )
+    if not save_node_id:
+        raise ComfyUiError(
+            f"Lineart workflow missing video save node (class_type in SaveVideo/VHS_VideoCombine). "
+            f"workflow={COMFYUI_LINEART_PATH}"
+        )
+
+    target_strength = max(1, min(10, _to_int(line_strength, 2)))
+    target_color = str(line_color or "black").strip() or "black"
+
+    with tempfile.TemporaryDirectory(prefix="comfyui-video-lineart-") as temp_dir:
+        source_path = _materialize_video_input(video_input, temp_dir)
+        source_ext = os.path.splitext(source_path)[1].lower() or ".mp4"
+        upload_name = f"lineart-{uuid.uuid4().hex}{source_ext}"
+        sys_logger.info(f"[{req_id}] Video lineart upload {upload_name}")
+
+        with open(source_path, "rb") as f:
+            uploaded = _upload_file(f.read(), upload_name, _guess_mime_from_ext(source_ext))
+
+        _set_node_input(workflow, load_node_id, "file", uploaded)
+        _set_node_input(workflow, sketch_node_id, "line_strength", target_strength)
+        _set_node_input(workflow, sketch_node_id, "line_color", target_color)
+        _set_node_input(workflow, save_node_id, "filename_prefix", f"video/lineart-{req_id}")
+
+        client_id = uuid.uuid4().hex
+        prompt_id = _queue_prompt(workflow, client_id)
+        history = _wait_for_history(prompt_id, timeout_sec=COMFYUI_VIDEO_LINEART_TIMEOUT_SEC)
+        output_info = _pick_output_file(history, preferred_node_ids=[save_node_id])
+        output_bytes = _download_file(output_info)
+
+        output_name = str(output_info.get("filename") or "lineart.mp4")
+        output_ext = os.path.splitext(output_name)[1].lower() or ".mp4"
+        output_mime = _guess_mime_from_ext(output_ext)
+        if output_mime == "application/octet-stream":
+            output_mime = "video/mp4"
+        return output_bytes, output_mime

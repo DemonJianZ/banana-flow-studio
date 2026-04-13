@@ -38,6 +38,7 @@ from .edit_plan_builder import EditPlanBuilder
 from .gemini_client import DEFAULT_IDEA_SCRIPT_MODEL, build_idea_script_gemini_client
 from .generator import IdeaScriptGeneratorNode
 from .inference import AudienceInferenceNode
+from .output_pack import build_structured_result
 from .prompts import INFERENCE_CONFIDENCE_THRESHOLD, PROMPT_VERSION
 from .reviewer import IdeaScriptReviewerNode
 from .risk_scanner import ComplianceGuardNode, RISK_POLICY_VERSION
@@ -45,7 +46,7 @@ from .safe_rewrite import SafeRewriteNode
 from .scoring import ScoringReviewerNode
 from .storyboard import StoryboardAgentNode
 from .storyboard_reviewer import StoryboardReviewerNode
-from .schemas import IdeaScriptRequest, IdeaScriptResponse
+from .schemas import ComplianceScanResult, IdeaScriptRequest, IdeaScriptResponse, IdeaScriptReviewResult
 
 try:
     from opentelemetry import trace as _otel_trace  # type: ignore
@@ -160,7 +161,19 @@ class IdeaScriptOrchestrator:
 
     def _cache_key(self, req: IdeaScriptRequest) -> str:
         cfg_hash = self.config.stable_config_hash()
-        return f"{(req.product or '').strip().lower()}::scoring={int(self.config.scoring_enabled)}::cfg={cfg_hash}"
+        brief_parts = [
+            str(getattr(req, "audience", "") or "").strip().lower(),
+            str(getattr(req, "price_band", "") or "").strip().lower(),
+            str(getattr(req, "conversion_goal", "") or "").strip().lower(),
+            str(getattr(req, "primary_platform", "") or "").strip().lower(),
+            str(getattr(req, "secondary_platform", "") or "").strip().lower(),
+            str(getattr(req, "selected_angle", "") or "").strip().lower(),
+        ]
+        brief_key = "|".join(brief_parts)
+        return (
+            f"{(req.product or '').strip().lower()}::brief={brief_key}"
+            f"::scoring={int(self.config.scoring_enabled)}::cfg={cfg_hash}"
+        )
 
     def _cache_get(self, key: str) -> Optional[IdeaScriptResponse]:
         if not self.config.cache_enabled:
@@ -178,6 +191,17 @@ class IdeaScriptOrchestrator:
         self._cache.move_to_end(key)
         while len(self._cache) > self.config.cache_max_size:
             self._cache.popitem(last=False)
+
+    def _build_brief_context(self, req: IdeaScriptRequest) -> dict[str, str]:
+        brief = {
+            "audience": str(getattr(req, "audience", "") or "").strip(),
+            "price_band": str(getattr(req, "price_band", "") or "").strip(),
+            "conversion_goal": str(getattr(req, "conversion_goal", "") or "").strip(),
+            "primary_platform": str(getattr(req, "primary_platform", "") or "").strip(),
+            "secondary_platform": str(getattr(req, "secondary_platform", "") or "").strip(),
+            "selected_angle": str(getattr(req, "selected_angle", "") or "").strip(),
+        }
+        return {key: value for key, value in brief.items() if value}
 
     def _segment_coverage_ok(self, shots: list[Any]) -> bool:
         counts = {"HOOK": 0, "VIEW": 0, "STEPS": 0, "PRODUCT": 0, "CTA": 0}
@@ -488,6 +512,7 @@ class IdeaScriptOrchestrator:
             "memory_pref_expired_filtered_count": 0,
             "memory_pref_update_count_sum": 0,
         }
+        brief_context = self._build_brief_context(req)
 
         with self._span(
             "idea_script.run",
@@ -495,6 +520,7 @@ class IdeaScriptOrchestrator:
                 "product": req.product,
                 "session_id": session_id,
                 "session_summary_present": session_summary_present,
+                "brief_context_present": bool(brief_context),
             },
         ) as run_span:
             infer_stage_started = time.perf_counter()
@@ -524,6 +550,7 @@ class IdeaScriptOrchestrator:
                     retry=False,
                     allow_llm=allow_llm,
                     context_pack=infer_context_pack,
+                    brief_context=brief_context,
                 )
                 self._set_infer_span_attrs(infer_span, inference_result)
             if trajectory is not None:
@@ -540,57 +567,8 @@ class IdeaScriptOrchestrator:
                     duration=float(time.perf_counter() - infer_stage_started),
                 )
 
-            if inference_result.confidence < INFERENCE_CONFIDENCE_THRESHOLD and not budget_exhausted:
-                retry_count = 1
-                infer_retry_started = time.perf_counter()
-                with self._span(
-                    "idea_script.infer.retry",
-                    {"product": req.product, "retry_count": retry_count},
-                ) as infer_retry_span:
-                    allow_llm, total_llm_calls, budget_exhausted, budget_exhausted_reason = self._reserve_llm_call(
-                        node=self.inference_node,
-                        llm_method_name="infer_audience",
-                        step_name="infer_retry",
-                        total_llm_calls=total_llm_calls,
-                        budget_exhausted=budget_exhausted,
-                        budget_exhausted_reason=budget_exhausted_reason,
-                    )
-                    infer_retry_context_pack = (
-                        self._build_context_pack_for_llm(
-                            tenant_id=tenant_id,
-                            user_id=user_id,
-                            session_id=session_id,
-                            base_system="idea_script.infer.retry",
-                        )
-                        if allow_llm
-                        else None
-                    )
-                    self._collect_context_span_metrics(context_metrics, infer_retry_context_pack)
-                    inference_result = self._call_run(
-                        self.inference_node,
-                        product=req.product,
-                        retry=True,
-                        previous=inference_result,
-                        allow_llm=allow_llm,
-                        context_pack=infer_retry_context_pack,
-                    )
-                    self._set_infer_span_attrs(infer_retry_span, inference_result)
-                if trajectory is not None:
-                    trajectory.add_stage(
-                        stage_name="audience_inference_retry",
-                        tool_name="AudienceInferenceNode.run",
-                        args={"product": req.product, "retry": True, "allow_llm": bool(allow_llm)},
-                        result={
-                            "confidence": float(getattr(inference_result, "confidence", 0.0) or 0.0),
-                            "persona_present": bool((getattr(inference_result, "persona", "") or "").strip()),
-                        },
-                        success=True,
-                        reason="low_confidence_retry",
-                        duration=float(time.perf_counter() - infer_retry_started),
-                    )
-
-            inference_warning = inference_result.confidence < INFERENCE_CONFIDENCE_THRESHOLD
-            warning_reason = "low_confidence_inference" if inference_warning else None
+            inference_warning = False
+            warning_reason = None
 
             generate_stage_started = time.perf_counter()
             with self._span(
@@ -627,6 +605,7 @@ class IdeaScriptOrchestrator:
                     retry=False,
                     allow_llm=allow_llm,
                     context_pack=generate_context_pack,
+                    brief_context=brief_context,
                 )
                 self._set_span_attrs(
                     generate_span,
@@ -646,803 +625,70 @@ class IdeaScriptOrchestrator:
                     duration=float(time.perf_counter() - generate_stage_started),
                 )
 
-            review_stage_started = time.perf_counter()
-            with self._span("idea_script.review", {"topic_count": len(topics or [])}) as review_span:
-                review_result = self.reviewer_node.run(inference_result, topics)
-                self._set_span_attrs(
-                    review_span,
-                    {
-                        "passed": review_result.passed,
-                        "blocking_issue_count": len(review_result.blocking_issues or []),
-                        "non_blocking_issue_count": len(review_result.non_blocking_issues or []),
-                        "failure_tag_count": len(review_result.failure_tags or []),
-                    },
-                )
-            if trajectory is not None:
-                trajectory.add_stage(
-                    stage_name="quality_review",
-                    tool_name="IdeaScriptReviewerNode.run",
-                    args={"topic_count": len(topics or []), "retry": False},
-                    result={
-                        "passed": bool(review_result.passed),
-                        "blocking_issue_count": len(review_result.blocking_issues or []),
-                    },
-                    success=bool(review_result.passed),
-                    reason=("review_passed" if review_result.passed else "review_blocking_issues"),
-                    duration=float(time.perf_counter() - review_stage_started),
-                )
-
-            if review_result.blocking_issues and not budget_exhausted:
-                generation_retry_count = 1
-                generate_retry_started = time.perf_counter()
-                with self._span(
-                    "idea_script.generate",
-                    {
-                        "product": req.product,
-                        "retry_count": generation_retry_count,
-                        "persona_present": bool((inference_result.persona or "").strip()),
-                        "pain_point_count": len(inference_result.pain_points or []),
-                        "scene_count": len(inference_result.scenes or []),
-                    },
-                ) as generate_retry_span:
-                    allow_llm, total_llm_calls, budget_exhausted, budget_exhausted_reason = self._reserve_llm_call(
-                        node=self.generator_node,
-                        llm_method_name="generate_idea_scripts",
-                        step_name="generate_retry",
-                        total_llm_calls=total_llm_calls,
-                        budget_exhausted=budget_exhausted,
-                        budget_exhausted_reason=budget_exhausted_reason,
-                    )
-                    generate_retry_context_pack = (
-                        self._build_context_pack_for_llm(
-                            tenant_id=tenant_id,
-                            user_id=user_id,
-                            session_id=session_id,
-                            base_system="idea_script.generate.retry",
-                        )
-                        if allow_llm
-                        else None
-                    )
-                    self._collect_context_span_metrics(context_metrics, generate_retry_context_pack)
-                    topics = self._call_run(
-                        self.generator_node,
-                        audience_context=inference_result,
-                        retry=True,
-                        reviewer_blocking_issues=review_result.blocking_issues,
-                        previous_topics=review_result.normalized_topics,
-                        allow_llm=allow_llm,
-                        context_pack=generate_retry_context_pack,
-                    )
-                    self._set_span_attrs(
-                        generate_retry_span,
-                        {
-                            "topic_count": len(topics or []),
-                            "angle_count": len({getattr(t, "angle", None) for t in (topics or []) if getattr(t, "angle", None)}),
-                        },
-                    )
-                if trajectory is not None:
-                    trajectory.add_stage(
-                        stage_name="idea_generation_retry",
-                        tool_name="IdeaScriptGeneratorNode.run",
-                        args={"product": req.product, "retry": True, "allow_llm": bool(allow_llm)},
-                        result={"topic_count": len(topics or [])},
-                        success=True,
-                        reason="review_blocking_issues_retry",
-                        duration=float(time.perf_counter() - generate_retry_started),
-                    )
-
-                review_retry_started = time.perf_counter()
-                with self._span("idea_script.review", {"topic_count": len(topics or [])}) as review_retry_span:
-                    review_result = self.reviewer_node.run(inference_result, topics)
-                    self._set_span_attrs(
-                        review_retry_span,
-                        {
-                            "passed": review_result.passed,
-                            "blocking_issue_count": len(review_result.blocking_issues or []),
-                            "non_blocking_issue_count": len(review_result.non_blocking_issues or []),
-                            "failure_tag_count": len(review_result.failure_tags or []),
-                        },
-                    )
-                if trajectory is not None:
-                    trajectory.add_stage(
-                        stage_name="quality_review",
-                        tool_name="IdeaScriptReviewerNode.run",
-                        args={"topic_count": len(topics or []), "retry": True},
-                        result={
-                            "passed": bool(review_result.passed),
-                            "blocking_issue_count": len(review_result.blocking_issues or []),
-                        },
-                        success=bool(review_result.passed),
-                        reason=("review_passed" if review_result.passed else "review_blocking_issues_after_retry"),
-                        duration=float(time.perf_counter() - review_retry_started),
-                    )
-
-            final_topics = review_result.normalized_topics or []
-
-            risk_scan_stage_started = time.perf_counter()
-            with self._span("idea_script.risk_scan", {"topic_count": len(final_topics)}) as risk_scan_span:
-                allow_llm, total_llm_calls, budget_exhausted, budget_exhausted_reason = self._reserve_llm_call(
-                    node=self.risk_scanner_node,
-                    llm_method_name="scan_compliance_risk",
-                    step_name="risk_scan",
-                    total_llm_calls=total_llm_calls,
-                    budget_exhausted=budget_exhausted,
-                    budget_exhausted_reason=budget_exhausted_reason,
-                )
-                compliance_result = self._call_run(
-                    self.risk_scanner_node,
-                    product=inference_result.product,
-                    persona=inference_result.persona,
-                    topics=final_topics,
-                    allow_llm=allow_llm,
-                )
-                self._set_span_attrs(
-                    risk_scan_span,
-                    {
-                        "risk_level": compliance_result.risk_level,
-                        "risky_span_count": len(compliance_result.risky_spans or []),
-                    },
-                )
-            if trajectory is not None:
-                trajectory.add_stage(
-                    stage_name="risk_scan",
-                    tool_name="ComplianceGuardNode.run",
-                    args={"topic_count": len(final_topics or []), "allow_llm": bool(allow_llm)},
-                    result={
-                        "risk_level": str(compliance_result.risk_level or "low"),
-                        "risky_span_count": len(compliance_result.risky_spans or []),
-                    },
-                    success=True,
-                    reason="risk_scan_completed",
-                    duration=float(time.perf_counter() - risk_scan_stage_started),
-                )
-
-            if self._risk_at_least(compliance_result.risk_level, "medium") and not budget_exhausted:
-                safe_rewrite_applied = True
-                rewrite_stage_started = time.perf_counter()
-                with self._span(
-                    "idea_script.safe_rewrite",
-                    {
-                        "topic_count": len(final_topics),
-                        "risk_level": compliance_result.risk_level,
-                        "risky_span_count": len(compliance_result.risky_spans or []),
-                    },
-                ) as rewrite_span:
-                    allow_llm, total_llm_calls, budget_exhausted, budget_exhausted_reason = self._reserve_llm_call(
-                        node=self.safe_rewrite_node,
-                        llm_method_name="safe_rewrite_topics",
-                        step_name="safe_rewrite",
-                        total_llm_calls=total_llm_calls,
-                        budget_exhausted=budget_exhausted,
-                        budget_exhausted_reason=budget_exhausted_reason,
-                    )
-                    rewrite_result = self._call_run(
-                        self.safe_rewrite_node,
-                        product=inference_result.product,
-                        persona=inference_result.persona,
-                        topics=final_topics,
-                        risky_spans=compliance_result.risky_spans,
-                        allow_llm=allow_llm,
-                    )
-                    self._set_span_attrs(
-                        rewrite_span,
-                        {
-                            "changed": rewrite_result.changed,
-                            "rewritten_span_count": rewrite_result.rewritten_span_count,
-                        },
-                    )
-                if trajectory is not None:
-                    trajectory.add_stage(
-                        stage_name="safe_rewrite",
-                        tool_name="SafeRewriteNode.run",
-                        args={
-                            "topic_count": len(final_topics or []),
-                            "risky_span_count": len(compliance_result.risky_spans or []),
-                            "allow_llm": bool(allow_llm),
-                        },
-                        result={
-                            "changed": bool(rewrite_result.changed),
-                            "rewritten_span_count": int(rewrite_result.rewritten_span_count or 0),
-                        },
-                        success=True,
-                        reason="risk_medium_or_higher",
-                        duration=float(time.perf_counter() - rewrite_stage_started),
-                    )
-
-                rewritten_topics = rewrite_result.rewritten_topics or final_topics
-                review_after_rewrite_started = time.perf_counter()
-                with self._span("idea_script.review", {"topic_count": len(rewritten_topics)}) as review_after_rewrite_span:
-                    review_result = self.reviewer_node.run(inference_result, rewritten_topics)
-                    self._set_span_attrs(
-                        review_after_rewrite_span,
-                        {
-                            "passed": review_result.passed,
-                            "blocking_issue_count": len(review_result.blocking_issues or []),
-                            "non_blocking_issue_count": len(review_result.non_blocking_issues or []),
-                            "failure_tag_count": len(review_result.failure_tags or []),
-                            "from_safe_rewrite": True,
-                        },
-                    )
-                if trajectory is not None:
-                    trajectory.add_stage(
-                        stage_name="quality_review",
-                        tool_name="IdeaScriptReviewerNode.run",
-                        args={"topic_count": len(rewritten_topics or []), "from_safe_rewrite": True},
-                        result={
-                            "passed": bool(review_result.passed),
-                            "blocking_issue_count": len(review_result.blocking_issues or []),
-                        },
-                        success=bool(review_result.passed),
-                        reason="review_after_safe_rewrite",
-                        duration=float(time.perf_counter() - review_after_rewrite_started),
-                    )
-                final_topics = review_result.normalized_topics or rewritten_topics
-
-                risk_scan_retry_started = time.perf_counter()
-                with self._span("idea_script.risk_scan", {"topic_count": len(final_topics), "after_rewrite": True}) as risk_scan_retry_span:
-                    allow_llm, total_llm_calls, budget_exhausted, budget_exhausted_reason = self._reserve_llm_call(
-                        node=self.risk_scanner_node,
-                        llm_method_name="scan_compliance_risk",
-                        step_name="risk_scan_after_rewrite",
-                        total_llm_calls=total_llm_calls,
-                        budget_exhausted=budget_exhausted,
-                        budget_exhausted_reason=budget_exhausted_reason,
-                    )
-                    compliance_result = self._call_run(
-                        self.risk_scanner_node,
-                        product=inference_result.product,
-                        persona=inference_result.persona,
-                        topics=final_topics,
-                        allow_llm=allow_llm,
-                    )
-                    self._set_span_attrs(
-                        risk_scan_retry_span,
-                        {
-                            "risk_level": compliance_result.risk_level,
-                            "risky_span_count": len(compliance_result.risky_spans or []),
-                        },
-                    )
-                if trajectory is not None:
-                    trajectory.add_stage(
-                        stage_name="risk_scan",
-                        tool_name="ComplianceGuardNode.run",
-                        args={"topic_count": len(final_topics or []), "after_rewrite": True, "allow_llm": bool(allow_llm)},
-                        result={
-                            "risk_level": str(compliance_result.risk_level or "low"),
-                            "risky_span_count": len(compliance_result.risky_spans or []),
-                        },
-                        success=True,
-                        reason="risk_scan_after_rewrite",
-                        duration=float(time.perf_counter() - risk_scan_retry_started),
-                    )
-
-            generation_warning = len(review_result.blocking_issues or []) > 0
+            raw_skill_payload = dict(getattr(self.generator_node, "last_skill_payload", {}) or {})
+            final_topics = list(topics or [])
+            generation_warning = False
             generation_warning_reason = None
-            if generation_warning:
-                generation_warning_reason = (
-                    "blocking_review_issues_after_retry"
-                    if generation_retry_count > 0
-                    else "blocking_review_issues"
-                )
-
-            compliance_warning = bool(
-                safe_rewrite_applied and self._risk_at_least(compliance_result.risk_level, "high")
+            compliance_result = ComplianceScanResult(
+                risk_level=str(raw_skill_payload.get("risk_level") or inference_result.unsafe_claim_risk or "low"),
+                risky_spans=[],
             )
-            compliance_warning_reason = (
-                "high_risk_after_safe_rewrite" if compliance_warning else None
-            )
-
+            compliance_warning = False
+            compliance_warning_reason = None
+            safe_rewrite_applied = False
             rubric_scores = None
-            if self.config.scoring_enabled and not budget_exhausted:
-                score_stage_started = time.perf_counter()
-                with self._span(
-                    "idea_script.score",
-                    {
-                        "topic_count": len(final_topics),
-                        "risk_level": compliance_result.risk_level,
-                    },
-                ) as score_span:
-                    allow_llm, total_llm_calls, budget_exhausted, budget_exhausted_reason = self._reserve_llm_call(
-                        node=self.scoring_node,
-                        llm_method_name="score_idea_scripts",
-                        step_name="score",
-                        total_llm_calls=total_llm_calls,
-                        budget_exhausted=budget_exhausted,
-                        budget_exhausted_reason=budget_exhausted_reason,
-                    )
-                    rubric_scores = self._call_run(
-                        self.scoring_node,
-                        audience_context=inference_result,
-                        topics=final_topics,
-                        review_result=review_result,
-                        compliance_result=compliance_result,
-                        allow_llm=allow_llm,
-                    )
-                    self._set_span_attrs(
-                        score_span,
-                        {
-                            "persona_specificity_score": rubric_scores.persona_specificity_score,
-                            "hook_strength_score": rubric_scores.hook_strength_score,
-                            "topic_diversity_score": rubric_scores.topic_diversity_score,
-                            "script_speakability_score": rubric_scores.script_speakability_score,
-                            "compliance_score": rubric_scores.compliance_score,
-                        },
-                    )
-                if trajectory is not None:
-                    trajectory.add_stage(
-                        stage_name="score",
-                        tool_name="ScoringReviewerNode.run",
-                        args={"topic_count": len(final_topics or []), "allow_llm": bool(allow_llm)},
-                        result={
-                            "compliance_score": float(getattr(rubric_scores, "compliance_score", 0.0) or 0.0),
-                            "hook_strength_score": float(getattr(rubric_scores, "hook_strength_score", 0.0) or 0.0),
-                        },
-                        success=True,
-                        reason="scoring_completed",
-                        duration=float(time.perf_counter() - score_stage_started),
-                    )
+            review_result = IdeaScriptReviewResult(
+                passed=True,
+                blocking_issues=[],
+                non_blocking_issues=[],
+                failure_tags=[],
+                normalized_topics=final_topics,
+                issues=[],
+                topics=final_topics,
+            )
 
             storyboard_issues: list[str] = []
             storyboard_failure_tags: list[str] = []
             storyboard_warning = False
             storyboard_warning_reason = None
-
-            topics_with_shots = [t.model_copy(deep=True) for t in final_topics]
-
-            storyboard_generate_started = time.perf_counter()
-            with self._span(
-                "idea_script.storyboard.generate",
-                {"topic_count": len(topics_with_shots), "storyboard_retry_count": storyboard_retry_count},
-            ) as storyboard_generate_span:
-                shot_count = 0
-                duration_total = 0.0
-                camera_types = set()
-                segment_coverage_ok = True
-                for idx, topic in enumerate(topics_with_shots):
-                    allow_llm, total_llm_calls, budget_exhausted, budget_exhausted_reason = self._reserve_llm_call(
-                        node=self.storyboard_node,
-                        llm_method_name="generate_storyboard",
-                        step_name=f"storyboard_generate:{idx}",
-                        total_llm_calls=total_llm_calls,
-                        budget_exhausted=budget_exhausted,
-                        budget_exhausted_reason=budget_exhausted_reason,
-                    )
-                    shots = self._call_run(
-                        self.storyboard_node,
-                        audience_context=inference_result,
-                        topic=topic,
-                        retry=False,
-                        allow_llm=allow_llm,
-                    )
-                    topic.shots = shots
-                    shot_count += len(shots)
-                    duration_total += sum(float(s.duration_sec or 0.0) for s in shots)
-                    camera_types.update((s.camera or "").strip() for s in shots if (s.camera or "").strip())
-                    segment_coverage_ok = segment_coverage_ok and self._segment_coverage_ok(shots)
-                    topics_with_shots[idx] = topic
-                self._set_span_attrs(
-                    storyboard_generate_span,
-                    {
-                        "shot_count": shot_count,
-                        "duration_total": round(duration_total, 2),
-                        "segment_coverage_ok": segment_coverage_ok,
-                        "camera_variety_count": len(camera_types),
-                        "storyboard_retry_count": storyboard_retry_count,
-                    },
-                )
-            if trajectory is not None:
-                trajectory.add_stage(
-                    stage_name="storyboard_generate",
-                    tool_name="StoryboardAgentNode.run",
-                    args={"topic_count": len(topics_with_shots or []), "retry": False},
-                    result={"shot_count": int(shot_count or 0), "segment_coverage_ok": bool(segment_coverage_ok)},
-                    success=True,
-                    reason="storyboard_generated",
-                    duration=float(time.perf_counter() - storyboard_generate_started),
-                )
-
-            storyboard_blocking_issues: list[str] = []
-            storyboard_review_started = time.perf_counter()
-            with self._span(
-                "idea_script.storyboard.review",
-                {"topic_count": len(topics_with_shots), "storyboard_retry_count": storyboard_retry_count},
-            ) as storyboard_review_span:
-                storyboard_non_blocking_issues: list[str] = []
-                segment_coverage_ok = True
-                duration_total = 0.0
-                shot_count = 0
-                camera_types = set()
-                for idx, topic in enumerate(topics_with_shots):
-                    review = self.storyboard_reviewer_node.run(
-                        audience_context=inference_result,
-                        topic=topic,
-                        shots=topic.shots,
-                    )
-                    topic.shots = review.normalized_shots
-                    topics_with_shots[idx] = topic
-                    duration_total += review.duration_total
-                    shot_count += len(review.normalized_shots or [])
-                    camera_types.update((s.camera or "").strip() for s in (review.normalized_shots or []) if (s.camera or "").strip())
-                    segment_coverage_ok = segment_coverage_ok and review.segment_coverage_ok
-                    storyboard_blocking_issues.extend(review.blocking_issues)
-                    storyboard_non_blocking_issues.extend(review.non_blocking_issues)
-                    storyboard_failure_tags.extend(review.failure_tags)
-                storyboard_issues = storyboard_blocking_issues + storyboard_non_blocking_issues
-                self._set_span_attrs(
-                    storyboard_review_span,
-                    {
-                        "shot_count": shot_count,
-                        "duration_total": round(duration_total, 2),
-                        "segment_coverage_ok": segment_coverage_ok,
-                        "camera_variety_count": len(camera_types),
-                        "storyboard_retry_count": storyboard_retry_count,
-                    },
-                )
-            if trajectory is not None:
-                trajectory.add_stage(
-                    stage_name="storyboard_review",
-                    tool_name="StoryboardReviewerNode.run",
-                    args={"topic_count": len(topics_with_shots or []), "retry": False},
-                    result={"blocking_issue_count": len(storyboard_blocking_issues or []), "issue_count": len(storyboard_issues or [])},
-                    success=(len(storyboard_blocking_issues or []) == 0),
-                    reason=("storyboard_passed" if not storyboard_blocking_issues else "storyboard_blocking_issues"),
-                    duration=float(time.perf_counter() - storyboard_review_started),
-                )
-
-            if storyboard_blocking_issues and not budget_exhausted:
-                storyboard_retry_count = 1
-                retry_blocking = list(storyboard_blocking_issues)
-                storyboard_generate_retry_started = time.perf_counter()
-                with self._span(
-                    "idea_script.storyboard.generate",
-                    {"topic_count": len(topics_with_shots), "storyboard_retry_count": storyboard_retry_count},
-                ) as storyboard_generate_retry_span:
-                    shot_count = 0
-                    duration_total = 0.0
-                    camera_types = set()
-                    segment_coverage_ok = True
-                    for idx, topic in enumerate(topics_with_shots):
-                        allow_llm, total_llm_calls, budget_exhausted, budget_exhausted_reason = self._reserve_llm_call(
-                            node=self.storyboard_node,
-                            llm_method_name="generate_storyboard",
-                            step_name=f"storyboard_generate_retry:{idx}",
-                            total_llm_calls=total_llm_calls,
-                            budget_exhausted=budget_exhausted,
-                            budget_exhausted_reason=budget_exhausted_reason,
-                        )
-                        shots = self._call_run(
-                            self.storyboard_node,
-                            audience_context=inference_result,
-                            topic=topic,
-                            retry=True,
-                            reviewer_blocking_issues=retry_blocking,
-                            allow_llm=allow_llm,
-                        )
-                        topic.shots = shots
-                        topics_with_shots[idx] = topic
-                        shot_count += len(shots)
-                        duration_total += sum(float(s.duration_sec or 0.0) for s in shots)
-                        camera_types.update((s.camera or "").strip() for s in shots if (s.camera or "").strip())
-                        segment_coverage_ok = segment_coverage_ok and self._segment_coverage_ok(shots)
-                    self._set_span_attrs(
-                        storyboard_generate_retry_span,
-                        {
-                            "shot_count": shot_count,
-                            "duration_total": round(duration_total, 2),
-                            "segment_coverage_ok": segment_coverage_ok,
-                            "camera_variety_count": len(camera_types),
-                            "storyboard_retry_count": storyboard_retry_count,
-                        },
-                    )
-                if trajectory is not None:
-                    trajectory.add_stage(
-                        stage_name="storyboard_generate_retry",
-                        tool_name="StoryboardAgentNode.run",
-                        args={"topic_count": len(topics_with_shots or []), "retry": True},
-                        result={"shot_count": int(shot_count or 0), "segment_coverage_ok": bool(segment_coverage_ok)},
-                        success=True,
-                        reason="storyboard_retry_generated",
-                        duration=float(time.perf_counter() - storyboard_generate_retry_started),
-                    )
-
-                storyboard_review_retry_started = time.perf_counter()
-                with self._span(
-                    "idea_script.storyboard.review",
-                    {"topic_count": len(topics_with_shots), "storyboard_retry_count": storyboard_retry_count},
-                ) as storyboard_review_retry_span:
-                    storyboard_blocking_issues = []
-                    storyboard_non_blocking_issues = []
-                    storyboard_failure_tags = []
-                    segment_coverage_ok = True
-                    duration_total = 0.0
-                    shot_count = 0
-                    camera_types = set()
-                    for idx, topic in enumerate(topics_with_shots):
-                        review = self.storyboard_reviewer_node.run(
-                            audience_context=inference_result,
-                            topic=topic,
-                            shots=topic.shots,
-                        )
-                        topic.shots = review.normalized_shots
-                        topics_with_shots[idx] = topic
-                        duration_total += review.duration_total
-                        shot_count += len(review.normalized_shots or [])
-                        camera_types.update((s.camera or "").strip() for s in (review.normalized_shots or []) if (s.camera or "").strip())
-                        segment_coverage_ok = segment_coverage_ok and review.segment_coverage_ok
-                        storyboard_blocking_issues.extend(review.blocking_issues)
-                        storyboard_non_blocking_issues.extend(review.non_blocking_issues)
-                        storyboard_failure_tags.extend(review.failure_tags)
-                    storyboard_issues = storyboard_blocking_issues + storyboard_non_blocking_issues
-                    self._set_span_attrs(
-                        storyboard_review_retry_span,
-                        {
-                            "shot_count": shot_count,
-                            "duration_total": round(duration_total, 2),
-                            "segment_coverage_ok": segment_coverage_ok,
-                            "camera_variety_count": len(camera_types),
-                            "storyboard_retry_count": storyboard_retry_count,
-                        },
-                    )
-                if trajectory is not None:
-                    trajectory.add_stage(
-                        stage_name="storyboard_review_retry",
-                        tool_name="StoryboardReviewerNode.run",
-                        args={"topic_count": len(topics_with_shots or []), "retry": True},
-                        result={"blocking_issue_count": len(storyboard_blocking_issues or []), "issue_count": len(storyboard_issues or [])},
-                        success=(len(storyboard_blocking_issues or []) == 0),
-                        reason=(
-                            "storyboard_passed_after_retry"
-                            if not storyboard_blocking_issues
-                            else "storyboard_blocking_issues_after_retry"
-                        ),
-                        duration=float(time.perf_counter() - storyboard_review_retry_started),
-                    )
-
-                if storyboard_blocking_issues:
-                    storyboard_warning = True
-                    storyboard_warning_reason = "storyboard_blocking_issues_after_retry"
-            elif storyboard_blocking_issues and budget_exhausted:
-                storyboard_warning = True
-                storyboard_warning_reason = "storyboard_blocking_issues_budget_exhausted"
-
-            final_topics = topics_with_shots
-
+            storyboard_retry_count = 0
             matched_assets: dict[str, list[Any]] = {}
             asset_match_warning = False
             asset_match_warning_reason: Optional[str] = None
-            shot_count = 0
-            matched_shot_count = 0
             shot_match_rate = 0.0
             avg_candidates_per_shot = 0.0
-            total_candidates = 0
-            segment_total: dict[str, int] = {"HOOK": 0, "VIEW": 0, "STEPS": 0, "PRODUCT": 0, "CTA": 0}
-            segment_matched: dict[str, int] = {"HOOK": 0, "VIEW": 0, "STEPS": 0, "PRODUCT": 0, "CTA": 0}
             segment_match_rate: dict[str, float] = {}
-            asset_db_path = str(getattr(self.asset_index_tool, "db_path", self.config.asset_db_path) or "")
-            asset_match_mcp = bool(getattr(self.config, "asset_match_use_mcp", False))
-            asset_match_tool_version: Optional[str] = None
-            asset_match_tool_hash: Optional[str] = None
-            asset_match_mcp_server: Optional[str] = None
-            asset_match_mcp_registry = False
-            if trajectory is not None:
-                trajectory.add_stage(
-                    stage_name="tool_selection",
-                    tool_name=("mcp.match_assets_for_shots" if asset_match_mcp else "AssetIndexTool.search"),
-                    args={
-                        "mcp": asset_match_mcp,
-                        "mcp_registry": bool(getattr(self.config, "mcp_use_registry", False)),
-                        "asset_match_top_k": int(self.config.asset_match_top_k),
-                    },
-                    result={"selected_tool": ("mcp" if asset_match_mcp else "local_asset_index")},
-                    success=True,
-                    reason="asset_match_tool_selected",
-                    duration=0.0,
-                )
-            asset_match_stage_started = time.perf_counter()
-            with self._span(
-                "idea_script.asset_match",
-                {
-                    "topic_count": len(final_topics),
-                    "asset_db_path": asset_db_path,
-                    "mcp": asset_match_mcp,
-                },
-            ) as asset_match_span:
-                try:
-                    if asset_match_mcp:
-                        (
-                            matched_assets,
-                            mcp_stats,
-                            asset_match_tool_version,
-                            asset_match_tool_hash,
-                            asset_match_mcp_server,
-                            asset_match_mcp_registry,
-                        ) = self._asset_match_via_mcp(
-                            topics=final_topics,
-                            asset_db_path=asset_db_path,
-                        )
-                        shot_count = int(mcp_stats.get("shot_count") or 0)
-                        matched_shot_count = int(mcp_stats.get("matched_shot_count") or 0)
-                        shot_match_rate = float(mcp_stats.get("shot_match_rate") or 0.0)
-                        avg_candidates_per_shot = float(mcp_stats.get("avg_candidates_per_shot") or 0.0)
-                        segment_match_rate = {
-                            k: float(v or 0.0)
-                            for k, v in dict(mcp_stats.get("segment_match_rate") or {}).items()
-                        }
-                        if shot_count == 0:
-                            # mcp stats may not return shot_count; fallback local counting
-                            shot_count = sum(len(list(getattr(topic, "shots", []) or [])) for topic in final_topics)
-                            matched_shot_count = sum(1 for values in matched_assets.values() if values)
-                            total_candidates = sum(len(values or []) for values in matched_assets.values())
-                            shot_match_rate = round(float(matched_shot_count) / float(shot_count), 3) if shot_count > 0 else 0.0
-                            avg_candidates_per_shot = round(float(total_candidates) / float(shot_count), 3) if shot_count > 0 else 0.0
-                        if not segment_match_rate:
-                            for topic in final_topics:
-                                for shot in list(getattr(topic, "shots", []) or []):
-                                    segment = str(getattr(shot, "segment", "") or "").upper()
-                                    if segment in segment_total:
-                                        segment_total[segment] += 1
-                                    shot_id = str(getattr(shot, "shot_id", "") or "")
-                                    if matched_assets.get(shot_id):
-                                        if segment in segment_matched:
-                                            segment_matched[segment] += 1
-                            for key in segment_total.keys():
-                                total = int(segment_total.get(key, 0) or 0)
-                                matched = int(segment_matched.get(key, 0) or 0)
-                                segment_match_rate[key] = round((float(matched) / float(total)), 3) if total > 0 else 0.0
-                    else:
-                        for topic in final_topics:
-                            for shot in list(getattr(topic, "shots", []) or []):
-                                shot_count += 1
-                                segment = str(getattr(shot, "segment", "") or "").upper()
-                                if segment in segment_total:
-                                    segment_total[segment] += 1
-                                query = self.shot_query_builder.build(shot)
-                                candidates = self.asset_index_tool.search(
-                                    query=query,
-                                    top_k=self.config.asset_match_top_k,
-                                )
-                                matched_assets[str(getattr(shot, "shot_id", "") or f"shot_{shot_count}")] = candidates
-                                if candidates:
-                                    matched_shot_count += 1
-                                    if segment in segment_matched:
-                                        segment_matched[segment] += 1
-                                total_candidates += len(candidates or [])
-                        if shot_count > 0:
-                            shot_match_rate = round(float(matched_shot_count) / float(shot_count), 3)
-                            avg_candidates_per_shot = round(float(total_candidates) / float(shot_count), 3)
-                        for key in segment_total.keys():
-                            total = int(segment_total.get(key, 0) or 0)
-                            matched = int(segment_matched.get(key, 0) or 0)
-                            segment_match_rate[key] = round((float(matched) / float(total)), 3) if total > 0 else 0.0
-
-                    if shot_count == 0:
-                        asset_match_warning = True
-                        asset_match_warning_reason = "asset_match_no_shots"
-                    elif matched_shot_count == 0:
-                        asset_match_warning = True
-                        asset_match_warning_reason = "asset_match_no_candidates"
-                except (MCPClientError, MCPRegistryError, MCPToolInvocationError) as e:
-                    matched_assets = {}
-                    shot_match_rate = 0.0
-                    avg_candidates_per_shot = 0.0
-                    segment_match_rate = {}
-                    asset_match_warning = True
-                    asset_match_warning_reason = "asset_match_mcp_failed"
-                    sys_logger.warning(f"idea_script.asset_match MCP failed: {e}")
-                except Exception as e:
-                    matched_assets = {}
-                    shot_match_rate = 0.0
-                    avg_candidates_per_shot = 0.0
-                    segment_match_rate = {}
-                    asset_match_warning = True
-                    asset_match_warning_reason = "asset_match_failed"
-                    sys_logger.warning(f"idea_script.asset_match failed: {e}")
-
-                self._set_span_attrs(
-                    asset_match_span,
-                    {
-                        "shot_count": shot_count,
-                        "matched_shot_count": matched_shot_count,
-                        "shot_match_rate": shot_match_rate,
-                        "avg_candidates_per_shot": avg_candidates_per_shot,
-                        "asset_db_path": asset_db_path,
-                        "mcp": asset_match_mcp,
-                        "mcp_registry": asset_match_mcp_registry,
-                        "mcp_server": asset_match_mcp_server,
-                        "tool_version": asset_match_tool_version,
-                        "tool_hash": asset_match_tool_hash,
-                    },
-                )
-            if trajectory is not None:
-                trajectory.add_stage(
-                    stage_name="tool_execution",
-                    tool_name=("mcp.match_assets_for_shots" if asset_match_mcp else "AssetIndexTool.search"),
-                    args={"topic_count": len(final_topics or []), "shot_count": int(shot_count or 0)},
-                    result={
-                        "matched_shot_count": int(matched_shot_count or 0),
-                        "asset_match_warning": bool(asset_match_warning),
-                        "warning_reason": asset_match_warning_reason,
-                    },
-                    success=(not asset_match_warning or asset_match_warning_reason in {"asset_match_no_candidates"}),
-                    reason="asset_match_execution",
-                    duration=float(time.perf_counter() - asset_match_stage_started),
-                    error_message=(asset_match_warning_reason if asset_match_warning_reason in {"asset_match_failed", "asset_match_mcp_failed"} else None),
-                )
-                trajectory.add_stage(
-                    stage_name="asset_match",
-                    tool_name=("mcp.match_assets_for_shots" if asset_match_mcp else "AssetIndexTool.search"),
-                    args={"topic_count": len(final_topics or [])},
-                    result={
-                        "shot_match_rate": float(shot_match_rate or 0.0),
-                        "avg_candidates_per_shot": float(avg_candidates_per_shot or 0.0),
-                    },
-                    success=(not asset_match_warning),
-                    reason="asset_match_completed",
-                    duration=float(time.perf_counter() - asset_match_stage_started),
-                    error_message=(asset_match_warning_reason if asset_match_warning else None),
-                )
-
             edit_plans: list[Any] = []
             edit_plan_warning = False
             edit_plan_warning_reason: Optional[str] = None
-            clip_count_total = 0
-            missing_primary_asset_count = 0
-            edit_plan_stage_started = time.perf_counter()
-            with self._span(
-                "idea_script.edit_plan.build",
-                {"topic_count": len(final_topics)},
-            ) as edit_plan_span:
-                try:
-                    build_result = self.edit_plan_builder.run(
-                        product=inference_result.product,
-                        topics=final_topics,
-                        matched_assets=matched_assets,
-                        prompt_version=prompt_version,
-                        policy_version=policy_version,
-                        config_hash=config_hash,
-                        alternates_top_k=self.config.asset_match_top_k,
-                    )
-                    edit_plans = list(build_result.get("edit_plans") or [])
-                    edit_plan_warning = bool(build_result.get("edit_plan_warning", False))
-                    edit_plan_warning_reason = build_result.get("edit_plan_warning_reason")
-                    clip_count_total = int(build_result.get("clip_count_total") or 0)
-                    missing_primary_asset_count = int(build_result.get("missing_primary_asset_count") or 0)
-                except Exception as e:
-                    edit_plans = []
-                    edit_plan_warning = True
-                    edit_plan_warning_reason = "edit_plan_build_failed"
-                    clip_count_total = 0
-                    missing_primary_asset_count = 0
-                    sys_logger.warning(f"idea_script.edit_plan.build failed: {e}")
-
-                self._set_span_attrs(
-                    edit_plan_span,
-                    {
-                        "plan_count": len(edit_plans or []),
-                        "clip_count_total": clip_count_total,
-                        "missing_primary_asset_count": missing_primary_asset_count,
-                        "edit_plan_warning": edit_plan_warning,
-                    },
-                )
-            if trajectory is not None:
-                trajectory.add_stage(
-                    stage_name="edit_plan_build",
-                    tool_name="EditPlanBuilder.run",
-                    args={"topic_count": len(final_topics or []), "alternates_top_k": int(self.config.asset_match_top_k)},
-                    result={
-                        "plan_count": len(edit_plans or []),
-                        "missing_primary_asset_count": int(missing_primary_asset_count or 0),
-                        "edit_plan_warning": bool(edit_plan_warning),
-                    },
-                    success=(not edit_plan_warning),
-                    reason=("edit_plan_completed" if not edit_plan_warning else str(edit_plan_warning_reason or "edit_plan_warning")),
-                    duration=float(time.perf_counter() - edit_plan_stage_started),
-                    error_message=(str(edit_plan_warning_reason or "") or None) if edit_plan_warning else None,
-                )
+            asset_match_mcp = False
 
             response = IdeaScriptResponse(
                 audience_context=inference_result,
                 topics=final_topics,
+                **build_structured_result(
+                    req_payload={
+                        "product": req.product,
+                        "audience": getattr(req, "audience", None),
+                        "price_band": getattr(req, "price_band", None),
+                        "conversion_goal": getattr(req, "conversion_goal", None),
+                        "primary_platform": getattr(req, "primary_platform", None),
+                        "secondary_platform": getattr(req, "secondary_platform", None),
+                        "selected_angle": getattr(req, "selected_angle", None),
+                    },
+                    topics=[
+                        topic.model_dump(mode="json") if hasattr(topic, "model_dump") else dict(topic)
+                        for topic in list(final_topics or [])
+                    ],
+                    raw_skill_payload=raw_skill_payload,
+                    inference_payload=getattr(self.inference_node, "last_skill_payload", {}) or {},
+                    risk_level=compliance_result.risk_level,
+                    blocking_issues=list(review_result.blocking_issues or []),
+                    risky_spans=[
+                        item.model_dump(mode="json") if hasattr(item, "model_dump") else dict(item)
+                        for item in list(compliance_result.risky_spans or [])
+                    ],
+                ),
                 inference_warning=inference_warning,
                 warning_reason=warning_reason,
                 retry_count=retry_count,
@@ -1490,10 +736,10 @@ class IdeaScriptOrchestrator:
                 policy_version=policy_version,
                 config_hash=config_hash,
                 total_tool_calls=2,
-                mcp_calls_count=(1 if asset_match_mcp else 0),
-                mcp_tool_error_count=(1 if asset_match_warning_reason == "asset_match_mcp_failed" else 0),
+                mcp_calls_count=0,
+                mcp_tool_error_count=0,
                 latency_ms=latency_ms,
-                asset_match_use_mcp=asset_match_mcp,
+                asset_match_use_mcp=False,
             )
             if trajectory is not None:
                 trajectory.metadata = {
@@ -1506,7 +752,7 @@ class IdeaScriptOrchestrator:
                 trajectory.add_stage(
                     stage_name="finalize",
                     tool_name="IdeaScriptOrchestrator.run",
-                    args={"topic_count": len(response.topics or []), "edit_plan_count": len(response.edit_plans or [])},
+                    args={"topic_count": len(response.topics or []), "edit_plan_count": 0},
                     result={
                         "task_success": bool(quality_metrics.effectiveness.task_success),
                         "compliance_risk": str(response.risk_level or "low"),
@@ -1528,20 +774,20 @@ class IdeaScriptOrchestrator:
                     "compliance_warning": response.compliance_warning,
                     "topic_count": len(response.topics or []),
                     "scoring_enabled": self.config.scoring_enabled,
-                    "storyboard_warning": response.storyboard_warning,
-                    "storyboard_retry_count": response.storyboard_retry_count,
-                    "shot_match_rate": response.shot_match_rate,
-                    "avg_candidates_per_shot": response.avg_candidates_per_shot,
-                    "segment_match_rate_hook": float((response.segment_match_rate or {}).get("HOOK", 0.0)),
-                    "segment_match_rate_view": float((response.segment_match_rate or {}).get("VIEW", 0.0)),
-                    "segment_match_rate_steps": float((response.segment_match_rate or {}).get("STEPS", 0.0)),
-                    "segment_match_rate_product": float((response.segment_match_rate or {}).get("PRODUCT", 0.0)),
-                    "segment_match_rate_cta": float((response.segment_match_rate or {}).get("CTA", 0.0)),
-                    "asset_match_warning": response.asset_match_warning,
-                    "asset_match_warning_reason": response.asset_match_warning_reason,
-                    "edit_plan_count": len(response.edit_plans or []),
-                    "edit_plan_warning": response.edit_plan_warning,
-                    "edit_plan_warning_reason": response.edit_plan_warning_reason,
+                    "storyboard_warning": False,
+                    "storyboard_retry_count": 0,
+                    "shot_match_rate": 0.0,
+                    "avg_candidates_per_shot": 0.0,
+                    "segment_match_rate_hook": 0.0,
+                    "segment_match_rate_view": 0.0,
+                    "segment_match_rate_steps": 0.0,
+                    "segment_match_rate_product": 0.0,
+                    "segment_match_rate_cta": 0.0,
+                    "asset_match_warning": False,
+                    "asset_match_warning_reason": "",
+                    "edit_plan_count": 0,
+                    "edit_plan_warning": False,
+                    "edit_plan_warning_reason": "",
                     "prompt_version": prompt_version,
                     "policy_version": policy_version,
                     "config_hash": config_hash,

@@ -1,0 +1,102 @@
+{
+  "schema_version": "1.0",
+  "project_title": "逛街vlog：一站式街拍OOTD搭配手册",
+  "prompts": [
+    {
+      "shot_id": "shot_001",
+      "keyframe_prompt": "Luna，都市轻熟穿搭博主。 in 街角咖啡店外摆、玻璃橱窗、暖色午后阳光, 奶油白针织短上衣 + 高腰直筒牛仔裤 + 金属耳圈 + 黑色腋下包, Luna 走出公寓楼门口, Luna 走出公寓楼门口，晨间城市街道展开，Look A 全身建立。, WS framing, eye_level, 暖调自然光与高饱和城市反射共同构成视觉基底, 肤色稳定，服装主色清晰，避免过重滤镜污染, emotion=observational, continuity anchor=先建立人物状态与 Look A 的整体轮廓。",
+      "motion_prompt": "static, duration=2.0s, preserve subject continuity, emphasize progression, transition toward shot_002",
+      "negative_prompt": "不要无动机更换主角长相、体型、年龄感或发型。; 不要让同一 look 在相邻镜头中漂移为不同单品或不同季节穿搭。; 不要把真实城市街拍空间漂移为棚拍、异国景点或超现实场景。; 不要在高潮镜头中削弱 hero item、主体姿态或服装层次。; avoid drift: 同一 look 段落内不更换核心单品。; avoid drift: 同一 look 的配饰材质和数量保持稳定。; avoid drift: 同一 location 内保持光线方向和环境物件一致。; avoid drift: 不要漂移到与该场景不相干的建筑风格或气候。",
+      "continuity_note": "Keep OOTD vlog 主持人 consistent; look=look_a; location=location_a; anchor=先建立人物状态与 Look A 的整体轮廓。; leave clean match point into shot_002",
+      "edit_note": "cold_open -> match_cut; audio cue: 按 animatic 节奏点执行；参考 节奏为 稳定建立 -> 信息加密 -> 快速换装 -> hero 停顿。; climax_weight=0.35; normal beat; look rules: 同一 look 段落内不更换核心单品。; 同一 look 的配饰材质和数量保持稳定。; location rules: 同一 location 内保持光线方向和环境物件一致。; 不要漂移到与该场景不相干的建筑风格或气候。"
+    },
+    {
+      "shot_id": "shot_002",
+      "keyframe_prompt": "Luna，都市轻熟穿搭博主。 in 街角咖啡店外摆、玻璃橱窗、暖色午后阳光, 奶油白针织短上衣 + 高腰直筒牛仔裤 + 金属耳圈 + 黑色腋下包, Luna 对镜整理针织上衣下摆和牛仔裤腰线, Luna 对镜整理针织上衣下摆和牛仔裤腰线，确认比例。, MS framing, eye_level, 暖调自然光与高饱和城市反射共同构成视觉基底, 肤色稳定，服装主色清晰，避免过重滤镜污染, emotion=observational, continuity anchor=先建立人物状态与 Look A 的整体轮廓。",
+      "motion_prompt": "static, duration=2.0s, preserve subject continuity, emphasize progression, transition toward shot_003",
+      "negative_prompt": "不要无动机更换主角长相、体型、年龄感或发型。; 不要让同一 look 在相邻镜头中漂移为不同单品或不同季节穿搭。; 不要把真实城市街拍空间漂移为棚拍、异国景点或超现实场景。; 不要在高潮镜头中削弱 hero item、主体姿态或服装层次。; avoid drift: 同一 look 段落内不更换核心单品。; avoid drift: 同一 look 的配饰材质和数量保持稳定。; avoid drift: 同一 location 内保持光线方向和环境物件一致。; avoid drift: 不要漂移到与该场景不相干的建筑风格或气候。",
+      "continuity_note": "Keep OOTD vlog 主持人 consistent; look=look_a; location=location_a; anchor=先建立人物状态与 Look A 的整体轮廓。; inherit pose/eyeline from shot_001 (先建立人物状态与 Look A 的整体轮廓。); leave clean match point into shot_003",
+      "edit_note": "match_cut -> hard_cut; audio cue: 按 animatic 节奏点执行；参考 节奏为 稳定建立 -> 信息加密 -> 快速换装 -> hero 停顿。; climax_weight=0.35; normal beat; look rules: 同一 look 段落内不更换核心单品。; 同一 look 的配饰材质和数量保持稳定。; location rules: 同一 location 内保持光线方向和环境物件一致。; 不要漂移到与该场景不相干的建筑风格或气候。"
+    },
+    {
+      "shot_id": "shot_003",
+      "keyframe_prompt": "Luna，都市轻熟穿搭博主。 in 街角咖啡店外摆、玻璃橱窗、暖色午后阳光, 奶油白针织短上衣 + 高腰直筒牛仔裤 + 金属耳圈 + 黑色腋下包, 金属耳圈与黑色腋下包细节切入。锚点：Look A 配饰。, 金属耳圈与黑色腋下包细节切入。锚点：Look A 配饰。, CU framing, eye_level, 暖调自然光与高饱和城市反射共同构成视觉基底, 肤色稳定，服装主色清晰，避免过重滤镜污染, emotion=observational, continuity anchor=Look A 配饰。",
+      "motion_prompt": "static, duration=2.0s, preserve subject continuity, emphasize progression, transition toward shot_004",
+      "negative_prompt": "不要无动机更换主角长相、体型、年龄感或发型。; 不要让同一 look 在相邻镜头中漂移为不同单品或不同季节穿搭。; 不要把真实城市街拍空间漂移为棚拍、异国景点或超现实场景。; 不要在高潮镜头中削弱 hero item、主体姿态或服装层次。; avoid drift: 同一 look 段落内不更换核心单品。; avoid drift: 同一 look 的配饰材质和数量保持稳定。; avoid drift: 同一 location 内保持光线方向和环境物件一致。; avoid drift: 不要漂移到与该场景不相干的建筑风格或气候。",
+      "continuity_note": "Keep OOTD vlog 主持人 consistent; look=look_a; location=location_a; anchor=Look A 配饰。; inherit pose/eyeline from shot_002 (先建立人物状态与 Look A 的整体轮廓。); leave clean match point into shot_004",
+      "edit_note": "hard_cut -> scene_cut; audio cue: 按 animatic 节奏点执行；参考 节奏为 稳定建立 -> 信息加密 -> 快速换装 -> hero 停顿。; climax_weight=0.35; normal beat; look rules: 同一 look 段落内不更换核心单品。; 同一 look 的配饰材质和数量保持稳定。; location rules: 同一 location 内保持光线方向和环境物件一致。; 不要漂移到与该场景不相干的建筑风格或气候。"
+    },
+    {
+      "shot_id": "shot_004",
+      "keyframe_prompt": "Luna，都市轻熟穿搭博主。 in 街角咖啡店外摆、玻璃橱窗、暖色午后阳光, 奶油白针织短上衣 + 高腰直筒牛仔裤 + 金属耳圈 + 黑色腋下包, Luna 走到咖啡店外摆, Luna 走到咖啡店外摆，侧身回头展示整体轮廓。, MS framing, eye_level, 暖调自然光与高饱和城市反射共同构成视觉基底, 肤色稳定，服装主色清晰，避免过重滤镜污染, emotion=observational, continuity anchor=把搭配逻辑拆成可见的细节。",
+      "motion_prompt": "static, duration=2.67s, preserve subject continuity, emphasize progression, transition toward shot_005",
+      "negative_prompt": "不要无动机更换主角长相、体型、年龄感或发型。; 不要让同一 look 在相邻镜头中漂移为不同单品或不同季节穿搭。; 不要把真实城市街拍空间漂移为棚拍、异国景点或超现实场景。; 不要在高潮镜头中削弱 hero item、主体姿态或服装层次。; avoid drift: 同一 look 段落内不更换核心单品。; avoid drift: 同一 look 的配饰材质和数量保持稳定。; avoid drift: 同一 location 内保持光线方向和环境物件一致。; avoid drift: 不要漂移到与该场景不相干的建筑风格或气候。",
+      "continuity_note": "Keep OOTD vlog 主持人 consistent; look=look_a; location=location_a; anchor=把搭配逻辑拆成可见的细节。; inherit pose/eyeline from shot_003 (Look A 配饰。); leave clean match point into shot_005",
+      "edit_note": "scene_cut -> hard_cut; audio cue: 按 animatic 节奏点执行；参考 节奏为 稳定建立 -> 信息加密 -> 快速换装 -> hero 停顿。; climax_weight=0.49; normal beat; look rules: 同一 look 段落内不更换核心单品。; 同一 look 的配饰材质和数量保持稳定。; location rules: 同一 location 内保持光线方向和环境物件一致。; 不要漂移到与该场景不相干的建筑风格或气候。"
+    },
+    {
+      "shot_id": "shot_005",
+      "keyframe_prompt": "Luna，都市轻熟穿搭博主。 in 街角咖啡店外摆、玻璃橱窗、暖色午后阳光, 奶油白针织短上衣 + 高腰直筒牛仔裤 + 金属耳圈 + 黑色腋下包, 针织面料、牛仔裤褶线、包袋肩带连续特写。锚点：Look A 面料。, 针织面料、牛仔裤褶线、包袋肩带连续特写。锚点：Look A 面料。, CU framing, eye_level, 暖调自然光与高饱和城市反射共同构成视觉基底, 肤色稳定，服装主色清晰，避免过重滤镜污染, emotion=observational, continuity anchor=Look A 面料。",
+      "motion_prompt": "static, duration=2.67s, preserve subject continuity, emphasize progression, transition toward shot_006",
+      "negative_prompt": "不要无动机更换主角长相、体型、年龄感或发型。; 不要让同一 look 在相邻镜头中漂移为不同单品或不同季节穿搭。; 不要把真实城市街拍空间漂移为棚拍、异国景点或超现实场景。; 不要在高潮镜头中削弱 hero item、主体姿态或服装层次。; avoid drift: 同一 look 段落内不更换核心单品。; avoid drift: 同一 look 的配饰材质和数量保持稳定。; avoid drift: 同一 location 内保持光线方向和环境物件一致。; avoid drift: 不要漂移到与该场景不相干的建筑风格或气候。",
+      "continuity_note": "Keep OOTD vlog 主持人 consistent; look=look_a; location=location_a; anchor=Look A 面料。; inherit pose/eyeline from shot_004 (把搭配逻辑拆成可见的细节。); leave clean match point into shot_006",
+      "edit_note": "hard_cut -> hard_cut; audio cue: 按 animatic 节奏点执行；参考 节奏为 稳定建立 -> 信息加密 -> 快速换装 -> hero 停顿。; climax_weight=0.35; normal beat; look rules: 同一 look 段落内不更换核心单品。; 同一 look 的配饰材质和数量保持稳定。; location rules: 同一 location 内保持光线方向和环境物件一致。; 不要漂移到与该场景不相干的建筑风格或气候。"
+    },
+    {
+      "shot_id": "shot_006",
+      "keyframe_prompt": "Luna，都市轻熟穿搭博主。 in 街角咖啡店外摆、玻璃橱窗、暖色午后阳光, 奶油白针织短上衣 + 高腰直筒牛仔裤 + 金属耳圈 + 黑色腋下包, 手指指向腰线和裤型, 手指指向腰线和裤型，讲解为什么显比例。, OTS framing, eye_level, 暖调自然光与高饱和城市反射共同构成视觉基底, 肤色稳定，服装主色清晰，避免过重滤镜污染, emotion=observational, continuity anchor=把搭配逻辑拆成可见的细节。",
+      "motion_prompt": "static, duration=2.67s, preserve subject continuity, emphasize progression, transition toward shot_007",
+      "negative_prompt": "不要无动机更换主角长相、体型、年龄感或发型。; 不要让同一 look 在相邻镜头中漂移为不同单品或不同季节穿搭。; 不要把真实城市街拍空间漂移为棚拍、异国景点或超现实场景。; 不要在高潮镜头中削弱 hero item、主体姿态或服装层次。; avoid drift: 同一 look 段落内不更换核心单品。; avoid drift: 同一 look 的配饰材质和数量保持稳定。; avoid drift: 同一 location 内保持光线方向和环境物件一致。; avoid drift: 不要漂移到与该场景不相干的建筑风格或气候。",
+      "continuity_note": "Keep OOTD vlog 主持人 consistent; look=look_a; location=location_a; anchor=把搭配逻辑拆成可见的细节。; inherit pose/eyeline from shot_005 (Look A 面料。); leave clean match point into shot_007",
+      "edit_note": "hard_cut -> scene_cut; audio cue: 按 animatic 节奏点执行；参考 节奏为 稳定建立 -> 信息加密 -> 快速换装 -> hero 停顿。; climax_weight=0.35; normal beat; look rules: 同一 look 段落内不更换核心单品。; 同一 look 的配饰材质和数量保持稳定。; location rules: 同一 location 内保持光线方向和环境物件一致。; 不要漂移到与该场景不相干的建筑风格或气候。"
+    },
+    {
+      "shot_id": "shot_007",
+      "keyframe_prompt": "Luna，都市轻熟穿搭博主。 in 买手店门口、混凝土墙面、窄巷路牌、城市人流, 灰色西装外套 + 黑色吊带 + 百褶短裙 + 长靴 + 银色项链, 关门转身的 whip pan 作为换装转场。, 关门转身的 whip pan 作为换装转场。, CU framing, eye_level, 暖调自然光与高饱和城市反射共同构成视觉基底, 肤色稳定，服装主色清晰，避免过重滤镜污染, emotion=observational, continuity anchor=完成 Look B reveal，并让观众感知风格切换。",
+      "motion_prompt": "pan, duration=2.67s, preserve subject continuity, emphasize progression, transition toward shot_008",
+      "negative_prompt": "不要无动机更换主角长相、体型、年龄感或发型。; 不要让同一 look 在相邻镜头中漂移为不同单品或不同季节穿搭。; 不要把真实城市街拍空间漂移为棚拍、异国景点或超现实场景。; 不要在高潮镜头中削弱 hero item、主体姿态或服装层次。; avoid drift: 同一 look 段落内不更换核心单品。; avoid drift: 同一 look 的配饰材质和数量保持稳定。; avoid drift: 同一 location 内保持光线方向和环境物件一致。; avoid drift: 不要漂移到与该场景不相干的建筑风格或气候。",
+      "continuity_note": "Keep OOTD vlog 主持人 consistent; look=look_b; location=location_b; anchor=完成 Look B reveal，并让观众感知风格切换。; inherit pose/eyeline from shot_006 (把搭配逻辑拆成可见的细节。); leave clean match point into shot_008",
+      "edit_note": "scene_cut -> match_cut; audio cue: 按 animatic 节奏点执行；参考 节奏为 稳定建立 -> 信息加密 -> 快速换装 -> hero 停顿。; climax_weight=0.49; normal beat; look rules: 同一 look 段落内不更换核心单品。; 同一 look 的配饰材质和数量保持稳定。; location rules: 同一 location 内保持光线方向和环境物件一致。; 不要漂移到与该场景不相干的建筑风格或气候。"
+    },
+    {
+      "shot_id": "shot_008",
+      "keyframe_prompt": "Luna，都市轻熟穿搭博主。 in 买手店门口、混凝土墙面、窄巷路牌、城市人流, 灰色西装外套 + 黑色吊带 + 百褶短裙 + 长靴 + 银色项链, Luna 出现在买手店门口, Luna 出现在买手店门口，灰色西装外套与百褶裙完整展示。, MS framing, eye_level, 暖调自然光与高饱和城市反射共同构成视觉基底, 肤色稳定，服装主色清晰，避免过重滤镜污染, emotion=observational, continuity anchor=完成 Look B reveal，并让观众感知风格切换。",
+      "motion_prompt": "static, duration=2.67s, preserve subject continuity, emphasize progression, transition toward shot_009",
+      "negative_prompt": "不要无动机更换主角长相、体型、年龄感或发型。; 不要让同一 look 在相邻镜头中漂移为不同单品或不同季节穿搭。; 不要把真实城市街拍空间漂移为棚拍、异国景点或超现实场景。; 不要在高潮镜头中削弱 hero item、主体姿态或服装层次。; avoid drift: 同一 look 段落内不更换核心单品。; avoid drift: 同一 look 的配饰材质和数量保持稳定。; avoid drift: 同一 location 内保持光线方向和环境物件一致。; avoid drift: 不要漂移到与该场景不相干的建筑风格或气候。",
+      "continuity_note": "Keep OOTD vlog 主持人 consistent; look=look_b; location=location_b; anchor=完成 Look B reveal，并让观众感知风格切换。; inherit pose/eyeline from shot_007 (完成 Look B reveal，并让观众感知风格切换。); leave clean match point into shot_009",
+      "edit_note": "match_cut -> hard_cut; audio cue: 按 animatic 节奏点执行；参考 节奏为 稳定建立 -> 信息加密 -> 快速换装 -> hero 停顿。; climax_weight=0.49; normal beat; look rules: 同一 look 段落内不更换核心单品。; 同一 look 的配饰材质和数量保持稳定。; location rules: 同一 location 内保持光线方向和环境物件一致。; 不要漂移到与该场景不相干的建筑风格或气候。"
+    },
+    {
+      "shot_id": "shot_009",
+      "keyframe_prompt": "Luna，都市轻熟穿搭博主。 in 买手店门口、混凝土墙面、窄巷路牌、城市人流, 灰色西装外套 + 黑色吊带 + 百褶短裙 + 长靴 + 银色项链, 长靴步伐、银色项链和外套肩线细节。锚点：Look B 配饰。, 长靴步伐、银色项链和外套肩线细节。锚点：Look B 配饰。, CU framing, eye_level, 暖调自然光与高饱和城市反射共同构成视觉基底, 肤色稳定，服装主色清晰，避免过重滤镜污染, emotion=observational, continuity anchor=Look B 配饰。",
+      "motion_prompt": "static, duration=2.67s, preserve subject continuity, emphasize progression, transition toward shot_010",
+      "negative_prompt": "不要无动机更换主角长相、体型、年龄感或发型。; 不要让同一 look 在相邻镜头中漂移为不同单品或不同季节穿搭。; 不要把真实城市街拍空间漂移为棚拍、异国景点或超现实场景。; 不要在高潮镜头中削弱 hero item、主体姿态或服装层次。; avoid drift: 同一 look 段落内不更换核心单品。; avoid drift: 同一 look 的配饰材质和数量保持稳定。; avoid drift: 同一 location 内保持光线方向和环境物件一致。; avoid drift: 不要漂移到与该场景不相干的建筑风格或气候。",
+      "continuity_note": "Keep OOTD vlog 主持人 consistent; look=look_b; location=location_b; anchor=Look B 配饰。; inherit pose/eyeline from shot_008 (完成 Look B reveal，并让观众感知风格切换。); leave clean match point into shot_010",
+      "edit_note": "hard_cut -> scene_cut; audio cue: 按 animatic 节奏点执行；参考 节奏为 稳定建立 -> 信息加密 -> 快速换装 -> hero 停顿。; climax_weight=0.49; normal beat; look rules: 同一 look 段落内不更换核心单品。; 同一 look 的配饰材质和数量保持稳定。; location rules: 同一 location 内保持光线方向和环境物件一致。; 不要漂移到与该场景不相干的建筑风格或气候。"
+    },
+    {
+      "shot_id": "shot_010",
+      "keyframe_prompt": "Luna，都市轻熟穿搭博主。 in 街角咖啡店外摆、玻璃橱窗、暖色午后阳光, 奶油白针织短上衣 + 高腰直筒牛仔裤 + 金属耳圈 + 黑色腋下包, 窄巷街口定格, 窄巷街口定格，Luna 从人流中走向镜头。, WS framing, eye_level, 暖调自然光与高饱和城市反射共同构成视觉基底, 肤色稳定，服装主色清晰，避免过重滤镜污染, emotion=observational, continuity anchor=锁住 hero look 和记忆点，完成 CTA。",
+      "motion_prompt": "static, duration=2.67s, preserve subject continuity, emphasize progression, transition toward shot_011",
+      "negative_prompt": "不要无动机更换主角长相、体型、年龄感或发型。; 不要让同一 look 在相邻镜头中漂移为不同单品或不同季节穿搭。; 不要把真实城市街拍空间漂移为棚拍、异国景点或超现实场景。; 不要在高潮镜头中削弱 hero item、主体姿态或服装层次。; avoid drift: 同一 look 段落内不更换核心单品。; avoid drift: 同一 look 的配饰材质和数量保持稳定。; avoid drift: 同一 location 内保持光线方向和环境物件一致。; avoid drift: 不要漂移到与该场景不相干的建筑风格或气候。",
+      "continuity_note": "Keep OOTD vlog 主持人 consistent; look=look_a; location=location_a; anchor=锁住 hero look 和记忆点，完成 CTA。; inherit pose/eyeline from shot_009 (Look B 配饰。); leave clean match point into shot_011",
+      "edit_note": "scene_cut -> linger_cut; audio cue: 按 animatic 节奏点执行；参考 节奏为 稳定建立 -> 信息加密 -> 快速换装 -> hero 停顿。; climax_weight=0.57; normal beat; look rules: 同一 look 段落内不更换核心单品。; 同一 look 的配饰材质和数量保持稳定。; location rules: 同一 location 内保持光线方向和环境物件一致。; 不要漂移到与该场景不相干的建筑风格或气候。"
+    },
+    {
+      "shot_id": "shot_011",
+      "keyframe_prompt": "Luna，都市轻熟穿搭博主。 in 街角咖啡店外摆、玻璃橱窗、暖色午后阳光, 奶油白针织短上衣 + 高腰直筒牛仔裤 + 金属耳圈 + 黑色腋下包, 回头微笑, 回头微笑，西装外套摆动，hero close-up。锚点：hero look。, CU framing, eye_level, 暖调自然光与高饱和城市反射共同构成视觉基底, 肤色稳定，服装主色清晰，避免过重滤镜污染, emotion=observational, continuity anchor=hero look。",
+      "motion_prompt": "static, duration=2.67s, preserve subject continuity, emphasize climax, transition toward shot_012",
+      "negative_prompt": "不要无动机更换主角长相、体型、年龄感或发型。; 不要让同一 look 在相邻镜头中漂移为不同单品或不同季节穿搭。; 不要把真实城市街拍空间漂移为棚拍、异国景点或超现实场景。; 不要在高潮镜头中削弱 hero item、主体姿态或服装层次。; avoid drift: 同一 look 段落内不更换核心单品。; avoid drift: 同一 look 的配饰材质和数量保持稳定。; avoid drift: 同一 location 内保持光线方向和环境物件一致。; avoid drift: 不要漂移到与该场景不相干的建筑风格或气候。",
+      "continuity_note": "Keep OOTD vlog 主持人 consistent; look=look_a; location=location_a; anchor=hero look。; inherit pose/eyeline from shot_010 (锁住 hero look 和记忆点，完成 CTA。); leave clean match point into shot_012",
+      "edit_note": "linger_cut -> linger_cut; audio cue: 按 animatic 节奏点执行；参考 节奏为 稳定建立 -> 信息加密 -> 快速换装 -> hero 停顿。; climax_weight=0.98; protect climax framing and hero beat; look rules: 同一 look 段落内不更换核心单品。; 同一 look 的配饰材质和数量保持稳定。; location rules: 同一 location 内保持光线方向和环境物件一致。; 不要漂移到与该场景不相干的建筑风格或气候。"
+    },
+    {
+      "shot_id": "shot_012",
+      "keyframe_prompt": "Luna，都市轻熟穿搭博主。 in 街角咖啡店外摆、玻璃橱窗、暖色午后阳光, 奶油白针织短上衣 + 高腰直筒牛仔裤 + 金属耳圈 + 黑色腋下包, Luna 面向镜头给出总结与 CTA。, Luna 面向镜头给出总结与 CTA。, MS framing, eye_level, 暖调自然光与高饱和城市反射共同构成视觉基底, 肤色稳定，服装主色清晰，避免过重滤镜污染, emotion=observational, continuity anchor=锁住 hero look 和记忆点，完成 CTA。",
+      "motion_prompt": "static, duration=2.67s, preserve subject continuity, emphasize cta, transition toward end_frame",
+      "negative_prompt": "不要无动机更换主角长相、体型、年龄感或发型。; 不要让同一 look 在相邻镜头中漂移为不同单品或不同季节穿搭。; 不要把真实城市街拍空间漂移为棚拍、异国景点或超现实场景。; 不要在高潮镜头中削弱 hero item、主体姿态或服装层次。; avoid drift: 同一 look 段落内不更换核心单品。; avoid drift: 同一 look 的配饰材质和数量保持稳定。; avoid drift: 同一 location 内保持光线方向和环境物件一致。; avoid drift: 不要漂移到与该场景不相干的建筑风格或气候。",
+      "continuity_note": "Keep OOTD vlog 主持人 consistent; look=look_a; location=location_a; anchor=锁住 hero look 和记忆点，完成 CTA。; inherit pose/eyeline from shot_011 (hero look。)",
+      "edit_note": "linger_cut -> hold_on_end; audio cue: 按 animatic 节奏点执行；参考 节奏为 稳定建立 -> 信息加密 -> 快速换装 -> hero 停顿。; climax_weight=0.96; protect climax framing and hero beat; look rules: 同一 look 段落内不更换核心单品。; 同一 look 的配饰材质和数量保持稳定。; location rules: 同一 location 内保持光线方向和环境物件一致。; 不要漂移到与该场景不相干的建筑风格或气候。"
+    }
+  ]
+}

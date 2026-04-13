@@ -46,7 +46,7 @@ def safe_json_load(s: str) -> Dict[str, Any]:
 
     return json.loads(s2)
 
-def normalize_patch(out: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_patch(out: Dict[str, Any], structure_only: bool = False) -> Dict[str, Any]:
     patch = out.get("patch") or []
     if not isinstance(patch, list):
         patch = []
@@ -67,9 +67,62 @@ def normalize_patch(out: Dict[str, Any]) -> Dict[str, Any]:
     DEFAULT_TPL_PROCESSOR = {"style": "", "vibe": "", "note": "", "size": "1024x1024", "aspect_ratio": "1:1"}
     DEFAULT_TPL_POST = {"style": "", "vibe": "", "direction": "", "note": ""}
     DEFAULT_TPL_VIDEO = {"motion": "", "camera": "", "duration": "5秒", "resolution": "1080p", "ratio": "16:9", "note": ""}
+    SIZE_TEMPLATE_MODES = {"text2img", "local_text2img", "multi_image_generate", "rmbg", "feature_extract"}
 
     def _ensure_dict(x):
         return x if isinstance(x, dict) else {}
+
+    def _normalize_templates_for_mode(data: Dict[str, Any]) -> None:
+        mode = str(data.get("mode") or "").strip()
+        tpl = _ensure_dict(data.get("templates"))
+
+        if structure_only:
+            return
+
+        if "model" not in data:
+            if mode == "local_text2img":
+                data["model"] = MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO
+            elif mode in {"img2video", "local_img2video"}:
+                data["model"] = MODEL_COMFYUI_QWEN_I2V if mode == "local_img2video" else VIDEO_MODEL_1_0
+            elif mode in {
+                "text2img",
+                "multi_image_generate",
+                "bg_replace",
+                "gesture_swap",
+                "product_swap",
+                "rmbg",
+                "feature_extract",
+                "multi_angleshots",
+                "video_upscale",
+                "relight",
+                "upscale",
+            }:
+                data["model"] = MODEL_GEMINI
+
+        if mode in SIZE_TEMPLATE_MODES:
+            tpl.setdefault("size", "1024x1024")
+            tpl.setdefault("aspect_ratio", "1:1")
+            if mode == "multi_image_generate":
+                tpl.setdefault("note", "")
+        elif mode == "img2video":
+            tpl.setdefault("motion", "")
+            tpl.setdefault("camera", "")
+            tpl.setdefault("duration", "5")
+            tpl.setdefault("resolution", "1080p")
+            tpl.setdefault("ratio", "1:1")
+            tpl.setdefault("note", "")
+            tpl.setdefault("generate_audio_new", True)
+        elif mode == "local_img2video":
+            tpl.setdefault("duration", 5)
+            tpl.setdefault("resolution", "480p")
+            tpl.setdefault("ratio", "1:1")
+            tpl.setdefault("note", "")
+        elif mode == "feature_extract":
+            tpl.setdefault("size", "1024x1024")
+            tpl.setdefault("aspect_ratio", "1:1")
+            tpl.setdefault("preset", "face")
+
+        data["templates"] = tpl
 
     for item in out["patch"]:
         if not isinstance(item, dict):
@@ -94,6 +147,17 @@ def normalize_patch(out: Dict[str, Any]) -> Dict[str, Any]:
             node["data"] = data
 
             ntype = node.get("type")
+
+            if structure_only:
+                if ntype == "text_input":
+                    data.pop("text", None)
+                elif ntype in ("processor", "post_processor", "video_gen"):
+                    data.pop("prompt", None)
+                    data.pop("templates", None)
+                    data.pop("model", None)
+                data["status"] = str(data.get("status") or "idle")
+                node["data"] = data
+                continue
 
             # ---- common ----
             data.setdefault("status", "idle")
@@ -135,12 +199,18 @@ def normalize_patch(out: Dict[str, Any]) -> Dict[str, Any]:
                 for k, v in DEFAULT_TPL_PROCESSOR.items():
                     tpl.setdefault(k, v)
 
-                # ✅ 只有 text2img / multi_image_generate 强依赖 size/aspect_ratio
-                if data.get("mode") not in ("text2img", "multi_image_generate"):
-                    # 其他模式允许仍保留 size/aspect_ratio（不删也行），但不要强制覆盖
-                    pass
-
                 data["templates"] = tpl
+                _normalize_templates_for_mode(data)
+        elif op == "update_node":
+            data = _ensure_dict(item.get("data"))
+            item["data"] = data
+            if structure_only:
+                data.pop("text", None)
+                data.pop("prompt", None)
+                data.pop("templates", None)
+                data.pop("model", None)
+                continue
+            _normalize_templates_for_mode(data)
 
         elif op == "add_connection":
             c = _ensure_dict(item.get("connection"))

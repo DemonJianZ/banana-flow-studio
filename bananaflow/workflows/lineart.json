@@ -1,0 +1,82 @@
+{
+  "1": {
+    "inputs": {
+      "file": "reference_video.mp4",
+      "video-preview": ""
+    },
+    "class_type": "LoadVideo",
+    "_meta": {
+      "title": "加载视频"
+    }
+  },
+  "2": {
+    "inputs": {
+      "video": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "GetVideoComponents",
+    "_meta": {
+      "title": "获取视频元素"
+    }
+  },
+  "3": {
+    "inputs": {
+      "artist": "1",
+      "line_strength": 2,
+      "shading_effect": 41,
+      "line_color": "black",
+      "details": 255,
+      "smoothness": 1,
+      "enable_bg_color_change": true,
+      "bg_color": "white",
+      "bg_light": 10,
+      "noise_removal": 0,
+      "image": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "Sketch_Assistant",
+    "_meta": {
+      "title": "Img2Sketch Assistant "
+    }
+  },
+  "9": {
+    "inputs": {
+      "fps": [
+        "2",
+        2
+      ],
+      "images": [
+        "3",
+        0
+      ],
+      "audio": [
+        "2",
+        1
+      ]
+    },
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "创建视频"
+    }
+  },
+  "10": {
+    "inputs": {
+      "filename_prefix": "video/ComfyUI",
+      "format": "auto",
+      "codec": "auto",
+      "video-preview": "",
+      "video": [
+        "9",
+        0
+      ]
+    },
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "保存视频"
+    }
+  }
+}

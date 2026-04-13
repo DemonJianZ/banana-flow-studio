@@ -661,6 +661,36 @@ class IdeaScriptOrchestratorTests(unittest.TestCase):
         self.assertTrue(bool(out.policy_version))
         self.assertEqual(len(out.config_hash), 64)
 
+    def test_lightweight_script_mode_should_skip_storyboard_asset_match_and_edit_plan(self):
+        topics = [
+            TopicItem(angle="人物痛点切入", title="A", hook="先看适不适合", script_60s="[HOOK] 你先别急。[VIEW] 先看场景。[STEPS] 三步判断。[PRODUCT] 再看产品。[CTA] 先收藏。"),
+            TopicItem(angle="场景化需求", title="B", hook="先看场景", script_60s="[HOOK] 同款场景差很多。[VIEW] 先看失败成本。[STEPS] 先演示再对比。[PRODUCT] 再看适配度。[CTA] 先收藏。"),
+            TopicItem(angle="认知纠正", title="C", hook="这个误区最坑", script_60s="[HOOK] 很多人看错了。[VIEW] 顺序很关键。[STEPS] 先需求后参数。[PRODUCT] 再看这款。[CTA] 先关注。"),
+        ]
+        storyboard_node = _StubStoryboardNode()
+        storyboard_reviewer = _StubStoryboardReviewerNode()
+        orchestrator = IdeaScriptOrchestrator(
+            inference_node=_StubInferenceNode([0.90]),
+            generator_node=_StubGeneratorNode(outputs=[topics]),
+            reviewer_node=_StubReviewerNode(outputs=[_review_result(normalized_topics=topics)]),
+            risk_scanner_node=_StubRiskScannerNode(outputs=[_compliance_result("low", [])]),
+            storyboard_node=storyboard_node,
+            storyboard_reviewer_node=storyboard_reviewer,
+            config=IdeaScriptAgentConfig(
+                storyboard_enabled=False,
+                asset_match_enabled=False,
+                edit_plan_enabled=False,
+            ),
+        )
+
+        out = orchestrator.run(IdeaScriptRequest(product="眼霜"))
+
+        self.assertEqual(len(storyboard_node.calls), 0)
+        self.assertEqual(len(storyboard_reviewer.calls), 0)
+        self.assertEqual(len(out.edit_plans or []), 0)
+        self.assertFalse(out.asset_match_warning)
+        self.assertTrue(all(len(topic.shots or []) == 0 for topic in out.topics))
+
 
 class IdeaScriptComplianceAndScoringTests(unittest.TestCase):
     def test_risk_scan_output_is_valid(self):

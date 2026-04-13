@@ -14,7 +14,7 @@
   },
   "78": {
     "inputs": {
-      "image": "Frame_9.png"
+      "image": "20260327-181505.jpg"
     },
     "class_type": "LoadImage",
     "_meta": {
@@ -23,11 +23,24 @@
   },
   "435": {
     "inputs": {
-      "value": "修复图像破损区域\n"
+      "value": "remove the watermark"
     },
     "class_type": "PrimitiveStringMultiline",
     "_meta": {
       "title": "Prompt"
+    }
+  },
+  "433:75": {
+    "inputs": {
+      "strength": 1,
+      "model": [
+        "433:66",
+        0
+      ]
+    },
+    "class_type": "CFGNorm",
+    "_meta": {
+      "title": "CFG归一化"
     }
   },
   "433:39": {
@@ -60,61 +73,9 @@
       "title": "UNet加载器"
     }
   },
-  "433:89": {
-    "inputs": {
-      "lora_name": "Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors",
-      "strength_model": 1,
-      "model": [
-        "433:37",
-        0
-      ]
-    },
-    "class_type": "LoraLoaderModelOnly",
-    "_meta": {
-      "title": "LoRA加载器（仅模型）"
-    }
-  },
-  "433:66": {
-    "inputs": {
-      "shift": 3,
-      "model": [
-        "433:89",
-        0
-      ]
-    },
-    "class_type": "ModelSamplingAuraFlow",
-    "_meta": {
-      "title": "采样算法（AuraFlow）"
-    }
-  },
-  "433:117": {
-    "inputs": {
-      "image": [
-        "78",
-        0
-      ]
-    },
-    "class_type": "FluxKontextImageScale",
-    "_meta": {
-      "title": "图像缩放为FluxKontext"
-    }
-  },
-  "433:75": {
-    "inputs": {
-      "strength": 1,
-      "model": [
-        "433:66",
-        0
-      ]
-    },
-    "class_type": "CFGNorm",
-    "_meta": {
-      "title": "CFG归一化"
-    }
-  },
   "433:110": {
     "inputs": {
-      "prompt": "remove watermark\n",
+      "prompt": "",
       "clip": [
         "433:38",
         0
@@ -131,6 +92,19 @@
     "class_type": "TextEncodeQwenImageEditPlus",
     "_meta": {
       "title": "文本编码（QwenImageEditPlus）"
+    }
+  },
+  "433:66": {
+    "inputs": {
+      "shift": 3,
+      "model": [
+        "433:89",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": {
+      "title": "采样算法（AuraFlow）"
     }
   },
   "433:111": {
@@ -173,9 +147,51 @@
       "title": "VAE编码"
     }
   },
+  "433:8": {
+    "inputs": {
+      "samples": [
+        "433:3",
+        0
+      ],
+      "vae": [
+        "433:39",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "433:89": {
+    "inputs": {
+      "lora_name": "Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors",
+      "strength_model": 1,
+      "model": [
+        "433:37",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA加载器（仅模型）"
+    }
+  },
+  "433:117": {
+    "inputs": {
+      "image": [
+        "78",
+        0
+      ]
+    },
+    "class_type": "FluxKontextImageScale",
+    "_meta": {
+      "title": "图像缩放为FluxKontext"
+    }
+  },
   "433:3": {
     "inputs": {
-      "seed": 30867936787292,
+      "seed": 1124078258543647,
       "steps": 4,
       "cfg": 1,
       "sampler_name": "euler",
@@ -201,22 +217,6 @@
     "class_type": "KSampler",
     "_meta": {
       "title": "K采样器"
-    }
-  },
-  "433:8": {
-    "inputs": {
-      "samples": [
-        "433:3",
-        0
-      ],
-      "vae": [
-        "433:39",
-        0
-      ]
-    },
-    "class_type": "VAEDecode",
-    "_meta": {
-      "title": "VAE解码"
     }
   }
 }

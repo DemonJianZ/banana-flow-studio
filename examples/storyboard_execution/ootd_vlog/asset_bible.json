@@ -1,0 +1,132 @@
+{
+  "schema_version": "1.0",
+  "project_title": "逛街vlog：一站式街拍OOTD搭配手册",
+  "source_storyboard_stage": "final_delivery",
+  "host_identity": {
+    "host_id": "host_main",
+    "name": "Luna，都市轻熟穿搭博主。",
+    "role": "OOTD vlog 主持人",
+    "identity_notes": [
+      "25 岁都市女生，轻松、自信、会讲搭配逻辑。",
+      "保持人物面部、体态、发色和整体气质在全片一致"
+    ],
+    "continuity_notes": [
+      "除明确换装段落外，不改变主角脸型、发型和年龄感。",
+      "同一 look 内保持妆面、发丝质感和配饰位置一致。"
+    ]
+  },
+  "look_definitions": [
+    {
+      "look_id": "look_a",
+      "name": "Look A",
+      "style": "奶油白针织短上衣 + 高腰直筒牛仔裤 + 金属耳圈 + 黑色腋下包",
+      "hero_items": [
+        "奶油白针织短上衣",
+        "高腰直筒牛仔裤"
+      ],
+      "accessories": [
+        "金属耳圈",
+        "黑色腋下包"
+      ],
+      "color_palette": [
+        "奶油白",
+        "黑色"
+      ],
+      "mood": "轻松街拍",
+      "continuity_rules": [
+        "同一 look 段落内不更换核心单品。",
+        "同一 look 的配饰材质和数量保持稳定。"
+      ]
+    },
+    {
+      "look_id": "look_b",
+      "name": "Look B",
+      "style": "灰色西装外套 + 黑色吊带 + 百褶短裙 + 长靴 + 银色项链",
+      "hero_items": [
+        "灰色西装外套",
+        "黑色吊带"
+      ],
+      "accessories": [
+        "百褶短裙",
+        "长靴",
+        "银色项链"
+      ],
+      "color_palette": [
+        "灰色",
+        "黑色",
+        "银色"
+      ],
+      "mood": "轻松街拍",
+      "continuity_rules": [
+        "同一 look 段落内不更换核心单品。",
+        "同一 look 的配饰材质和数量保持稳定。"
+      ]
+    }
+  ],
+  "locations": [
+    {
+      "location_id": "location_a",
+      "name": "街角咖啡店外摆、玻璃橱窗、暖色午后阳光",
+      "world_type": "real_world_lifestyle",
+      "signature_elements": [
+        "街角咖啡店外摆",
+        "玻璃橱窗",
+        "暖色午后阳光"
+      ],
+      "mood": "真实城市生活",
+      "continuity_rules": [
+        "同一 location 内保持光线方向和环境物件一致。",
+        "不要漂移到与该场景不相干的建筑风格或气候。"
+      ]
+    },
+    {
+      "location_id": "location_b",
+      "name": "买手店门口、混凝土墙面、窄巷路牌、城市人流",
+      "world_type": "real_world_lifestyle",
+      "signature_elements": [
+        "买手店门口",
+        "混凝土墙面",
+        "窄巷路牌",
+        "城市人流"
+      ],
+      "mood": "真实城市生活",
+      "continuity_rules": [
+        "同一 location 内保持光线方向和环境物件一致。",
+        "不要漂移到与该场景不相干的建筑风格或气候。"
+      ]
+    }
+  ],
+  "global_visual_style": {
+    "format": "vertical_short_form_vlog",
+    "lighting": "暖调自然光与高饱和城市反射共同构成视觉基底",
+    "color_strategy": "肤色稳定，服装主色清晰，避免过重滤镜污染",
+    "lens_language": "以中近景和细节特写交替，保留街拍呼吸感",
+    "motion_language": "以轻推、轻跟、轻摆动为主，避免无意义飘移",
+    "texture_bias": "保留服装面料、城市反光和皮肤真实纹理"
+  },
+  "negative_drift_rules": [
+    "不要无动机更换主角长相、体型、年龄感或发型。",
+    "不要让同一 look 在相邻镜头中漂移为不同单品或不同季节穿搭。",
+    "不要把真实城市街拍空间漂移为棚拍、异国景点或超现实场景。",
+    "不要在高潮镜头中削弱 hero item、主体姿态或服装层次。"
+  ],
+  "climax_protection": {
+    "protected_story_beats": [
+      "换装 reveal",
+      "hero look 定格",
+      "最终 OOTD 成片展示"
+    ],
+    "protected_looks": [
+      "look_a",
+      "look_b"
+    ],
+    "protected_locations": [
+      "location_a",
+      "location_b"
+    ],
+    "protected_shots": [
+      "shot_011",
+      "shot_012"
+    ]
+  }
+}

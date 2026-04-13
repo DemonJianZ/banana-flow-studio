@@ -28,6 +28,7 @@ from core.config import (
     MODEL_GEMINI,
     MODEL_DOUBAO,
     MODEL_AGENT_CHAT,
+    MODEL_PROMPT_POLISH,
     AGENT_CHAT_HTTP_PROXY,
     AGENT_CHAT_HTTPS_PROXY,
     MODEL_COMFYUI_OVERLAYTEXT,
@@ -35,6 +36,7 @@ from core.config import (
     MODEL_COMFYUI_REMOVE_WATERMARK,
     MODEL_COMFYUI_MULTI_ANGLESHOTS,
     MODEL_COMFYUI_VIDEO_UPSCALE,
+    MODEL_COMFYUI_VIDEO_LINEART,
     MODEL_COMFYUI_CONTROLNET,
     MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO,
     MODEL_COMFYUI_QWEN_I2V,
@@ -56,13 +58,18 @@ from schemas.api import (
     RemoveWatermarkRequest, RemoveWatermarkResponse,
     MultiAngleShotsRequest, MultiAngleShotsResponse,
     VideoUpscaleRequest, VideoUpscaleResponse,
+    VideoLineartRequest, VideoLineartResponse,
+    VideoSplitRequest, VideoSplitResponse,
     ControlnetPoseVideoRequest, ControlnetPoseVideoResponse,
     VideoUpscaleTaskStartResponse, VideoUpscaleTaskStatusResponse,
+    VideoLineartTaskStartResponse, VideoLineartTaskStatusResponse,
+    VideoSplitTaskStartResponse, VideoSplitTaskStatusResponse,
     EditRequest, EditResponse,
     Img2VideoRequest, Img2VideoResponse,
     AgentRequest,
-    AgentVideoGenerationRequest, AgentVideoGenerationResponse, AgentVideoShotArtifact,
     AgentChitchatRequest, AgentChitchatResponse,
+    AgentDramaRequest, AgentDramaResponse,
+    PromptPolishRequest, PromptPolishResponse,
     AIChatImageTaskSubmitResponse, AIChatImageTaskStatusResponse,
 )
 from storage.ai_chat_tasks import (
@@ -86,23 +93,19 @@ from services.comfyui import (
     run_qwen_i2v_workflow,
     run_controlnet_pose_video_workflow,
     run_video_upscale_workflow,
+    run_video_lineart_workflow,
+    run_video_split_workflow,
 )
-from services.video_generation_pipeline import run_e2e_video_workflow
 
 from utils.images import parse_data_url, bytes_to_data_url, get_image_from_response
 from utils.size import calculate_target_resolution
 from prompts.business import build_business_prompt
+from prompts.refine import ollama_prompt_polish
 
+from agent.drama_creator import DramaCreatorClient
 from agent.idea_script.orchestrator import IdeaScriptOrchestrator
 from agent.idea_script.schemas import EditPlan, IdeaScriptRequest, IdeaScriptResponse
 from agent.planner import agent_plan_impl
-from mcp.client import MCPClientError, MCPStdioClient
-from mcp.registry import MCPRegistryError, MCPToolInvocationError, get_global_registry
-from mcp.tool_export_ffmpeg import (
-    EXPORT_FFMPEG_TOOL_HASH,
-    EXPORT_FFMPEG_TOOL_NAME,
-    EXPORT_FFMPEG_TOOL_VERSION,
-)
 from quality.harvester import harvest_eval_case
 from quality.metrics_schema import build_quality_metrics
 from memory.service import (
@@ -134,6 +137,10 @@ prompt_logger = PromptLogger()
 analyzer = LogAnalyzer("logs/prompts.jsonl")
 video_upscale_tasks: Dict[str, Dict[str, Any]] = {}
 video_upscale_tasks_lock = threading.Lock()
+video_lineart_tasks: Dict[str, Dict[str, Any]] = {}
+video_lineart_tasks_lock = threading.Lock()
+video_split_tasks: Dict[str, Dict[str, Any]] = {}
+video_split_tasks_lock = threading.Lock()
 idea_script_orchestrator = IdeaScriptOrchestrator()
 idea_script_plan_cache: Dict[str, Dict[str, Any]] = {}
 idea_script_plan_cache_lock = threading.Lock()
@@ -241,7 +248,10 @@ _MEMBER_API_BASE = os.getenv("MEMBER_API_BASE", "http://192.168.20.217:16313").r
 _MEMBER_API_AUTHORIZATION = str(os.getenv("MEMBER_API_AUTHORIZATION") or "").strip()
 _IDEA_SCRIPT_HTTP_PROXY = str(os.getenv("IDEA_SCRIPT_HTTP_PROXY") or "").strip()
 _IDEA_SCRIPT_HTTPS_PROXY = str(os.getenv("IDEA_SCRIPT_HTTPS_PROXY") or "").strip()
-_IDEA_SCRIPT_LLM_TIMEOUT_MESSAGE = "生成脚本超时，请稍后重试。"
+_IDEA_SCRIPT_LLM_TIMEOUT_MESSAGE = (
+    "生成脚本超时。当前已建议使用轻量脚本模式；如仍超时，请检查 Ollama Gemma4 是否正常响应，"
+    "或调大 IDEA_SCRIPT_INFERENCE_TIMEOUT_SEC / IDEA_SCRIPT_GENERATION_TIMEOUT_SEC。"
+)
 _AI_CHAT_MODEL_ID_NANO_BANANA_PRO = str(os.getenv("AI_CHAT_MODEL_ID_NANO_BANANA_PRO") or "").strip()
 _AI_CHAT_MODEL_ID_SEEDANCE_1_0 = str(os.getenv("AI_CHAT_MODEL_ID_SEEDANCE_1_0") or "").strip()
 _AI_CHAT_IMAGE_SIZE_ID_MAP = {
@@ -285,6 +295,7 @@ class AIChatCurlProxyRequest(BaseModel):
     ai_video_param_ratio_id: Optional[str] = ""
     ai_video_param_resolution_id: Optional[str] = ""
     ai_video_param_duration_id: Optional[str] = ""
+    ai_video_param_imagetype_id: Optional[str] = ""
     template_enum: Optional[str] = ""
     async_flag: Optional[str] = Field(default="", alias="async")
     tusd_file_remote_ids: Optional[List[str]] = Field(default_factory=list)
@@ -405,6 +416,7 @@ def _build_ai_chat_request_form(req: AIChatCurlProxyRequest) -> Dict[str, Any]:
         "ai_video_param_ratio_id": clean_form_value(clean_req.ai_video_param_ratio_id),
         "ai_video_param_resolution_id": clean_form_value(clean_req.ai_video_param_resolution_id),
         "ai_video_param_duration_id": clean_form_value(clean_req.ai_video_param_duration_id),
+        "ai_video_param_imagetype_id": clean_form_value(clean_req.ai_video_param_imagetype_id),
         "template_enum": clean_form_value(clean_req.template_enum),
         "async": clean_form_value(clean_req.async_flag),
         "tusd_file_remote_ids": [clean_form_value(item) for item in list(clean_req.tusd_file_remote_ids or []) if clean_form_value(item)],
@@ -615,6 +627,7 @@ async def _parse_ai_chat_submission_request(request: Request, task_id: str) -> t
             ai_video_param_ratio_id=scalar_fields.get("ai_video_param_ratio_id", ""),
             ai_video_param_resolution_id=scalar_fields.get("ai_video_param_resolution_id", ""),
             ai_video_param_duration_id=scalar_fields.get("ai_video_param_duration_id", ""),
+            ai_video_param_imagetype_id=scalar_fields.get("ai_video_param_imagetype_id", ""),
             template_enum=scalar_fields.get("template_enum", ""),
             **{"async": scalar_fields.get("async", "")},
             tusd_file_remote_ids=remote_ids,
@@ -697,6 +710,7 @@ def _build_ai_chat_curl_command(req_id: str, req: AIChatCurlProxyRequest) -> tup
         ("ai_video_param_ratio_id", req.ai_video_param_ratio_id),
         ("ai_video_param_resolution_id", req.ai_video_param_resolution_id),
         ("ai_video_param_duration_id", req.ai_video_param_duration_id),
+        ("ai_video_param_imagetype_id", req.ai_video_param_imagetype_id),
         ("template_enum", req.template_enum),
         ("async", req.async_flag),
     ]
@@ -1415,7 +1429,34 @@ def _get_video_upscale_task(task_id: str) -> Optional[Dict[str, Any]]:
         return dict(current) if isinstance(current, dict) else None
 
 
+def _set_video_lineart_task(task_id: str, **patch: Any) -> None:
+    with video_lineart_tasks_lock:
+        current = video_lineart_tasks.get(task_id, {})
+        current.update(patch)
+        video_lineart_tasks[task_id] = current
+
+
+def _get_video_lineart_task(task_id: str) -> Optional[Dict[str, Any]]:
+    with video_lineart_tasks_lock:
+        current = video_lineart_tasks.get(task_id)
+        return dict(current) if isinstance(current, dict) else None
+
+
+def _set_video_split_task(task_id: str, **patch: Any) -> None:
+    with video_split_tasks_lock:
+        current = video_split_tasks.get(task_id, {})
+        current.update(patch)
+        video_split_tasks[task_id] = current
+
+
+def _get_video_split_task(task_id: str) -> Optional[Dict[str, Any]]:
+    with video_split_tasks_lock:
+        current = video_split_tasks.get(task_id)
+        return dict(current) if isinstance(current, dict) else None
+
+
 VIDEO_UPSCALE_ALLOWED_RESOLUTIONS = {1080, 1440, 2160}
+VIDEO_SPLIT_MODEL_NAME = "ffmpeg-video-split"
 
 
 def _normalize_video_upscale_resolution(value: Any) -> int:
@@ -1432,6 +1473,45 @@ def _normalize_video_upscale_batch_size(value: Any) -> int:
     except Exception:
         return 1
     return max(1, parsed)
+
+
+def _normalize_video_lineart_strength(value: Any) -> int:
+    try:
+        parsed = int(str(value).strip())
+    except Exception:
+        return 2
+    return max(1, min(10, parsed))
+
+
+def _normalize_video_lineart_color(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "black"
+    return text[:32]
+
+
+def _normalize_video_split_segments(value: Any) -> List[Dict[str, float]]:
+    normalized: List[Dict[str, float]] = []
+    if not isinstance(value, list):
+        return normalized
+
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start_sec = max(0.0, float(item.get("start_sec") or 0.0))
+            end_sec = float(item.get("end_sec") or 0.0)
+        except Exception:
+            continue
+        if end_sec <= start_sec:
+            continue
+        normalized.append(
+            {
+                "start_sec": round(start_sec, 3),
+                "end_sec": round(end_sec, 3),
+            }
+        )
+    return normalized[:24]
 
 
 def _parse_size_to_dimensions(size: Optional[str], aspect_ratio: Optional[str], *, default: tuple[int, int] = (1024, 1024)) -> tuple[int, int]:
@@ -2343,6 +2423,7 @@ async def _run_ai_chat_image_task(task_id: str) -> None:
                     ai_video_param_ratio_id=str(request_form.get("ai_video_param_ratio_id") or ""),
                     ai_video_param_resolution_id=str(request_form.get("ai_video_param_resolution_id") or ""),
                     ai_video_param_duration_id=str(request_form.get("ai_video_param_duration_id") or ""),
+                    ai_video_param_imagetype_id=str(request_form.get("ai_video_param_imagetype_id") or ""),
                     template_enum=str(request_form.get("template_enum") or ""),
                     **{"async": str(request_form.get("async") or "")},
                     tusd_file_remote_ids=list(request_form.get("tusd_file_remote_ids") or []),
@@ -2360,7 +2441,7 @@ async def _run_ai_chat_image_task(task_id: str) -> None:
                 )
             done_error = str(result.get("done_error") or "").strip()
             part_enum = clean_form_value(request_form.get("part_enum"))
-            prefer_video = part_enum == "6"
+            prefer_video = part_enum in {"6", "215"}
             image_url, video_url = _recover_media_urls_from_result_payload(result, prefer_video=prefer_video)
             if prefer_video and image_url and not video_url:
                 video_url = image_url
@@ -3319,6 +3400,239 @@ def _run_video_upscale_task(task_id: str, req_id: str, user_id: Optional[str], p
         )
 
 
+def _run_video_lineart_task(task_id: str, req_id: str, user_id: Optional[str], payload: Dict[str, Any]) -> None:
+    t0 = time.time()
+    line_strength = _normalize_video_lineart_strength(payload.get("line_strength"))
+    line_color = _normalize_video_lineart_color(payload.get("line_color"))
+
+    try:
+        _set_video_lineart_task(task_id, status="running", progress=0.1, updated_at=time.time())
+        video_bytes, mime_type = run_video_lineart_workflow(
+            req_id=req_id,
+            video_input=str(payload.get("video") or ""),
+            line_strength=line_strength,
+            line_color=line_color,
+        )
+        if not video_bytes:
+            raise RuntimeError("No video returned")
+
+        output_data_url = bytes_to_data_url(video_bytes, mime_type=mime_type or "video/mp4")
+        _set_video_lineart_task(
+            task_id,
+            status="success",
+            progress=1.0,
+            video=output_data_url,
+            updated_at=time.time(),
+        )
+        prompt_logger.log(
+            req_id,
+            "video_lineart",
+            payload,
+            "",
+            {
+                "model": MODEL_COMFYUI_VIDEO_LINEART,
+                "line_strength": line_strength,
+                "line_color": line_color,
+            },
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=(str(user_id).strip() or "anonymous"),
+            inputs_full=payload,
+            output_full={"videos": [output_data_url]},
+        )
+        if str(user_id or "").strip():
+            record_usage(str(user_id), MODEL_COMFYUI_VIDEO_LINEART)
+    except Exception as e:
+        _set_video_lineart_task(
+            task_id,
+            status="error",
+            error=str(e),
+            updated_at=time.time(),
+        )
+        sys_logger.error(f"[{req_id}] VideoLineart Task Error: {e}")
+        prompt_logger.log(
+            req_id,
+            "video_lineart",
+            payload,
+            "",
+            {
+                "model": MODEL_COMFYUI_VIDEO_LINEART,
+                "line_strength": line_strength,
+                "line_color": line_color,
+            },
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=(str(user_id).strip() or "anonymous"),
+            inputs_full=payload,
+            error=str(e),
+        )
+
+
+def _run_video_split_task(task_id: str, req_id: str, user_id: Optional[str], payload: Dict[str, Any]) -> None:
+    t0 = time.time()
+    segments = _normalize_video_split_segments(payload.get("segments"))
+
+    try:
+        if not segments:
+            raise RuntimeError("至少需要一个有效分段")
+
+        _set_video_split_task(
+            task_id,
+            status="running",
+            progress=0.1,
+            segment_count=len(segments),
+            updated_at=time.time(),
+        )
+        video_bytes_list, mime_type = run_video_split_workflow(
+            req_id=req_id,
+            video_input=str(payload.get("video") or ""),
+            segments=segments,
+        )
+        if not video_bytes_list:
+            raise RuntimeError("No split videos returned")
+
+        output_videos = [bytes_to_data_url(item, mime_type=mime_type or "video/mp4") for item in video_bytes_list if item]
+        if not output_videos:
+            raise RuntimeError("视频分割未返回结果")
+
+        _set_video_split_task(
+            task_id,
+            status="success",
+            progress=1.0,
+            videos=output_videos,
+            updated_at=time.time(),
+        )
+        prompt_logger.log(
+            req_id,
+            "video_split",
+            payload,
+            "",
+            {
+                "model": VIDEO_SPLIT_MODEL_NAME,
+                "segment_count": len(output_videos),
+            },
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=(str(user_id).strip() or "anonymous"),
+            inputs_full=payload,
+            output_full={"videos": output_videos},
+        )
+    except Exception as e:
+        _set_video_split_task(
+            task_id,
+            status="error",
+            error=str(e),
+            updated_at=time.time(),
+        )
+        sys_logger.error(f"[{req_id}] VideoSplit Task Error: {e}")
+        prompt_logger.log(
+            req_id,
+            "video_split",
+            payload,
+            "",
+            {
+                "model": VIDEO_SPLIT_MODEL_NAME,
+                "segment_count": len(segments),
+            },
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=(str(user_id).strip() or "anonymous"),
+            inputs_full=payload,
+            error=str(e),
+        )
+
+
+@router.post("/api/video_split/start", response_model=VideoSplitTaskStartResponse)
+def video_split_start(req: VideoSplitRequest, request: Request, current_user=Depends(_get_current_user_optional)):
+    req_id = request.state.req_id
+    payload = req.model_dump()
+    task_id = uuid.uuid4().hex
+    segments = _normalize_video_split_segments(payload.get("segments"))
+    if not segments:
+        raise HTTPException(status_code=400, detail="至少需要一个有效分段")
+    payload["segments"] = segments
+
+    user_id = str((current_user or {}).get("id") or "").strip()
+    _set_video_split_task(
+        task_id,
+        user_id=user_id,
+        status="queued",
+        progress=0.0,
+        segment_count=len(segments),
+        created_at=time.time(),
+        updated_at=time.time(),
+    )
+
+    worker = threading.Thread(
+        target=_run_video_split_task,
+        args=(task_id, req_id, user_id, payload),
+        daemon=True,
+    )
+    worker.start()
+    return VideoSplitTaskStartResponse(task_id=task_id, status="queued")
+
+
+@router.get("/api/video_split/status/{task_id}", response_model=VideoSplitTaskStatusResponse)
+def video_split_status(task_id: str):
+    task = _get_video_split_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return VideoSplitTaskStatusResponse(
+        task_id=task_id,
+        status=str(task.get("status") or "queued"),
+        progress=float(task.get("progress") or 0.0),
+        videos=task.get("videos"),
+        error=task.get("error"),
+    )
+
+
+@router.post("/api/video_lineart/start", response_model=VideoLineartTaskStartResponse)
+def video_lineart_start(req: VideoLineartRequest, request: Request, current_user=Depends(_get_current_user_optional)):
+    req_id = request.state.req_id
+    payload = req.model_dump()
+    task_id = uuid.uuid4().hex
+    line_strength = _normalize_video_lineart_strength(req.line_strength)
+    line_color = _normalize_video_lineart_color(req.line_color)
+    payload["line_strength"] = line_strength
+    payload["line_color"] = line_color
+
+    user_id = str((current_user or {}).get("id") or "").strip()
+    _set_video_lineart_task(
+        task_id,
+        user_id=user_id,
+        status="queued",
+        progress=0.0,
+        line_strength=line_strength,
+        line_color=line_color,
+        created_at=time.time(),
+        updated_at=time.time(),
+    )
+
+    worker = threading.Thread(
+        target=_run_video_lineart_task,
+        args=(task_id, req_id, user_id, payload),
+        daemon=True,
+    )
+    worker.start()
+    return VideoLineartTaskStartResponse(task_id=task_id, status="queued")
+
+
+@router.get("/api/video_lineart/status/{task_id}", response_model=VideoLineartTaskStatusResponse)
+def video_lineart_status(task_id: str):
+    task = _get_video_lineart_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return VideoLineartTaskStatusResponse(
+        task_id=task_id,
+        status=str(task.get("status") or "queued"),
+        progress=float(task.get("progress") or 0.0),
+        video=task.get("video"),
+        error=task.get("error"),
+    )
+
+
 @router.post("/api/video_upscale/start", response_model=VideoUpscaleTaskStartResponse)
 def video_upscale_start(req: VideoUpscaleRequest, request: Request, current_user=Depends(_get_current_user_optional)):
     req_id = request.state.req_id
@@ -3676,209 +3990,6 @@ def img_to_video(req: Img2VideoRequest, request: Request, current_user=Depends(g
 # Agent endpoints
 # =========================================================
 
-@router.post("/api/agent/idea_script/generate_video", response_model=AgentVideoGenerationResponse)
-def agent_idea_script_generate_video(
-    req: AgentVideoGenerationRequest,
-    request: Request,
-    response: Response,
-    current_user=Depends(_get_current_user_optional),
-) -> AgentVideoGenerationResponse:
-    req_id = getattr(request.state, "req_id", "noid")
-    t0 = time.time()
-    tenant_id, user_id = _resolve_agent_actor(request, current_user)
-    active_session_id = ""
-    session_summary_present = False
-    enable_video_generation = _as_bool(os.getenv("BANANAFLOW_ENABLE_VIDEO_GENERATION"), default=False)
-    requested_session_id = (request.headers.get("X-Agent-Session-Id") or "").strip() or None
-    agent_intent = (request.headers.get("X-Agent-Intent") or "").strip() or "idea_script.generate_video"
-    agent_product = (request.headers.get("X-Agent-Product") or "").strip() or req.product
-
-    try:
-        active_session_id, tenant_id, user_id, session_summary_present = _resolve_agent_session(
-            request=request,
-            response=response,
-            current_user=current_user,
-            requested_session_id=requested_session_id,
-        )
-
-        _append_session_event_audit(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=active_session_id,
-            event_type="INTENT_ROUTING",
-            payload={
-                "intent": agent_intent,
-                "product": agent_product,
-                "reason": "agent_idea_script_generate_video",
-                "backend_call": "agent_video_generation_pipeline",
-                "request_path": str(request.url.path),
-            },
-        )
-        _append_session_event_audit(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=active_session_id,
-            event_type="USER_MESSAGE",
-            payload={
-                "text": req.product,
-                "product": agent_product,
-            },
-        )
-        _append_session_event_audit(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=active_session_id,
-            event_type="TOOL_CALL",
-            payload={
-                "tool_name": "agent_video_generation_pipeline",
-                "args_hash": _safe_json_hash(
-                    {
-                        "product": req.product,
-                        "out_dir": req.out_dir,
-                        "image_size": [req.image_width, req.image_height],
-                        "output_size": [req.output_width, req.output_height],
-                        "fps": req.fps,
-                        "clip_length": req.clip_length,
-                        "max_shots": req.max_shots,
-                    }
-                ),
-                "feature_flag": enable_video_generation,
-            },
-        )
-
-        def _run_idea_script(product: str) -> IdeaScriptResponse:
-            return idea_script_orchestrator.run(
-                IdeaScriptRequest(product=product),
-                session_id=active_session_id,
-                session_summary_present=session_summary_present,
-                tenant_id=tenant_id,
-                user_id=user_id,
-            )
-
-        workflow_out = run_e2e_video_workflow(
-            req_id=req_id,
-            product=req.product,
-            out_dir=str(req.out_dir or "./exports/video_generation"),
-            enable_video_generation=enable_video_generation,
-            run_idea_script_fn=_run_idea_script,
-            resolution=(int(req.output_width or 720), int(req.output_height or 1280)),
-            fps=int(req.fps or 24),
-            image_size=(int(req.image_width or 1024), int(req.image_height or 1024)),
-            clip_length=int(req.clip_length or 81),
-            retries_per_step=int(req.retries_per_step or 1),
-            max_shots=int(req.max_shots or 0),
-            motion_hint=str(req.motion_hint or ""),
-            bgm_path=req.bgm_path,
-        )
-
-        idea_script_obj = workflow_out.get("idea_script")
-        if isinstance(idea_script_obj, IdeaScriptResponse):
-            idea_script_payload = idea_script_obj.model_dump(mode="json")
-        elif isinstance(idea_script_obj, dict):
-            idea_script_payload = dict(idea_script_obj)
-        else:
-            idea_script_payload = {}
-
-        artifacts = [AgentVideoShotArtifact(**item) for item in list(workflow_out.get("artifacts") or [])]
-        payload = AgentVideoGenerationResponse(
-            video_generation_enabled=bool(workflow_out.get("video_generation_enabled")),
-            fallback_mode=str(workflow_out.get("fallback_mode") or "idea_script_only"),
-            idea_script=idea_script_payload,
-            output_dir=str(workflow_out.get("output_dir") or ""),
-            output_video=workflow_out.get("output_video"),
-            error=workflow_out.get("error"),
-            shots_total=int(workflow_out.get("shots_total") or 0),
-            shots_succeeded=int(workflow_out.get("shots_succeeded") or 0),
-            shots_failed=int(workflow_out.get("shots_failed") or 0),
-            artifacts=artifacts,
-        )
-
-        _append_session_event_audit(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=active_session_id,
-            event_type="TOOL_RESULT",
-            payload={
-                "tool_name": "agent_video_generation_pipeline",
-                "result_ref": {
-                    "output_video": payload.output_video,
-                    "shots_total": payload.shots_total,
-                    "shots_succeeded": payload.shots_succeeded,
-                    "shots_failed": payload.shots_failed,
-                },
-                "isError": bool(payload.error),
-                "warnings": ([str(payload.error)] if payload.error else []),
-                "feature_flag": enable_video_generation,
-            },
-        )
-        _append_session_event_audit(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=active_session_id,
-            event_type="ARTIFACT_CREATED",
-            payload={
-                "edit_plan_ids": [],
-                "bundle_dir": payload.output_dir or None,
-                "video_path": payload.output_video,
-            },
-        )
-        _append_session_event_audit(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=active_session_id,
-            event_type="ASSISTANT_MESSAGE",
-            payload={
-                "text": (
-                    f"Video generation completed with {payload.shots_succeeded}/{payload.shots_total} shot clips."
-                    if payload.video_generation_enabled
-                    else "Video generation feature is disabled. Returned idea_script output only."
-                ),
-                "product": req.product,
-            },
-        )
-        prompt_logger.log(
-            req_id,
-            "agent_idea_script_generate_video",
-            req.model_dump(mode="json"),
-            req.product,
-            {
-                "pipeline": "agent_video_generation_pipeline",
-                "feature_flag": enable_video_generation,
-            },
-            payload.model_dump(mode="json"),
-            time.time() - t0,
-            user_id=user_id,
-            inputs_full=req.model_dump(mode="json"),
-            output_full=payload.model_dump(mode="json"),
-        )
-        if str(user_id or "").strip() and not str(user_id).startswith("guest:"):
-            record_usage(user_id, idea_script_orchestrator.default_llm_model)
-        return payload
-    except SessionAccessDeniedError:
-        raise HTTPException(status_code=403, detail="Session access denied")
-    except SessionNotFoundError:
-        raise HTTPException(status_code=404, detail="Session not found")
-    except HTTPException:
-        raise
-    except Exception as e:
-        if active_session_id and tenant_id and user_id:
-            _append_session_event_audit(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                session_id=active_session_id,
-                event_type="TOOL_RESULT",
-                payload={
-                    "tool_name": "agent_video_generation_pipeline",
-                    "result_ref": {"output_video": None, "shots_total": 0, "shots_succeeded": 0, "shots_failed": 0},
-                    "isError": True,
-                    "warnings": [str(e)],
-                    "feature_flag": enable_video_generation,
-                },
-            )
-        sys_logger.error(f"[{req_id}] /api/agent/idea_script/generate_video error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @router.post("/api/agent/chitchat", response_model=AgentChitchatResponse)
 def agent_chitchat(
     req: AgentChitchatRequest,
@@ -3893,7 +4004,7 @@ def agent_chitchat(
         "你是 Banana Flow Studio 的中文创意助理。\n"
         "请直接回答用户问题，保持简洁、自然、口语化。\n"
         "如果用户在闲聊，也要正常回应，但不要编造能力。\n"
-        "如果用户表达了脚本、分镜、视频、导出等明确意图，可以顺带提示你也能继续帮助完成这些任务。\n"
+        "如果用户表达了脚本、短剧创作、画布工作流等明确意图，可以顺带提示你也能继续帮助完成这些任务。\n"
         f"用户消息：{message}"
     )
 
@@ -3908,10 +4019,70 @@ def agent_chitchat(
         )
         text = str(getattr(response, "text", "") or "").strip()
         if not text:
-            text = "我在。你可以继续告诉我你想聊什么，或者直接让我做脚本、分镜、导出。"
+            text = "我在。你可以继续告诉我你想聊什么，或者直接让我做脚本、短剧、导出。"
         return AgentChitchatResponse(text=text, model=MODEL_AGENT_CHAT)
     except Exception as e:
         sys_logger.error(f"[{req_id}] /api/agent/chitchat error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/agent/drama", response_model=AgentDramaResponse)
+def agent_drama(
+    req: AgentDramaRequest,
+    request: Request,
+) -> AgentDramaResponse:
+    req_id = getattr(request.state, "req_id", "noid")
+    prompt = str(req.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt 不能为空")
+
+    try:
+        client = DramaCreatorClient()
+        payload = client.generate(
+            prompt=prompt,
+            task_mode=str(req.task_mode or "").strip(),
+            episode_count=req.episode_count,
+            existing_script=str(req.existing_script or "").strip(),
+        )
+        return AgentDramaResponse(
+            text=str(payload.get("text") or "").strip(),
+            summary=str(payload.get("summary") or "").strip(),
+            model=str(payload.get("model") or client.model).strip(),
+            mode=str(req.task_mode or "").strip(),
+        )
+    except HTTPException:
+        raise
+    except ValueError as e:
+        if "drama_prompt_required" in str(e):
+            raise HTTPException(status_code=400, detail="prompt 不能为空")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        sys_logger.error(f"[{req_id}] /api/agent/drama error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/agent/prompt_polish", response_model=PromptPolishResponse)
+def agent_prompt_polish(
+    req: PromptPolishRequest,
+    request: Request,
+) -> PromptPolishResponse:
+    req_id = getattr(request.state, "req_id", "noid")
+    prompt = str(req.prompt or "").strip()
+    mode = str(req.mode or "text2img").strip() or "text2img"
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt 不能为空")
+
+    try:
+        payload = ollama_prompt_polish(prompt, mode=mode, req_id=f"prompt_polish:{req_id}")
+        text = str(payload.get("text") or "").strip()
+        variants = payload.get("variants") or []
+        if not text:
+            raise RuntimeError("prompt_polish returned empty response")
+        return PromptPolishResponse(text=text, model=MODEL_PROMPT_POLISH, variants=variants)
+    except HTTPException:
+        raise
+    except Exception as e:
+        sys_logger.error(f"[{req_id}] /api/agent/prompt_polish error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -4033,8 +4204,6 @@ def agent_idea_script(
             latency_ms=int((time.time() - t0) * 1000),
             req_id=req_id,
         )
-        _cache_edit_plans(list(out.edit_plans or []))
-        edit_plan_ids = [str(getattr(plan, "plan_id", "") or "") for plan in list(out.edit_plans or []) if str(getattr(plan, "plan_id", "") or "").strip()]
         warnings: list[str] = []
         if out.inference_warning and out.warning_reason:
             warnings.append(str(out.warning_reason))
@@ -4051,7 +4220,7 @@ def agent_idea_script(
                 "tool_name": "idea_script_orchestrator.run",
                 "result_ref": {
                     "topic_count": len(out.topics or []),
-                    "edit_plan_count": len(out.edit_plans or []),
+                    "edit_plan_count": 0,
                 },
                 "isError": False,
                 "warnings": warnings,
@@ -4068,7 +4237,7 @@ def agent_idea_script(
             session_id=active_session_id,
             event_type="ARTIFACT_CREATED",
             payload={
-                "edit_plan_ids": edit_plan_ids,
+                "edit_plan_ids": [],
                 "bundle_dir": None,
             },
         )
@@ -4078,7 +4247,7 @@ def agent_idea_script(
             session_id=active_session_id,
             event_type="ASSISTANT_MESSAGE",
             payload={
-                "text": f"Generated {len(out.topics or [])} topics and {len(out.edit_plans or [])} edit plans for {req.product}.",
+                "text": f"Generated {len(out.topics or [])} topics for {req.product}.",
                 "product": req.product,
             },
         )
@@ -4089,7 +4258,7 @@ def agent_idea_script(
                 session_id=active_session_id,
                 patch={
                     "last_product": req.product,
-                    "last_edit_plan_ids": edit_plan_ids[:10],
+                    "last_edit_plan_ids": [],
                     "prompt_version": out.prompt_version,
                     "policy_version": out.policy_version,
                     "config_hash": out.config_hash,
@@ -4213,18 +4382,12 @@ def agent_idea_script(
         )
         if "idea_script_llm_timeout" in str(e):
             raise HTTPException(status_code=504, detail=_IDEA_SCRIPT_LLM_TIMEOUT_MESSAGE)
+        if "idea_script_skill_" in str(e):
+            raise HTTPException(
+                status_code=503,
+                detail="脚本生成当前已改为必须依赖 china-growth-ops-skill 和可用模型，请检查 skill 是否加载以及 Ollama Gemma4 是否可用。",
+            )
         raise HTTPException(status_code=500, detail=str(e))
-
-
-class IdeaScriptExportFfmpegRequest(BaseModel):
-    plan_id: Optional[str] = Field(default=None, description="优先使用已缓存的 plan_id")
-    plan: Optional[EditPlan] = Field(default=None, description="未命中 plan_id 时可直接传 EditPlan")
-    out_dir: str = Field(default="./exports/ffmpeg")
-    w: int = Field(default=720, ge=64)
-    h: int = Field(default=1280, ge=64)
-    fps: int = Field(default=30, ge=1, le=120)
-
-
 class SessionCreateRequest(BaseModel):
     session_id: Optional[str] = Field(default=None)
 
@@ -4256,302 +4419,6 @@ class QualityHarvestEvalCaseRequest(BaseModel):
     session_id: str
     reason: Optional[str] = Field(default=None)
     include_trajectory: Optional[bool] = Field(default=True)
-
-
-@router.post("/api/agent/idea_script/export_ffmpeg", response_model=Dict[str, Any])
-def agent_idea_script_export_ffmpeg(
-    req: IdeaScriptExportFfmpegRequest,
-    request: Request,
-    response: Response,
-    current_user=Depends(_get_current_user_optional),
-) -> Dict[str, Any]:
-    req_id = getattr(request.state, "req_id", "noid")
-    t0 = time.time()
-    tenant_id, user_id = _resolve_agent_actor(request, current_user)
-    active_session_id = ""
-    resolved_tool_version = EXPORT_FFMPEG_TOOL_VERSION
-    resolved_tool_hash = EXPORT_FFMPEG_TOOL_HASH
-    resolved_mcp_server: Optional[str] = None
-    try:
-        mcp_use_registry = _as_bool(os.getenv("BANANAFLOW_MCP_USE_REGISTRY"), default=False)
-        agent_intent = (request.headers.get("X-Agent-Intent") or "").strip()
-        agent_product = (request.headers.get("X-Agent-Product") or "").strip() or str(getattr(req.plan, "product", "") or "").strip()
-        requested_session_id = (request.headers.get("X-Agent-Session-Id") or "").strip() or None
-        active_session_id, tenant_id, user_id, _ = _resolve_agent_session(
-            request=request,
-            response=response,
-            current_user=current_user,
-            requested_session_id=requested_session_id,
-        )
-        if agent_intent or agent_product or active_session_id:
-            sys_logger.info(
-                json.dumps(
-                    {
-                        "event": "idea_script_export_ffmpeg_headers",
-                        "req_id": req_id,
-                        "x_agent_intent": agent_intent,
-                        "x_agent_product": agent_product,
-                        "x_agent_session_id": active_session_id,
-                    },
-                    ensure_ascii=False,
-                )
-            )
-        _append_session_event_audit(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=active_session_id,
-            event_type="INTENT_ROUTING",
-            payload={
-                "intent": agent_intent or "idea_script.export_ffmpeg",
-                "product": agent_product,
-                "reason": ("x_agent_intent_header" if agent_intent else "agent_idea_script_export_default"),
-                "backend_call": EXPORT_FFMPEG_TOOL_NAME,
-                "request_path": str(request.url.path),
-            },
-        )
-
-        plan_data: Optional[Dict[str, Any]] = None
-        if (req.plan_id or "").strip():
-            plan_data = _get_cached_edit_plan(req.plan_id or "")
-            if plan_data is None:
-                raise HTTPException(status_code=404, detail=f"plan_id not found: {req.plan_id}")
-        elif req.plan is not None:
-            plan_data = req.plan.model_dump(mode="json")
-        else:
-            raise HTTPException(status_code=400, detail="plan_id or plan is required")
-        plan_id = str(req.plan_id or (plan_data or {}).get("plan_id") or "").strip()
-        _append_session_event_audit(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=active_session_id,
-            event_type="USER_MESSAGE",
-            payload={
-                "text": (f"export plan {plan_id}" if plan_id else "export ffmpeg bundle"),
-                "product": agent_product,
-            },
-        )
-
-        if mcp_use_registry:
-            info = get_global_registry().get_tool_info(EXPORT_FFMPEG_TOOL_NAME) or {}
-            resolved_tool_version = str(info.get("tool_version") or resolved_tool_version)
-            resolved_tool_hash = str(info.get("tool_hash") or resolved_tool_hash)
-            resolved_mcp_server = str(info.get("server_name") or "").strip() or None
-
-        with _span(
-            "idea_script.export_ffmpeg",
-            {
-                "mcp": True,
-                "mcp_registry": mcp_use_registry,
-                "mcp_server": resolved_mcp_server,
-                "tool_version": resolved_tool_version,
-                "tool_hash": resolved_tool_hash,
-                "plan_id": plan_id,
-                "out_dir": req.out_dir,
-                "resolution": f"{req.w}x{req.h}",
-                "fps": req.fps,
-                "session_id": active_session_id,
-            },
-        ) as span:
-            tool_args = {
-                "plan_id": plan_id,
-                "plan": plan_data,
-                "out_dir": req.out_dir,
-                "resolution": {"w": req.w, "h": req.h},
-                "fps": req.fps,
-            }
-            _append_session_event_audit(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                session_id=active_session_id,
-                event_type="TOOL_CALL",
-                payload={
-                    "tool_name": EXPORT_FFMPEG_TOOL_NAME,
-                    "args_hash": _safe_json_hash(
-                        {
-                            "plan_id": tool_args.get("plan_id"),
-                            "out_dir": tool_args.get("out_dir"),
-                            "resolution": tool_args.get("resolution"),
-                            "fps": tool_args.get("fps"),
-                            "plan_track_count": len(list((plan_data or {}).get("tracks") or [])),
-                        }
-                    ),
-                    "mcp_registry": mcp_use_registry,
-                    "mcp_server": resolved_mcp_server,
-                    "tool_version": resolved_tool_version,
-                    "tool_hash": resolved_tool_hash,
-                },
-            )
-            if mcp_use_registry:
-                registry = get_global_registry()
-                result = registry.call_tool(EXPORT_FFMPEG_TOOL_NAME, tool_args)
-                meta = registry.get_last_call_meta()
-                resolved_tool_version = str(meta.get("tool_version") or resolved_tool_version)
-                resolved_tool_hash = str(meta.get("tool_hash") or resolved_tool_hash)
-                resolved_mcp_server = str(meta.get("server_name") or resolved_mcp_server or "").strip() or None
-            else:
-                with MCPStdioClient() as mcp_client:
-                    result = mcp_client.call_export_ffmpeg_render_bundle(tool_args)
-            try:
-                span.set_attribute("missing_primary_asset_count", int(result.get("missing_primary_asset_count") or 0))
-                span.set_attribute("tool_version", resolved_tool_version)
-                span.set_attribute("tool_hash", resolved_tool_hash)
-                span.set_attribute("mcp_server", resolved_mcp_server)
-            except Exception:
-                pass
-        _append_session_event_audit(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=active_session_id,
-            event_type="TOOL_RESULT",
-            payload={
-                "tool_name": EXPORT_FFMPEG_TOOL_NAME,
-                "result_ref": {
-                    "bundle_dir": result.get("bundle_dir"),
-                    "clip_count": result.get("clip_count"),
-                    "files_count": len(list(result.get("files") or [])),
-                },
-                "isError": False,
-                "warnings": [str(result.get("warning"))] if result.get("warning") else [],
-                "mcp_server": resolved_mcp_server,
-                "tool_version": resolved_tool_version,
-                "tool_hash": resolved_tool_hash,
-            },
-        )
-
-        files = list(result.get("files") or [])
-        payload = {
-            "plan_id": result.get("plan_id"),
-            "bundle_dir": result.get("bundle_dir"),
-            "render_script_path": result.get("render_script_path"),
-            "files": files,
-            "clip_count": result.get("clip_count"),
-            "missing_primary_asset_count": result.get("missing_primary_asset_count"),
-            "warning": result.get("warning"),
-            "warning_reason": result.get("warning_reason"),
-            "resolution": result.get("resolution"),
-            "fps": result.get("fps"),
-        }
-        _append_session_event_audit(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=active_session_id,
-            event_type="ARTIFACT_CREATED",
-            payload={
-                "edit_plan_ids": [str(payload.get("plan_id") or "")] if str(payload.get("plan_id") or "").strip() else [],
-                "bundle_dir": payload.get("bundle_dir"),
-            },
-        )
-        _append_session_event_audit(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=active_session_id,
-            event_type="ASSISTANT_MESSAGE",
-            payload={
-                "text": (
-                    f"Export ready for plan {payload.get('plan_id') or '-'} "
-                    f"with {int(payload.get('clip_count') or 0)} clips at {payload.get('bundle_dir') or '-'}."
-                ),
-                "product": agent_product,
-            },
-        )
-        try:
-            update_session_state(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                session_id=active_session_id,
-                patch={
-                    "last_product": agent_product,
-                    "last_bundle_dir": payload.get("bundle_dir"),
-                    "last_bundle_dirs": [payload.get("bundle_dir")] if payload.get("bundle_dir") else [],
-                    "last_export_plan_id": payload.get("plan_id"),
-                },
-            )
-        except Exception as e:
-            sys_logger.warning(f"session state update skipped: session_id={active_session_id} err={e}")
-        prompt_logger.log(
-            req_id,
-            "agent_idea_script_export_ffmpeg",
-            req.model_dump(mode="json"),
-            "",
-            {"pipeline": "idea_script_export_ffmpeg"},
-            payload,
-            time.time() - t0,
-            user_id=user_id,
-            inputs_full=req.model_dump(mode="json"),
-            output_full=payload,
-        )
-        return payload
-    except SessionAccessDeniedError:
-        raise HTTPException(status_code=403, detail="Session access denied")
-    except SessionNotFoundError:
-        raise HTTPException(status_code=404, detail="Session not found")
-    except HTTPException:
-        raise
-    except (MCPClientError, MCPRegistryError, MCPToolInvocationError) as e:
-        if active_session_id and tenant_id and user_id:
-            _append_session_event_audit(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                session_id=active_session_id,
-                event_type="TOOL_RESULT",
-                payload={
-                    "tool_name": EXPORT_FFMPEG_TOOL_NAME,
-                    "result_ref": {"bundle_dir": None, "clip_count": 0, "files_count": 0},
-                    "isError": True,
-                    "warnings": [str(e)],
-                    "mcp_server": resolved_mcp_server,
-                    "tool_version": resolved_tool_version,
-                    "tool_hash": resolved_tool_hash,
-                },
-            )
-        sys_logger.error(f"[{req_id}] /api/agent/idea_script/export_ffmpeg MCP error: {e}")
-        prompt_logger.log(
-            req_id,
-            "agent_idea_script_export_ffmpeg",
-            req.model_dump(mode="json"),
-            "",
-            {"pipeline": "idea_script_export_ffmpeg", "mcp": True},
-            {"ok": False},
-            time.time() - t0,
-            user_id=user_id,
-            inputs_full=req.model_dump(mode="json"),
-            error=str(e),
-        )
-        raise HTTPException(
-            status_code=500,
-            detail=f"MCP export tool failed. Recovery: verify plan payload and retry. ({e})",
-        )
-    except Exception as e:
-        if active_session_id and tenant_id and user_id:
-            _append_session_event_audit(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                session_id=active_session_id,
-                event_type="TOOL_RESULT",
-                payload={
-                    "tool_name": EXPORT_FFMPEG_TOOL_NAME,
-                    "result_ref": {"bundle_dir": None, "clip_count": 0, "files_count": 0},
-                    "isError": True,
-                    "warnings": [str(e)],
-                    "mcp_server": resolved_mcp_server,
-                    "tool_version": resolved_tool_version,
-                    "tool_hash": resolved_tool_hash,
-                },
-            )
-        sys_logger.error(f"[{req_id}] /api/agent/idea_script/export_ffmpeg error: {e}")
-        prompt_logger.log(
-            req_id,
-            "agent_idea_script_export_ffmpeg",
-            req.model_dump(mode="json"),
-            "",
-            {"pipeline": "idea_script_export_ffmpeg"},
-            {"ok": False},
-            time.time() - t0,
-            user_id=user_id,
-            inputs_full=req.model_dump(mode="json"),
-            error=str(e),
-        )
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/api/sessions/create", response_model=Dict[str, Any])

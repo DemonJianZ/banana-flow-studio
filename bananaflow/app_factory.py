@@ -31,11 +31,11 @@ def _split_csv(value: str | None) -> list[str]:
 
 
 def _resolve_cors_origins() -> list[str]:
-    from_env = _split_csv(os.getenv("BANANAFLOW_CORS_ALLOW_ORIGINS"))
-    if from_env:
-        return from_env
-    return [
+    default_origins = [
+        "http://meta.dayukeji-inc.cn",
+        "https://meta.dayukeji-inc.cn",
         "http://test.dayukeji-inc.cn",
+        "https://test.dayukeji-inc.cn",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:5174",
@@ -43,6 +43,14 @@ def _resolve_cors_origins() -> list[str]:
         "http://192.168.20.30:5173",
         "http://192.168.20.30:5174",
     ]
+    from_env = _split_csv(os.getenv("BANANAFLOW_CORS_ALLOW_ORIGINS"))
+    if not from_env:
+        return default_origins
+    merged: list[str] = []
+    for origin in [*from_env, *default_origins]:
+        if origin not in merged:
+            merged.append(origin)
+    return merged
 
 
 def create_app() -> FastAPI:

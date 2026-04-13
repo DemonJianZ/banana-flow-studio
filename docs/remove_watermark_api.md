@@ -7,6 +7,7 @@
 - 路径: `/api/remove_watermark`
 - Content-Type: `application/json`
 - 鉴权: 后端为可选用户态（`_get_current_user_optional`），是否强制鉴权取决于你们部署网关策略
+- 当前后端工作流: `bananaflow/workflows/image_qwen_image_edit_2509.json`
 
 示例完整地址:
 
@@ -117,4 +118,3 @@ async function removeWatermark(apiBase, imageDataUrl) {
 - 调用方传入的是合法 `data:image/...;base64,...`。
 - 网关/反向代理未拦截大体积 JSON 请求。
 - 若浏览器直调，已配置 CORS 白名单。
-

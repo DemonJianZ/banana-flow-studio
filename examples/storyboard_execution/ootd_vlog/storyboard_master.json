@@ -1,0 +1,68 @@
+{
+  "project_title": "逛街vlog：一站式街拍OOTD搭配手册",
+  "stage_id": "final_delivery",
+  "current_step": "最终分镜总稿",
+  "summary": "完成 OOTD 街拍 vlog 的主分镜交付。",
+  "final_storyboard_master": "主角：Luna，都市轻熟穿搭博主。\nHost: Luna\nRole: OOTD vlog 主持人\nIdentity: 25 岁都市女生，轻松、自信、会讲搭配逻辑。\nLook A：奶油白针织短上衣 + 高腰直筒牛仔裤 + 金属耳圈 + 黑色腋下包\nLook B：灰色西装外套 + 黑色吊带 + 百褶短裙 + 长靴 + 银色项链\nLocation A：街角咖啡店外摆、玻璃橱窗、暖色午后阳光\nLocation B：买手店门口、混凝土墙面、窄巷路牌、城市人流\n全片按照“出门搭配建立 -> 街头细节拆解 -> hero look 展示 -> 收尾 CTA”推进，重点保护换装 reveal 和 hero look 定格。",
+  "state": {
+    "project_title": "逛街vlog：一站式街拍OOTD搭配手册",
+    "source": {
+      "product": "OOTD vlog",
+      "source_title": "一站式街拍OOTD搭配手册",
+      "selected_angle": "逛街 vlog / OOTD",
+      "primary_platform": "抖音",
+      "secondary_platform": "小红书",
+      "script": "标题：逛街vlog：一站式街拍OOTD搭配手册\n开头：今天带你用一条街拍 vlog，把出门搭配一次讲清。\n正文：从出门 look 建立，到街头细节，再到 hero look 定格。"
+    },
+    "stages": {
+      "script_read": {
+        "stage_id": "script_read",
+        "stage_title": "脚本解读",
+        "summary": "主角是都市女生 Luna，目标是把逛街 vlog 做成可执行的 OOTD 搭配教学。",
+        "content": "故事驱动力是“把搭配逻辑说清楚并拍得好看”。观众要先被主角状态吸引，再被单品细节和换装层次说服，最后被 hero look 记住。"
+      },
+      "sequence_map": {
+        "stage_id": "sequence_map",
+        "stage_title": "戏剧地图",
+        "summary": "完成 sequence 拆分。",
+        "content": "1. 开场建立：Luna 出门前快速建立今天的城市逛街主题与第一套 look。\n2. 细节拆解：通过街角停顿、走路、转身，把上装、下装、配饰关系说清。\n3. 换装转折：从咖啡店外切到买手店门口，完成第二套 look reveal。\n4. hero look 收尾：在城市街角完成大定格、微笑回头和 CTA。"
+      },
+      "camera_strategy": {
+        "stage_id": "camera_strategy",
+        "stage_title": "镜头语言策略",
+        "summary": "镜头语言以中近景、跟拍和服装细节特写为主。",
+        "content": "暖调自然光与高饱和城市反射共同构成视觉基底。前半段用平稳跟拍与中景建立人物状态，中段用特写切到面料、配饰与鞋履，高潮段用轻推镜头和 hero close-up 保护穿搭 reveal。"
+      },
+      "scene_shot_flow": {
+        "stage_id": "scene_shot_flow",
+        "stage_title": "场景戏核与 Shot Flow",
+        "summary": "完成逐场景 shot flow。",
+        "content": "【场景一：出门建立】(0-6s)\n核心：先建立人物状态与 Look A 的整体轮廓。\nShot 1 (WS): Luna 走出公寓楼门口，晨间城市街道展开，Look A 全身建立。\nShot 2 (MS): Luna 对镜整理针织上衣下摆和牛仔裤腰线，确认比例。\nShot 3 (CU): 金属耳圈与黑色腋下包细节切入。锚点：Look A 配饰。\n\n【场景二：街角细节拆解】(6-14s)\n核心：把搭配逻辑拆成可见的细节。\nShot 4 (MS): Luna 走到咖啡店外摆，侧身回头展示整体轮廓。\nShot 5 (CU): 针织面料、牛仔裤褶线、包袋肩带连续特写。锚点：Look A 面料。\nShot 6 (OTS): 手指指向腰线和裤型，讲解为什么显比例。\n\n【场景三：换装转折】(14-22s)\n核心：完成 Look B reveal，并让观众感知风格切换。\nShot 7 (CU): 关门转身的 whip pan 作为换装转场。\nShot 8 (MS): Luna 出现在买手店门口，灰色西装外套与百褶裙完整展示。\nShot 9 (CU): 长靴步伐、银色项链和外套肩线细节。锚点：Look B 配饰。\n\n【场景四：hero look 收尾】(22-30s)\n核心：锁住 hero look 和记忆点，完成 CTA。\nShot 10 (WS): 窄巷街口定格，Luna 从人流中走向镜头。\nShot 11 (CU): 回头微笑，西装外套摆动，hero close-up。锚点：hero look。\nShot 12 (MS): Luna 面向镜头给出总结与 CTA。"
+      },
+      "rough_thumbnail_sheet": {
+        "stage_id": "rough_thumbnail_sheet",
+        "stage_title": "粗分镜任务单",
+        "summary": "共 12 个关键镜头，分 4 个场景。",
+        "content": "重点先画 Look A 建立、面料细节、换装 whip pan、Look B hero close-up 和结尾 CTA。"
+      },
+      "animatic_review": {
+        "stage_id": "animatic_review",
+        "stage_title": "Animatic 复核",
+        "summary": "节奏为 稳定建立 -> 信息加密 -> 快速换装 -> hero 停顿。",
+        "content": "换装 whip pan 和 Shot 11 hero close-up 需要留出呼吸。音乐节拍在 Shot 7 转场和 Shot 11 hero 定格处做明显抬升。"
+      },
+      "structural_revision": {
+        "stage_id": "structural_revision",
+        "stage_title": "结构修订",
+        "summary": "修订重点是保护换装 reveal 和 hero look。",
+        "content": "不要在换装前过早泄露 Look B。Look A 负责建立可信搭配逻辑，Look B 负责情绪抬升与记忆点。禁止在高潮镜头替换主角脸型、发型和服装 hero 单品。"
+      },
+      "final_delivery": {
+        "stage_id": "final_delivery",
+        "stage_title": "最终分镜总稿",
+        "summary": "本分镜已锁定人物、look hierarchy、城市街拍空间与高潮保护镜头。",
+        "content": "按四场结构执行：出门建立、细节拆解、换装转折、hero 收尾。Look hierarchy 以 Look A -> Look B 递进；climax protection 锁定 Shot 7/8/11。"
+      }
+    }
+  }
+}

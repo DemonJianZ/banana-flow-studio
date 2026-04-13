@@ -19,6 +19,7 @@ import { useAuth } from "../auth/AuthProvider";
 import AiChatAnchorStatusCard from "../components/AiChatAnchorStatusCard";
 import { resolveMemberAuthorizationInfo, submitAIChatImageTask, viewAIChatModelParams, viewAIChatModels } from "../api/aiChat";
 import { API_BASE, AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2 } from "../config";
+import { downloadMedia } from "../lib/downloadMedia";
 import { findAIChatModelIdByKeywords } from "../lib/aiChatModelResolver";
 
 const FUNCTION_META = {
@@ -80,7 +81,7 @@ const MAX_CONCURRENT = 2;
 const AI_CHAT_WORKFLOW_MODULE_ENUM = "3";
 const AI_CHAT_IMAGE_PART_ENUM = "203";
 const AI_CHAT_VIDEO_PART_ENUM = "204";
-const AI_CHAT_VIDEO_HD_PART_ENUM = "6";
+const AI_CHAT_VIDEO_HD_PART_ENUM = "215";
 const MOTION_FAILURE_MESSAGE = "当前网络波动或请求超时，请稍后重试。";
 const VIDEO_HD_TEMPLATE_ENUM_2K = "1";
 const VIDEO_HD_TEMPLATE_ENUM_4K = "2";
@@ -1146,10 +1147,7 @@ const PipelineBatchVideo = () => {
   const downloadAllVideos = useCallback(() => {
     results.forEach((item) => {
       if (!item.videoUrl) return;
-      const link = document.createElement("a");
-      link.href = item.videoUrl;
-      link.download = `${functionType}-motion-${item.id}.mp4`;
-      link.click();
+      void downloadMedia(item.videoUrl, `${functionType}-motion-${item.id}.mp4`);
     });
   }, [functionType, results]);
 
@@ -2152,9 +2150,15 @@ const PipelineBatchVideo = () => {
                                 }`}
                               >
                                 {item.upscaleStatus === "running" ? (
-                                  <Loader2 className="w-3 h-3 inline-block animate-spin" />
+                                  <>
+                                    <Loader2 className="w-3 h-3 inline-block animate-spin mr-1" />
+                                    超清中
+                                  </>
                                 ) : (
-                                  <TrendingUp className="w-3 h-3 inline-block" />
+                                  <>
+                                    <TrendingUp className="w-3 h-3 inline-block mr-1" />
+                                    视频超清
+                                  </>
                                 )}
                               </button>
                             </div>
@@ -2162,10 +2166,7 @@ const PipelineBatchVideo = () => {
                           {item.videoUrl && (
                             <button
                               onClick={() => {
-                                const link = document.createElement("a");
-                                link.href = item.videoUrl;
-                                link.download = `${functionType}-motion-${item.id}.mp4`;
-                                link.click();
+                                void downloadMedia(item.videoUrl, `${functionType}-motion-${item.id}.mp4`);
                               }}
                               className="text-[11px] px-2 py-0.5 rounded border border-slate-700 text-slate-400 hover:text-white hover:border-purple-500 transition-colors"
                             >
@@ -2204,10 +2205,7 @@ const PipelineBatchVideo = () => {
                             {item.upscaledVideoUrl && (
                               <button
                                 onClick={() => {
-                                  const link = document.createElement("a");
-                                  link.href = item.upscaledVideoUrl;
-                                  link.download = `${functionType}-motion-hd-${item.id}.mp4`;
-                                  link.click();
+                                  void downloadMedia(item.upscaledVideoUrl, `${functionType}-motion-hd-${item.id}.mp4`);
                                 }}
                                 className="text-[11px] px-2 py-0.5 rounded border border-slate-700 text-slate-400 hover:text-white hover:border-purple-500 transition-colors"
                               >

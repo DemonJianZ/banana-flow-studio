@@ -103,22 +103,22 @@ function PreferenceFieldCard({
     <div
       className={`rounded-lg border p-3 space-y-3 transition-colors ${
         focused
-          ? "border-cyan-500 bg-cyan-950/15"
+          ? "border-cyan-300 bg-cyan-50"
           : highlighted
-          ? "border-indigo-700/70 bg-indigo-950/10"
-          : "border-slate-700 bg-slate-900/80"
+          ? "border-indigo-200 bg-indigo-50"
+          : "border-slate-200 bg-white"
       }`}
     >
       <div className="flex items-start justify-between gap-2">
         <div>
-          <div className="text-sm text-slate-100 font-semibold">{field.label}</div>
+          <div className="text-sm text-slate-800 font-semibold">{field.label}</div>
           <div className="text-[11px] text-slate-500 mt-0.5">key: {field.key}</div>
         </div>
         <span
           className={`text-[10px] px-2 py-0.5 rounded-full border ${
             isActive
-              ? "text-emerald-200 border-emerald-700/70 bg-emerald-900/20"
-              : "text-slate-300 border-slate-700 bg-slate-800"
+              ? "text-emerald-700 border-emerald-200 bg-emerald-50"
+              : "text-slate-600 border-slate-200 bg-slate-100"
           }`}
         >
           {isActive ? "生效中" : "已停用"}
@@ -132,7 +132,7 @@ function PreferenceFieldCard({
             {currentValues.map((item) => (
               <span
                 key={`${field.key}_current_${item}`}
-                className="px-2 py-0.5 rounded-full text-[11px] border border-cyan-600/70 bg-cyan-500/10 text-cyan-100"
+                className="px-2 py-0.5 rounded-full text-[11px] border border-cyan-200 bg-cyan-50 text-cyan-700"
               >
                 {item}
               </span>
@@ -170,8 +170,8 @@ function PreferenceFieldCard({
                 }}
                 className={`px-2.5 py-1 rounded-full text-[11px] border transition-colors ${
                   selected
-                    ? "border-cyan-500 bg-cyan-500/20 text-cyan-100"
-                    : "border-slate-700 bg-slate-950 text-slate-300 hover:border-slate-500"
+                    ? "border-cyan-300 bg-cyan-50 text-cyan-700"
+                    : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
                 } ${pending || loading ? "opacity-60 cursor-not-allowed" : ""}`}
               >
                 {option}
@@ -182,7 +182,7 @@ function PreferenceFieldCard({
       </div>
 
       <div className="grid grid-cols-2 gap-2">
-        <label className="text-[11px] text-slate-400 space-y-1">
+        <label className="text-[11px] text-slate-500 space-y-1">
           <span>置信度 (0~1)</span>
           <input
             type="number"
@@ -193,10 +193,10 @@ function PreferenceFieldCard({
             onChange={(e) => onConfidenceChange(e.target.value)}
             disabled={pending || loading}
             placeholder="0.90"
-            className="w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-[11px] text-slate-200 outline-none focus:border-cyan-500"
+            className="w-full rounded border border-slate-200 bg-white px-2 py-1.5 text-[11px] text-slate-700 outline-none focus:border-cyan-300"
           />
         </label>
-        <label className="text-[11px] text-slate-400 space-y-1">
+        <label className="text-[11px] text-slate-500 space-y-1">
           <span>TTL 天数 (可选)</span>
           <input
             type="number"
@@ -206,12 +206,12 @@ function PreferenceFieldCard({
             onChange={(e) => onTtlChange(e.target.value)}
             disabled={pending || loading}
             placeholder="7"
-            className="w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-[11px] text-slate-200 outline-none focus:border-cyan-500"
+            className="w-full rounded border border-slate-200 bg-white px-2 py-1.5 text-[11px] text-slate-700 outline-none focus:border-cyan-300"
           />
         </label>
       </div>
 
-      <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-[11px] text-slate-400">
+      <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-[11px] text-slate-500">
         <div>confidence: {record?.confidence ?? "-"}</div>
         <div>update_count: {record?.update_count ?? "-"}</div>
         <div>last_confirmed_at: {record?.last_confirmed_at || "-"}</div>
@@ -219,14 +219,14 @@ function PreferenceFieldCard({
       </div>
 
       {historyItems.length > 0 && (
-        <details className="rounded border border-slate-700 bg-slate-950/70 p-2">
-          <summary className="text-[11px] text-slate-300 cursor-pointer">历史记录 ({historyItems.length})</summary>
+        <details className="rounded border border-slate-200 bg-slate-50 p-2">
+          <summary className="text-[11px] text-slate-600 cursor-pointer">历史记录 ({historyItems.length})</summary>
           <div className="mt-1.5 space-y-1.5">
             {historyItems
               .slice(-10)
               .reverse()
               .map((entry, idx) => (
-                <div key={`${field.key}_history_${idx}`} className="text-[10px] text-slate-400 border-b border-slate-800 pb-1">
+                <div key={`${field.key}_history_${idx}`} className="text-[10px] text-slate-500 border-b border-slate-200 pb-1">
                   <div>{entry?.ts || "-"}</div>
                   <div>
                     {displayValue(entry?.old_value)} → {displayValue(entry?.new_value)} ({entry?.reason || "-"})
@@ -244,8 +244,8 @@ function PreferenceFieldCard({
           disabled={pending || loading}
           className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs border ${
             pending || loading
-              ? "bg-slate-800 text-slate-500 border-slate-700 cursor-not-allowed"
-              : "bg-cyan-600/20 border-cyan-500/60 text-cyan-100 hover:bg-cyan-600/30"
+              ? "bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed"
+              : "bg-cyan-50 border-cyan-200 text-cyan-700 hover:bg-cyan-100"
           }`}
         >
           {pending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
@@ -257,8 +257,8 @@ function PreferenceFieldCard({
           disabled={pending || loading}
           className={`px-3 py-1.5 rounded text-xs border ${
             pending || loading
-              ? "bg-slate-800 text-slate-500 border-slate-700 cursor-not-allowed"
-              : "bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800"
+              ? "bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed"
+              : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50"
           }`}
         >
           停用
@@ -657,9 +657,9 @@ export default function PreferencesPanel({
   return (
     <div className="fixed inset-0 z-[120] pointer-events-none">
       <aside
-        className="absolute right-0 top-0 h-full w-[min(94vw,560px)] border-l border-slate-700 bg-slate-900 text-white shadow-2xl flex flex-col pointer-events-auto"
+        className="absolute right-0 top-0 h-full w-[min(94vw,560px)] border-l border-slate-200 bg-white text-slate-800 shadow-[0_24px_56px_rgba(15,23,42,0.12)] flex flex-col pointer-events-auto"
       >
-        <div className="h-14 px-4 border-b border-slate-800 flex items-center justify-between">
+        <div className="h-14 px-4 border-b border-slate-200 flex items-center justify-between">
           <div>
             <div className="text-sm font-semibold">偏好设置</div>
             <div className="text-[10px] text-slate-500 mt-0.5">当前偏好将影响脚本/分镜/素材匹配的默认风格</div>
@@ -667,19 +667,19 @@ export default function PreferencesPanel({
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded border border-slate-700 text-slate-300 hover:bg-slate-800"
+            className="p-1.5 rounded border border-slate-200 text-slate-500 hover:bg-slate-100"
             aria-label="关闭偏好设置"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="px-4 py-2 border-b border-slate-800 flex items-center justify-between gap-2">
-          <div className="text-xs text-slate-200">当前设置偏好：{activePreferenceCount}</div>
+        <div className="px-4 py-2 border-b border-slate-200 flex items-center justify-between gap-2">
+          <div className="text-xs text-slate-700">当前设置偏好：{activePreferenceCount}</div>
           <div className="text-[10px] text-slate-500">常用：平台 / 语气</div>
         </div>
 
-        <div className="px-4 py-3 border-b border-slate-800 space-y-2">
+        <div className="px-4 py-3 border-b border-slate-200 space-y-2">
           <div className="flex items-center gap-1.5 flex-wrap">
             <button
               type="button"
@@ -690,7 +690,7 @@ export default function PreferencesPanel({
                 setFeedback({ type: "success", message });
                 notifyApp({ type: "info", message });
               }}
-              className="px-2.5 py-1 rounded border border-cyan-700/70 bg-cyan-500/10 text-cyan-100 text-xs hover:bg-cyan-500/20"
+              className="px-2.5 py-1 rounded border border-cyan-200 bg-cyan-50 text-cyan-700 text-xs hover:bg-cyan-100"
             >
               快速示例
             </button>
@@ -698,7 +698,7 @@ export default function PreferencesPanel({
               type="button"
               onClick={() => setShowQuickTemplates((prev) => !prev)}
               disabled={loading || bulkPending}
-              className="px-2.5 py-1 rounded border border-indigo-700/70 bg-indigo-500/10 text-indigo-100 text-xs hover:bg-indigo-500/20 disabled:opacity-50"
+              className="px-2.5 py-1 rounded border border-indigo-200 bg-indigo-50 text-indigo-700 text-xs hover:bg-indigo-100 disabled:opacity-50"
             >
               <Sparkles className="w-3 h-3 inline mr-1" />
               快速设置
@@ -707,7 +707,7 @@ export default function PreferencesPanel({
               type="button"
               onClick={handleResetDefaults}
               disabled={loading || bulkPending}
-              className="px-2.5 py-1 rounded border border-slate-700 bg-slate-950 text-slate-200 text-xs hover:bg-slate-800 disabled:opacity-50"
+              className="px-2.5 py-1 rounded border border-slate-200 bg-white text-slate-700 text-xs hover:bg-slate-50 disabled:opacity-50"
             >
               重置默认
             </button>
@@ -715,7 +715,7 @@ export default function PreferencesPanel({
               type="button"
               onClick={handleClearAll}
               disabled={loading || bulkPending}
-              className="px-2.5 py-1 rounded border border-red-700/70 bg-red-500/10 text-red-100 text-xs hover:bg-red-500/20 disabled:opacity-50"
+              className="px-2.5 py-1 rounded border border-rose-200 bg-rose-50 text-rose-700 text-xs hover:bg-rose-100 disabled:opacity-50"
             >
               <Trash2 className="w-3 h-3 inline mr-1" />
               清除所有偏好
@@ -723,16 +723,16 @@ export default function PreferencesPanel({
           </div>
 
           {showQuickTemplates && (
-            <div className="rounded border border-indigo-700/40 bg-indigo-950/20 p-2 space-y-1.5">
+            <div className="rounded border border-indigo-200 bg-indigo-50 p-2 space-y-1.5">
               {QUICK_TEMPLATES.map((template) => (
                 <button
                   key={template.id}
                   type="button"
                   disabled={loading || bulkPending}
                   onClick={() => void handleApplyTemplate(template)}
-                  className="w-full text-left px-2 py-1.5 rounded border border-slate-700 bg-slate-950/80 hover:bg-slate-900 disabled:opacity-50"
+                  className="w-full text-left px-2 py-1.5 rounded border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-50"
                 >
-                  <div className="text-[11px] text-indigo-100">{template.label}</div>
+                  <div className="text-[11px] text-indigo-700">{template.label}</div>
                   <div className="text-[10px] text-slate-400">{template.description}</div>
                 </button>
               ))}
@@ -740,8 +740,8 @@ export default function PreferencesPanel({
           )}
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            <div className="rounded border border-slate-700 bg-slate-950/70 p-2 space-y-1.5">
-              <div className="text-[11px] text-slate-300">常用快速选择 · 平台</div>
+            <div className="rounded border border-slate-200 bg-slate-50 p-2 space-y-1.5">
+              <div className="text-[11px] text-slate-600">常用快速选择 · 平台</div>
               <div className="flex flex-wrap gap-1">
                 {commonPlatformField?.options.map((option) => (
                   <button
@@ -753,8 +753,8 @@ export default function PreferencesPanel({
                     }}
                     className={`px-2 py-0.5 rounded-full text-[10px] border ${
                       String(draftByKey.platform || "") === option
-                        ? "border-cyan-500 bg-cyan-500/20 text-cyan-100"
-                        : "border-slate-700 text-slate-300"
+                        ? "border-cyan-300 bg-cyan-50 text-cyan-700"
+                        : "border-slate-200 text-slate-600"
                     }`}
                   >
                     {option}
@@ -765,14 +765,14 @@ export default function PreferencesPanel({
                 type="button"
                 onClick={() => void saveSinglePreference(commonPlatformField)}
                 disabled={loading || bulkPending || pendingKey === "platform"}
-                className="px-2 py-1 rounded border border-cyan-500/60 bg-cyan-600/15 text-cyan-100 text-[10px] disabled:opacity-50"
+                className="px-2 py-1 rounded border border-cyan-200 bg-cyan-50 text-cyan-700 text-[10px] disabled:opacity-50"
               >
                 保存平台
               </button>
             </div>
 
-            <div className="rounded border border-slate-700 bg-slate-950/70 p-2 space-y-1.5">
-              <div className="text-[11px] text-slate-300">常用快速选择 · 语气</div>
+            <div className="rounded border border-slate-200 bg-slate-50 p-2 space-y-1.5">
+              <div className="text-[11px] text-slate-600">常用快速选择 · 语气</div>
               <div className="flex flex-wrap gap-1">
                 {commonToneField?.options.map((option) => (
                   <button
@@ -790,8 +790,8 @@ export default function PreferencesPanel({
                     }}
                     className={`px-2 py-0.5 rounded-full text-[10px] border ${
                       asArray(draftByKey.tone).includes(option)
-                        ? "border-cyan-500 bg-cyan-500/20 text-cyan-100"
-                        : "border-slate-700 text-slate-300"
+                        ? "border-cyan-300 bg-cyan-50 text-cyan-700"
+                        : "border-slate-200 text-slate-600"
                     }`}
                   >
                     {option}
@@ -802,28 +802,28 @@ export default function PreferencesPanel({
                 type="button"
                 onClick={() => void saveSinglePreference(commonToneField)}
                 disabled={loading || bulkPending || pendingKey === "tone"}
-                className="px-2 py-1 rounded border border-cyan-500/60 bg-cyan-600/15 text-cyan-100 text-[10px] disabled:opacity-50"
+                className="px-2 py-1 rounded border border-cyan-200 bg-cyan-50 text-cyan-700 text-[10px] disabled:opacity-50"
               >
                 保存语气
               </button>
             </div>
           </div>
 
-          <div className="rounded border border-slate-700 bg-slate-950/60 p-2 space-y-2">
-            <div className="text-[11px] text-slate-300">自定义档案</div>
+          <div className="rounded border border-slate-200 bg-slate-50 p-2 space-y-2">
+            <div className="text-[11px] text-slate-600">自定义档案</div>
             <div className="flex items-center gap-1.5">
               <input
                 type="text"
                 value={profileName}
                 onChange={(e) => setProfileName(e.target.value)}
                 placeholder="档案名（可选）"
-                className="flex-1 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] text-slate-200 outline-none focus:border-cyan-500"
+                className="flex-1 rounded border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700 outline-none focus:border-cyan-300"
               />
               <button
                 type="button"
                 onClick={handleSaveProfile}
                 disabled={loading || bulkPending}
-                className="px-2 py-1 rounded border border-slate-700 text-[11px] text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+                className="px-2 py-1 rounded border border-slate-200 text-[11px] text-slate-700 hover:bg-slate-100 disabled:opacity-50"
               >
                 保存档案
               </button>
@@ -832,7 +832,7 @@ export default function PreferencesPanel({
               <select
                 value={selectedProfileId}
                 onChange={(e) => setSelectedProfileId(e.target.value)}
-                className="flex-1 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] text-slate-200 outline-none"
+                className="flex-1 rounded border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700 outline-none"
               >
                 <option value="">选择档案</option>
                 {profiles.map((profile) => (
@@ -845,7 +845,7 @@ export default function PreferencesPanel({
                 type="button"
                 onClick={() => void handleApplyProfile()}
                 disabled={loading || bulkPending || !selectedProfileId}
-                className="px-2 py-1 rounded border border-cyan-500/60 bg-cyan-600/15 text-[11px] text-cyan-100 disabled:opacity-50"
+                className="px-2 py-1 rounded border border-cyan-200 bg-cyan-50 text-[11px] text-cyan-700 disabled:opacity-50"
               >
                 应用
               </button>
@@ -853,7 +853,7 @@ export default function PreferencesPanel({
                 type="button"
                 onClick={handleExportProfile}
                 disabled={loading || bulkPending}
-                className="px-2 py-1 rounded border border-slate-700 text-[11px] text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+                className="px-2 py-1 rounded border border-slate-200 text-[11px] text-slate-700 hover:bg-slate-100 disabled:opacity-50"
               >
                 <Download className="w-3 h-3 inline mr-1" />
                 导出
@@ -862,7 +862,7 @@ export default function PreferencesPanel({
                 type="button"
                 onClick={() => importRef.current?.click()}
                 disabled={loading || bulkPending || importingProfile}
-                className="px-2 py-1 rounded border border-slate-700 text-[11px] text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+                className="px-2 py-1 rounded border border-slate-200 text-[11px] text-slate-700 hover:bg-slate-100 disabled:opacity-50"
               >
                 <Upload className="w-3 h-3 inline mr-1" />
                 导入
@@ -884,8 +884,8 @@ export default function PreferencesPanel({
               disabled={expiring || loading || bulkPending}
               className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs ${
                 expiring || loading || bulkPending
-                  ? "bg-slate-800 text-slate-500 border-slate-700 cursor-not-allowed"
-                  : "bg-slate-950 text-slate-200 border-slate-700 hover:bg-slate-800"
+                  ? "bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed"
+                  : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
               }`}
             >
               {expiring ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
@@ -895,7 +895,7 @@ export default function PreferencesPanel({
               type="button"
               onClick={handleClearAll}
               disabled={loading || bulkPending}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs border-slate-700 bg-slate-950 text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs border-slate-200 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50"
             >
               <Eraser className="w-3.5 h-3.5" />
               清空生效项
@@ -904,7 +904,7 @@ export default function PreferencesPanel({
         </div>
 
         {contextUsage !== null && (
-          <div className="px-4 py-2 border-b border-slate-800 text-[11px] text-slate-300">
+          <div className="px-4 py-2 border-b border-slate-200 text-[11px] text-slate-600">
             偏好注入上下文：{contextUsage ? "已启用" : "未启用"}
           </div>
         )}
@@ -913,8 +913,8 @@ export default function PreferencesPanel({
           <div
             className={`mx-4 mt-3 rounded border px-3 py-2 text-xs ${
               feedback.type === "error"
-                ? "border-red-700/80 bg-red-900/20 text-red-200"
-                : "border-emerald-700/80 bg-emerald-900/20 text-emerald-100"
+                ? "border-rose-200 bg-rose-50 text-rose-700"
+                : "border-emerald-200 bg-emerald-50 text-emerald-700"
             }`}
           >
             {feedback.message}
