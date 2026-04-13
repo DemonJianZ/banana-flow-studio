@@ -5,7 +5,7 @@ from typing import Any, Iterable, Optional
 from pydantic import ValidationError
 
 from .inference import is_generic_persona
-from .prompts import GENERATION_ANGLES, SCRIPT_STRUCTURE_TAGS, build_reviewer_prompt
+from .prompts import GENERATION_TOPIC_COUNT, SCRIPT_STRUCTURE_TAGS, build_reviewer_prompt
 from .schemas import AudienceInferenceResult, IdeaScriptReviewResult, TopicItem
 
 
@@ -45,18 +45,18 @@ class IdeaScriptReviewerNode:
             failure_tags=failure_tags,
         )
 
-        if len(raw_topics) != 3:
+        if len(raw_topics) != GENERATION_TOPIC_COUNT:
             self._add_issue(blocking_issues, failure_tags, "topics_count_not_3", "topic_count_invalid")
 
-        angles = [t.angle for t in normalized_topics]
+        angles = [(t.angle or "").strip() for t in normalized_topics if (t.angle or "").strip()]
         if len(set(angles)) != len(angles):
             self._add_issue(blocking_issues, failure_tags, "duplicate_angle", "angle_duplicate")
-        if set(angles) != set(GENERATION_ANGLES):
+        if len(angles) != len(normalized_topics):
             self._add_issue(
                 blocking_issues,
                 failure_tags,
-                "angles_not_cover_required_set",
-                "angle_set_invalid",
+                "angle_missing_or_blank",
+                "angle_invalid",
             )
 
         for idx, topic in enumerate(normalized_topics):
@@ -71,6 +71,7 @@ class IdeaScriptReviewerNode:
                 topic=topic,
                 idx=idx,
                 non_blocking_issues=non_blocking_issues,
+                blocking_issues=blocking_issues,
                 failure_tags=failure_tags,
             )
             self._check_and_fix_visual_keywords(
@@ -154,7 +155,7 @@ class IdeaScriptReviewerNode:
                     )
                     # 尽量补齐占位，保留后续 reviewer 能继续检查/修正
                     if "angle" not in data:
-                        data["angle"] = "persona"
+                        data["angle"] = ""
                     data.setdefault("title", "")
                     data.setdefault("hook", "")
                     data.setdefault("script_60s", "")
@@ -189,7 +190,6 @@ class IdeaScriptReviewerNode:
                     f"topic_field_missing:{idx}:{field_name}",
                     "missing_required_field",
                 )
-                self._fill_missing_field(topic, field_name)
 
     def _check_and_fix_non_blocking(
         self,
@@ -197,6 +197,7 @@ class IdeaScriptReviewerNode:
         topic: TopicItem,
         idx: int,
         non_blocking_issues: list[str],
+        blocking_issues: list[str],
         failure_tags: list[str],
     ) -> None:
         hook = (topic.hook or "").strip()
@@ -209,7 +210,7 @@ class IdeaScriptReviewerNode:
                 "hook_too_long",
             )
 
-        if topic.angle == "scene" and not self._scene_specific_enough(topic, audience_context.scenes):
+        if self._looks_scene_oriented(topic) and not self._scene_specific_enough(topic, audience_context.scenes):
             self._add_issue(
                 non_blocking_issues,
                 failure_tags,
@@ -218,7 +219,6 @@ class IdeaScriptReviewerNode:
             )
 
         if not self._looks_colloquial(topic.script_60s):
-            topic.script_60s = self._make_more_colloquial(topic.script_60s)
             self._add_issue(
                 non_blocking_issues,
                 failure_tags,
@@ -227,7 +227,6 @@ class IdeaScriptReviewerNode:
             )
 
         if self._cta_weak(topic.script_60s):
-            topic.script_60s = self._strengthen_cta(topic.script_60s)
             self._add_issue(
                 non_blocking_issues,
                 failure_tags,
@@ -238,14 +237,14 @@ class IdeaScriptReviewerNode:
         missing_tags = self._missing_script_tags(topic.script_60s)
         if missing_tags:
             self._add_issue(
-                non_blocking_issues,
+                blocking_issues,
                 failure_tags,
                 f"script_tags_missing:{idx}:{','.join(missing_tags)}",
                 "script_tag_missing",
             )
         elif not self._script_tags_in_order(topic.script_60s):
             self._add_issue(
-                non_blocking_issues,
+                blocking_issues,
                 failure_tags,
                 f"script_tags_order_invalid:{idx}",
                 "script_tag_order_invalid",
@@ -270,26 +269,6 @@ class IdeaScriptReviewerNode:
         )
         topic.visual_keywords = self._derive_visual_keywords(topic)
 
-    def _fill_missing_field(self, topic: TopicItem, field_name: str) -> None:
-        if field_name == "title":
-            if topic.angle == "persona":
-                topic.title = "这类人怎么买更稳"
-            elif topic.angle == "scene":
-                topic.title = "这个场景下怎么判断值不值"
-            else:
-                topic.title = "这个误区最容易买错"
-        elif field_name == "hook":
-            topic.hook = self._fallback_hook(topic)
-        elif field_name == "script_60s":
-            topic.script_60s = self._make_more_colloquial("")
-
-    def _fallback_hook(self, topic: TopicItem) -> str:
-        if topic.angle == "persona":
-            return "先看你适不适合"
-        if topic.angle == "scene":
-            return "先看使用场景"
-        return "这个误区最坑人"
-
     def _looks_colloquial(self, text: str) -> bool:
         t = (text or "").strip()
         if not t:
@@ -300,10 +279,15 @@ class IdeaScriptReviewerNode:
     def _make_more_colloquial(self, text: str) -> str:
         base = (text or "").strip()
         if not base:
-            return "你先别急，我们按一个简单步骤来判断，先看场景，再看关键指标，最后再决定要不要买。"
-        if "你" not in base:
-            base = "你先别急，" + base
+            return ""
         return base
+
+    def _looks_scene_oriented(self, topic: TopicItem) -> bool:
+        angle = (topic.angle or "").lower()
+        if any(marker in angle for marker in ("scene", "场景", "情境", "通勤", "夜间", "仪式感")):
+            return True
+        title = f"{topic.title} {topic.hook}".lower()
+        return any(marker in title for marker in ("场景", "scene", "通勤", "夜间", "对比"))
 
     def _cta_weak(self, text: str) -> bool:
         t = (text or "").strip()
@@ -313,8 +297,8 @@ class IdeaScriptReviewerNode:
     def _strengthen_cta(self, text: str) -> str:
         base = (text or "").strip()
         if not base:
-            return "你先别急，我们按步骤来。看完先收藏这条，后面对照着选。"
-        return base + " 如果你想看完整判断清单，先收藏这条。"
+            return ""
+        return base
 
     def _scene_specific_enough(self, topic: TopicItem, scenes: Iterable[str]) -> bool:
         corpus = f"{topic.title} {topic.script_60s}".lower()
@@ -348,24 +332,21 @@ class IdeaScriptReviewerNode:
             topic.angle,
             topic.title,
             topic.hook,
-            "口播",
-            "步骤演示",
-            "近景特写",
-            "字幕强调",
-            "产品镜头",
+            topic.script_60s,
         ]
         keywords: list[str] = []
         seen = set()
         for item in raw:
-            text = (item or "").strip()
-            if not text or text in seen:
-                continue
-            seen.add(text)
-            keywords.append(text)
+            for text in str(item or "").replace("\n", " ").split(" "):
+                text = text.strip("，,。；;：:[]")
+                if len(text) < 2 or text in seen:
+                    continue
+                seen.add(text)
+                keywords.append(text)
+                if len(keywords) >= 8:
+                    break
             if len(keywords) >= 8:
                 break
-        while len(keywords) < 5:
-            keywords.append(f"{topic.angle}_素材{len(keywords) + 1}")
         return keywords
 
     def _add_issue(self, bucket: list[str], tags: list[str], issue: str, tag: str) -> None:

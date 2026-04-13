@@ -5,9 +5,6 @@ export default function MessageList({
   turns = [],
   steps = [],
   onRetry,
-  onSelectPrimary,
-  onExport,
-  onCopyPath,
 }) {
   const bottomRef = useRef(null);
 
@@ -23,9 +20,6 @@ export default function MessageList({
           turn={turn}
           steps={steps}
           onRetry={onRetry}
-          onSelectPrimary={onSelectPrimary}
-          onExport={onExport}
-          onCopyPath={onCopyPath}
         />
       ))}
       <div ref={bottomRef} />

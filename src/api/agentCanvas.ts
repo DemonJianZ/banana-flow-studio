@@ -118,6 +118,11 @@ const buildAgentHeaders = (meta) => {
 };
 
 const AGENT_IDEA_SCRIPT_TIMEOUT_MS = 90_000;
+const AGENT_DRAMA_TIMEOUT_MS = 90_000;
+const VIDEO_LINEART_POLL_INTERVAL_MS = 1200;
+const VIDEO_LINEART_TIMEOUT_MS = 600_000;
+const VIDEO_SPLIT_POLL_INTERVAL_MS = 1200;
+const VIDEO_SPLIT_TIMEOUT_MS = 600_000;
 
 const withAbortTimeout = async (task, timeoutMs, timeoutMessage) => {
   const controller = new AbortController();
@@ -175,14 +180,50 @@ function normalizeProductCandidate(value) {
   return text;
 }
 
-export async function generateIdeaScriptMission(product, apiFetch, meta) {
+export async function generateIdeaScriptMission(payload, apiFetch, meta) {
   const call = createCaller(apiFetch);
+  const reqBody =
+    typeof payload === "string"
+      ? { product: String(payload || "").trim() }
+      : {
+          product: String(payload?.product || "").trim(),
+          audience: String(payload?.audience || "").trim() || undefined,
+          price_band: String(payload?.priceBand || "").trim() || undefined,
+          conversion_goal: String(payload?.conversionGoal || "").trim() || undefined,
+          primary_platform: String(payload?.primaryPlatform || "").trim() || undefined,
+          secondary_platform: String(payload?.secondaryPlatform || "").trim() || undefined,
+          selected_angle: String(payload?.selectedAngle || "").trim() || undefined,
+        };
   const resp = await withAbortTimeout((signal) => call("/api/agent/idea_script", {
     method: "POST",
-    body: JSON.stringify({ product: String(product || "").trim() }),
+    body: JSON.stringify(reqBody),
     headers: buildAgentHeaders(meta),
     signal,
   }), AGENT_IDEA_SCRIPT_TIMEOUT_MS, "生成脚本超时，请稍后重试。");
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(extractApiError(data));
+  }
+  return data;
+}
+
+export async function generateDramaMission(payload, apiFetch, meta) {
+  const call = createCaller(apiFetch);
+  const reqBody =
+    typeof payload === "string"
+      ? { prompt: String(payload || "").trim() }
+      : {
+          prompt: String(payload?.prompt || "").trim(),
+          task_mode: String(payload?.taskMode || "").trim() || undefined,
+          episode_count: Number.isFinite(Number(payload?.episodeCount)) ? Number(payload.episodeCount) : undefined,
+          existing_script: String(payload?.existingScript || "").trim() || undefined,
+        };
+  const resp = await withAbortTimeout((signal) => call("/api/agent/drama", {
+    method: "POST",
+    body: JSON.stringify(reqBody),
+    headers: buildAgentHeaders(meta),
+    signal,
+  }), AGENT_DRAMA_TIMEOUT_MS, "生成短剧内容超时，请稍后重试。");
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
     throw new Error(extractApiError(data));
@@ -204,20 +245,14 @@ export async function generateAgentChitchat(message, apiFetch, meta) {
   return data;
 }
 
-export async function planAgentCanvas(payload, apiFetch, meta) {
+export async function polishCanvasPrompt(payload, apiFetch, meta) {
   const call = createCaller(apiFetch);
-  const reqBody = {
-    prompt: String(payload?.prompt || "").trim(),
-    current_nodes: Array.isArray(payload?.currentNodes) ? payload.currentNodes : [],
-    current_connections: Array.isArray(payload?.currentConnections) ? payload.currentConnections : [],
-    selected_artifact: payload?.selectedArtifact || null,
-    canvas_id: String(payload?.canvasId || "").trim() || undefined,
-    thread_id: String(payload?.threadId || "").trim() || undefined,
-  };
-
-  const resp = await call("/api/agent/plan", {
+  const resp = await call("/api/agent/prompt_polish", {
     method: "POST",
-    body: JSON.stringify(reqBody),
+    body: JSON.stringify({
+      prompt: String(payload?.prompt || "").trim(),
+      mode: String(payload?.mode || "text2img").trim() || "text2img",
+    }),
     headers: buildAgentHeaders(meta),
   });
   const data = await resp.json().catch(() => ({}));
@@ -227,56 +262,130 @@ export async function planAgentCanvas(payload, apiFetch, meta) {
   return data;
 }
 
-export async function exportIdeaScriptFfmpegBundle(payload, apiFetch, meta) {
+const delay = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+export async function runVideoLineartTask(payload, apiFetch) {
   const call = createCaller(apiFetch);
-  const reqBody = {
-    plan_id: payload?.planId || undefined,
-    plan: payload?.plan || undefined,
-    out_dir: payload?.outDir || "./exports/ffmpeg",
-    w: Number(payload?.w || 720),
-    h: Number(payload?.h || 1280),
-    fps: Number(payload?.fps || 30),
-  };
+  const startResp = await call("/api/video_lineart/start", {
+    method: "POST",
+    body: JSON.stringify({
+      video: String(payload?.video || "").trim(),
+      line_strength: Number(payload?.lineStrength),
+      line_color: String(payload?.lineColor || "").trim() || "black",
+    }),
+  });
+  const startData = await startResp.json().catch(() => ({}));
+  if (!startResp.ok) {
+    throw new Error(extractApiError(startData));
+  }
 
-  const send = async (body) => {
-    const resp = await call("/api/agent/idea_script/export_ffmpeg", {
-      method: "POST",
-      body: JSON.stringify(body),
-      headers: buildAgentHeaders(meta),
+  const taskId = String(startData?.task_id || "").trim();
+  if (!taskId) {
+    throw new Error("视频转线稿任务创建失败");
+  }
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < VIDEO_LINEART_TIMEOUT_MS) {
+    const statusResp = await call(`/api/video_lineart/status/${encodeURIComponent(taskId)}`, {
+      method: "GET",
     });
-    const data = await resp.json().catch(() => ({}));
-    return { resp, data };
-  };
+    const statusData = await statusResp.json().catch(() => ({}));
+    if (!statusResp.ok) {
+      throw new Error(extractApiError(statusData));
+    }
 
-  let { resp, data } = await send(reqBody);
-  if (!resp.ok && resp.status === 404 && reqBody.plan_id && reqBody.plan) {
-    const retryBody = { ...reqBody, plan_id: undefined };
-    ({ resp, data } = await send(retryBody));
+    const status = String(statusData?.status || "").trim().toLowerCase();
+    if (status === "success") {
+      const video = String(statusData?.video || "").trim();
+      if (!video) {
+        throw new Error("视频转线稿未返回结果");
+      }
+      return statusData;
+    }
+    if (status === "error") {
+      throw new Error(extractApiError(statusData?.error || statusData));
+    }
+
+    await delay(VIDEO_LINEART_POLL_INTERVAL_MS);
   }
-  if (!resp.ok) {
-    throw new Error(extractApiError(data));
-  }
-  return data;
+
+  throw new Error("视频转线稿超时，请稍后重试");
 }
 
-export async function generateIdeaScriptVideo(payload, apiFetch, meta) {
+export async function runVideoSplitTask(payload, apiFetch) {
+  const call = createCaller(apiFetch);
+  const rawSegments = Array.isArray(payload?.segments) ? payload.segments : [];
+  const segments = rawSegments
+    .map((item) => ({
+      start_sec: Number(item?.startSec),
+      end_sec: Number(item?.endSec),
+    }))
+    .filter((item) => Number.isFinite(item.start_sec) && Number.isFinite(item.end_sec) && item.end_sec > item.start_sec);
+
+  if (!segments.length) {
+    throw new Error("至少需要一个有效分段");
+  }
+
+  const startResp = await call("/api/video_split/start", {
+    method: "POST",
+    body: JSON.stringify({
+      video: String(payload?.video || "").trim(),
+      segments,
+    }),
+  });
+  const startData = await startResp.json().catch(() => ({}));
+  if (!startResp.ok) {
+    throw new Error(extractApiError(startData));
+  }
+
+  const taskId = String(startData?.task_id || "").trim();
+  if (!taskId) {
+    throw new Error("视频分割任务创建失败");
+  }
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < VIDEO_SPLIT_TIMEOUT_MS) {
+    const statusResp = await call(`/api/video_split/status/${encodeURIComponent(taskId)}`, {
+      method: "GET",
+    });
+    const statusData = await statusResp.json().catch(() => ({}));
+    if (!statusResp.ok) {
+      throw new Error(extractApiError(statusData));
+    }
+
+    const status = String(statusData?.status || "").trim().toLowerCase();
+    if (status === "success") {
+      const videos = Array.isArray(statusData?.videos)
+        ? statusData.videos.map((item) => String(item || "").trim()).filter(Boolean)
+        : [];
+      if (!videos.length) {
+        throw new Error("视频分割未返回结果");
+      }
+      return statusData;
+    }
+    if (status === "error") {
+      throw new Error(extractApiError(statusData?.error || statusData));
+    }
+
+    await delay(VIDEO_SPLIT_POLL_INTERVAL_MS);
+  }
+
+  throw new Error("视频分割超时，请稍后重试");
+}
+
+export async function planAgentCanvas(payload, apiFetch, meta) {
   const call = createCaller(apiFetch);
   const reqBody = {
-    product: String(payload?.product || "").trim(),
-    out_dir: payload?.outDir || "./exports/video_generation",
-    image_width: Number(payload?.imageWidth || 1024),
-    image_height: Number(payload?.imageHeight || 1024),
-    output_width: Number(payload?.outputWidth || 720),
-    output_height: Number(payload?.outputHeight || 1280),
-    fps: Number(payload?.fps || 24),
-    clip_length: Number(payload?.clipLength || 81),
-    retries_per_step: Number(payload?.retriesPerStep || 1),
-    max_shots: Number(payload?.maxShots || 0),
-    motion_hint: String(payload?.motionHint || ""),
-    bgm_path: payload?.bgmPath || null,
+    prompt: String(payload?.prompt || "").trim(),
+    supplemental_prompt: String(payload?.supplementalPrompt || "").trim() || undefined,
+    current_nodes: Array.isArray(payload?.currentNodes) ? payload.currentNodes : [],
+    current_connections: Array.isArray(payload?.currentConnections) ? payload.currentConnections : [],
+    selected_artifact: payload?.selectedArtifact || null,
+    canvas_id: String(payload?.canvasId || "").trim() || undefined,
+    thread_id: String(payload?.threadId || "").trim() || undefined,
   };
 
-  const resp = await call("/api/agent/idea_script/generate_video", {
+  const resp = await call("/api/agent/plan", {
     method: "POST",
     body: JSON.stringify(reqBody),
     headers: buildAgentHeaders(meta),

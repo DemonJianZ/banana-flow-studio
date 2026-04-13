@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -9,8 +9,6 @@ try:
 except Exception:  # pragma: no cover - 兼容 python bananaflow/main.py 直跑
     from assets.schemas import AssetCandidate, MatchBucket
 
-
-AngleType = Literal["persona", "scene", "misconception"]
 UnsafeClaimRisk = Literal["low", "medium", "high"]
 RiskLevel = Literal["low", "medium", "high"]
 SegmentType = Literal["HOOK", "VIEW", "STEPS", "PRODUCT", "CTA"]
@@ -18,6 +16,12 @@ SegmentType = Literal["HOOK", "VIEW", "STEPS", "PRODUCT", "CTA"]
 
 class IdeaScriptRequest(BaseModel):
     product: str = Field(..., description="产品名称或产品简述")
+    audience: Optional[str] = None
+    price_band: Optional[str] = None
+    conversion_goal: Optional[str] = None
+    primary_platform: Optional[str] = None
+    secondary_platform: Optional[str] = None
+    selected_angle: Optional[str] = None
 
     @field_validator("product")
     @classmethod
@@ -26,6 +30,12 @@ class IdeaScriptRequest(BaseModel):
         if not text:
             raise ValueError("product is required")
         return text
+
+    @field_validator("audience", "price_band", "conversion_goal", "primary_platform", "secondary_platform", "selected_angle", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value: object) -> Optional[str]:
+        text = str(value or "").strip()
+        return text or None
 
 
 class AudienceInferenceResult(BaseModel):
@@ -115,12 +125,17 @@ class AssetRequirement(BaseModel):
 
 
 class TopicItem(BaseModel):
-    angle: AngleType
+    angle: str
     title: str
     hook: str
     script_60s: str
     visual_keywords: List[str] = Field(default_factory=list)
     shots: List[ShotItem] = Field(default_factory=list)
+
+    @field_validator("angle", mode="before")
+    @classmethod
+    def normalize_angle(cls, value: object) -> str:
+        return str(value or "").strip()
 
     @field_validator("visual_keywords", mode="before")
     @classmethod
@@ -160,7 +175,7 @@ class IdeaScriptReviewResult(BaseModel):
 
 class RiskySpan(BaseModel):
     topic_index: int = Field(..., ge=0)
-    angle: Optional[AngleType] = None
+    angle: Optional[str] = None
     field: Literal["title", "hook", "script_60s"]
     text: str
     reason: str
@@ -227,7 +242,7 @@ class EditPlan(BaseModel):
     plan_id: str
     product: str
     topic_index: int = Field(..., ge=0)
-    angle: AngleType
+    angle: str
     title: str
     tracks: List[EditTrack] = Field(default_factory=list)
     total_duration_sec: float = 0.0
@@ -241,6 +256,14 @@ class EditPlan(BaseModel):
 class IdeaScriptResponse(BaseModel):
     audience_context: AudienceInferenceResult
     topics: List[TopicItem] = Field(default_factory=list)
+    selected_topic_angle: Optional[str] = None
+    selected_topic_title: Optional[str] = None
+    platform_plan: Dict[str, Any] = Field(default_factory=dict)
+    copy_pack: Dict[str, Any] = Field(default_factory=dict)
+    browser_ready_fields: Dict[str, Any] = Field(default_factory=dict)
+    risks_and_blockers: List[str] = Field(default_factory=list)
+    kpi_checklist: List[str] = Field(default_factory=list)
+    next_actions: List[str] = Field(default_factory=list)
     inference_warning: bool = False
     warning_reason: Optional[str] = None
     retry_count: int = 0

@@ -3,11 +3,9 @@ import { extractProductKeyword } from "../api/agentCanvas";
 export type Intent =
   | "CANVAS"
   | "CHITCHAT"
+  | "DRAMA"
   | "HELP"
   | "SCRIPT"
-  | "STORYBOARD"
-  | "VIDEO"
-  | "EXPORT"
   | "UNKNOWN";
 
 type DetectIntentResult = {
@@ -52,32 +50,14 @@ const SCRIPT_KEYWORDS = [
   "钩子",
 ];
 
-const STORYBOARD_KEYWORDS = [
-  "分镜",
-  "镜头",
-  "画面",
-  "shot",
-  "拆镜头",
-  "脚本拆镜头",
-];
-
-const EXPORT_KEYWORDS = [
-  "导出",
-  "渲染",
-  "ffmpeg",
-  "render.sh",
-  "打包",
-];
-
-const VIDEO_KEYWORDS = [
-  "生成视频",
-  "出视频",
-  "成片",
-  "视频成片",
-  "动态视频",
-  "视频生成",
-  "一键成片",
-  "i2v",
+const DRAMA_KEYWORDS = [
+  "短剧",
+  "竖屏短剧",
+  "剧情大纲",
+  "分集大纲",
+  "打脸场景",
+  "悬念钩子",
+  "人物小传",
 ];
 
 const CANVAS_KEYWORDS = [
@@ -120,9 +100,7 @@ const CANVAS_COMPONENT_TERMS = [
 ];
 
 const WEAK_SCRIPT_TERMS = ["脚本", "口播", "选题", "爆款", "文案", "带货"];
-const WEAK_STORYBOARD_TERMS = ["分镜", "镜头", "画面", "shot"];
-const WEAK_EXPORT_TERMS = ["导出", "打包", "渲染", "ffmpeg", "render"];
-const WEAK_VIDEO_TERMS = ["成片", "视频", "动态视频", "视频生成", "i2v"];
+const WEAK_DRAMA_TERMS = ["短剧", "剧情大纲", "分集", "打脸场景", "人物小传"];
 const WEAK_CANVAS_TERMS = ["画布", "工作流", "节点", "组件", "搭建", "编排", "流程", "串联"];
 const WEAK_HELP_TERMS = ["帮助", "怎么用", "你能做什么", "示例"];
 const WEAK_CHITCHAT_TERMS = ["你好", "在吗", "谢谢", "哈哈", "晚安", "拜拜"];
@@ -136,19 +114,6 @@ function findFirstKeyword(text: string, keywords: string[]): string | null {
     if (text.includes(keyword.toLowerCase())) return keyword;
   }
   return null;
-}
-
-function hasResultContext(sessionState: any): boolean {
-  const turns = sessionState?.turns || [];
-  return turns.some((turn: any) => turn?.response && turn?.status === "done");
-}
-
-function hasEditPlanContext(sessionState: any): boolean {
-  const turns = sessionState?.turns || [];
-  return turns.some((turn: any) => {
-    const plans = turn?.localEditPlans || turn?.response?.edit_plans || [];
-    return turn?.status === "done" && plans.length > 0;
-  });
 }
 
 function hasTerm(text: string, terms: string[]): string | null {
@@ -170,19 +135,9 @@ function weakIntentFallback(raw: string, normalized: string): DetectIntentResult
     return { intent: "SCRIPT", product, reason: `weak:${weakScript}` };
   }
 
-  const weakStoryboard = hasTerm(normalized, WEAK_STORYBOARD_TERMS);
-  if (weakStoryboard) {
-    const product = extractProductKeyword(raw) || undefined;
-    return { intent: "STORYBOARD", product, reason: `weak:${weakStoryboard}` };
-  }
-
-  const weakExport = hasTerm(normalized, WEAK_EXPORT_TERMS);
-  if (weakExport) return { intent: "EXPORT", reason: `weak:${weakExport}` };
-
-  const weakVideo = hasTerm(normalized, WEAK_VIDEO_TERMS);
-  if (weakVideo) {
-    const product = extractProductKeyword(raw) || undefined;
-    return { intent: "VIDEO", product, reason: `weak:${weakVideo}` };
+  const weakDrama = hasTerm(normalized, WEAK_DRAMA_TERMS);
+  if (weakDrama) {
+    return { intent: "DRAMA", reason: `weak:${weakDrama}` };
   }
 
   const weakHelp = hasTerm(normalized, WEAK_HELP_TERMS);
@@ -194,15 +149,13 @@ function weakIntentFallback(raw: string, normalized: string): DetectIntentResult
   return null;
 }
 
-export function detectIntent(text: string, sessionState: any): DetectIntentResult {
+export function detectIntent(text: string, _sessionState: any): DetectIntentResult {
   const raw = String(text || "").trim();
   const normalized = normalizeText(raw);
   if (!raw) return { intent: "UNKNOWN", reason: "empty_input" };
 
   const hitCanvas = findFirstKeyword(normalized, CANVAS_KEYWORDS);
-  const hitExport = findFirstKeyword(normalized, EXPORT_KEYWORDS);
-  const hitVideo = findFirstKeyword(normalized, VIDEO_KEYWORDS);
-  const hitStoryboard = findFirstKeyword(normalized, STORYBOARD_KEYWORDS);
+  const hitDrama = findFirstKeyword(normalized, DRAMA_KEYWORDS);
   const hitScript = findFirstKeyword(normalized, SCRIPT_KEYWORDS);
   const hitHelp = findFirstKeyword(normalized, HELP_KEYWORDS);
   const hitChitchat = findFirstKeyword(normalized, CHITCHAT_KEYWORDS);
@@ -212,22 +165,8 @@ export function detectIntent(text: string, sessionState: any): DetectIntentResul
     return { intent: "CANVAS", reason: hitCanvas ? `keyword:${hitCanvas}` : "component_term_match" };
   }
 
-  if (hitVideo) {
-    const product = extractProductKeyword(raw) || undefined;
-    return { intent: "VIDEO", product, reason: `keyword:${hitVideo}` };
-  }
-
-  if (hitExport) {
-    return { intent: "EXPORT", reason: `keyword:${hitExport}` };
-  }
-
-  if (hitStoryboard) {
-    const product = extractProductKeyword(raw) || undefined;
-    return {
-      intent: "STORYBOARD",
-      product,
-      reason: `keyword:${hitStoryboard}`,
-    };
+  if (hitDrama) {
+    return { intent: "DRAMA", reason: `keyword:${hitDrama}` };
   }
 
   if (hitScript) {
@@ -241,14 +180,6 @@ export function detectIntent(text: string, sessionState: any): DetectIntentResul
 
   if (hitChitchat && raw.length <= 20) {
     return { intent: "CHITCHAT", reason: `keyword:${hitChitchat}` };
-  }
-
-  if (hasEditPlanContext(sessionState) && /(导出|打包|渲染|render)/i.test(raw)) {
-    return { intent: "EXPORT", reason: "context_export_hint" };
-  }
-
-  if (hasResultContext(sessionState) && /(继续|下一步|再来|接着)/.test(raw)) {
-    return { intent: "STORYBOARD", reason: "context_continue" };
   }
 
   const weak = weakIntentFallback(raw, normalized);

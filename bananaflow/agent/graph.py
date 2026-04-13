@@ -25,6 +25,7 @@ from services.genai_client import get_client, generate_content_with_proxy
 from agent.system_prompt import agent_system_prompt
 from agent.normalizer import safe_json_load, normalize_patch
 from agent.context import collect_subgraph_ids, compact_nodes, compact_conns
+from agent.clarify import backfill_missing_prompt_from_user_input, build_missing_prompt_clarification, extract_supplemental_prompt
 from agent.deterministic import deterministic_plan_or_patch
 from prompts.refine import cached_refine_prompt, simple_refine_prompt
 from agent.checkpointer import create_checkpointer
@@ -70,10 +71,15 @@ VIDEO_ALLOWED_MODELS = {
 }
 
 
+def _planner_provider(model: str) -> str:
+    return "ollama" if str(model or "").strip().lower().startswith("ollama:") else "google"
+
+
 class PlanState(TypedDict, total=False):
     req_id: str
     step: str
     user_prompt: str
+    supplemental_prompt: str
     selected_artifact: Optional[Dict[str, Any]]
     nodes: List[Dict[str, Any]]
     conns: List[Dict[str, Any]]
@@ -238,8 +244,10 @@ def _node_build_context(state: PlanState) -> PlanState:
 
 def _node_refine_prompt(state: PlanState) -> PlanState:
     user_prompt = state.get("user_prompt") or ""
+    supplemental_prompt = state.get("supplemental_prompt") or ""
+    refine_source = supplemental_prompt or user_prompt
     client = get_client()
-    refined = cached_refine_prompt(user_prompt) if client else simple_refine_prompt(user_prompt)
+    refined = cached_refine_prompt(refine_source) if client else simple_refine_prompt(refine_source)
     return {"step": "refine","refined_prompt": refined}
 
 
@@ -250,6 +258,7 @@ def _node_generate_patch(state: PlanState) -> PlanState:
 
     payload = {
         "user_prompt": state.get("user_prompt") or "",
+        "supplemental_prompt": (state.get("supplemental_prompt") or "") or None,
         "selected_artifact": state.get("selected_artifact"),
         "current_nodes": state.get("compact_nodes") or [],
         "current_connections": state.get("compact_conns") or [],
@@ -258,6 +267,11 @@ def _node_generate_patch(state: PlanState) -> PlanState:
 
     # ❗不要用 response_schema：Gemini API 会报 additionalProperties 不支持
     def _call() -> str:
+        req_id = state.get("req_id") or "noid"
+        sys_logger.info(
+            f"[{req_id}] agent_plan llm_call step=langgraph_generate "
+            f"provider={_planner_provider(MODEL_AGENT)} model={MODEL_AGENT}"
+        )
         resp = generate_content_with_proxy(
             model=MODEL_AGENT,
             contents=[
@@ -285,7 +299,13 @@ def _node_validate(state: PlanState) -> PlanState:
 
     try:
         raw = safe_json_load(raw_text)
-        parsed = AgentOut.model_validate(raw).model_dump()
+        parsed = normalize_patch(
+            backfill_missing_prompt_from_user_input(
+                AgentOut.model_validate(raw).model_dump(),
+                state.get("user_prompt") or "",
+                supplemental_prompt=state.get("supplemental_prompt") or "",
+            )
+        )
 
         _validate_business_rules(parsed)
         _validate_structural_sanity(state, parsed)
@@ -297,6 +317,18 @@ def _node_validate(state: PlanState) -> PlanState:
             "errors": [],  # ✅ 成功就清空
         }
     except Exception as e:
+        clarification = build_missing_prompt_clarification(str(e), state.get("user_prompt") or "")
+        if clarification is not None:
+            req_id = state.get("req_id") or "noid"
+            sys_logger.info(
+                f"[{req_id}] agent_plan clarify_missing_prompt path=langgraph "
+                f"provider={_planner_provider(MODEL_AGENT)} model={MODEL_AGENT}"
+            )
+            return {
+                "step": "validate",
+                "parsed_out": clarification,
+                "errors": [],
+            }
         errors = list(state.get("errors") or [])
         errors.append(str(e))
         return {"step": "validate", "errors": errors}
@@ -336,6 +368,11 @@ Reminder of valid modes:
 """
 
     def _call() -> str:
+        req_id = state.get("req_id") or "noid"
+        sys_logger.info(
+            f"[{req_id}] agent_plan llm_call step=langgraph_repair "
+            f"provider={_planner_provider(MODEL_AGENT)} model={MODEL_AGENT}"
+        )
         resp = generate_content_with_proxy(
             model=MODEL_AGENT,
             contents=[
@@ -433,6 +470,7 @@ _GRAPH = build_graph()
 def plan_with_langgraph(
     req_id: str,
     user_prompt: str,
+    supplemental_prompt: str,
     selected_artifact: Optional[Dict[str, Any]],
     current_nodes: List[Dict[str, Any]],
     current_connections: List[Dict[str, Any]],
@@ -441,9 +479,11 @@ def plan_with_langgraph(
     if _GRAPH is None:
         raise RuntimeError("LangGraph not available. Please install langgraph.")
 
+    resolved_supplemental_prompt = extract_supplemental_prompt(user_prompt, supplemental_prompt)
     init_state: PlanState = {
         "req_id": req_id,
         "user_prompt": (user_prompt or "").strip(),
+        "supplemental_prompt": (resolved_supplemental_prompt or "").strip(),
         "selected_artifact": selected_artifact,
         "nodes": current_nodes or [],
         "conns": current_connections or [],

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Storyboard Storytelling Pipeline"
+  short_description: "Full storyboard workflow from script to clean boards."
+  default_prompt: "Use $storyboard-storytelling-pipeline to turn this script into a full storyboard workflow package from sequence map through clean-pass guidance."

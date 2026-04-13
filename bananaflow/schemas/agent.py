@@ -50,6 +50,7 @@ class SelectedArtifact(BaseModel):
 
 class AgentRequest(BaseModel):
     prompt: str = Field(default="")
+    supplemental_prompt: Optional[str] = None
     current_nodes: List[Dict[str, Any]] = Field(default_factory=list)
     current_connections: List[Dict[str, Any]] = Field(default_factory=list)
     selected_artifact: Optional[Dict[str, Any]] = None

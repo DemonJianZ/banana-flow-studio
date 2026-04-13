@@ -66,6 +66,9 @@ class IdeaScriptAgentConfig(BaseModel):
     storyboard_generate: NodeRuntimeConfig = Field(default_factory=NodeRuntimeConfig)
     storyboard_review: NodeRuntimeConfig = Field(default_factory=NodeRuntimeConfig)
     scoring_enabled: bool = False
+    storyboard_enabled: bool = True
+    asset_match_enabled: bool = True
+    edit_plan_enabled: bool = True
     cache_enabled: bool = False
     cache_max_size: int = Field(default=64, ge=1)
     max_total_llm_calls: int = Field(default=20, ge=0)
@@ -103,6 +106,9 @@ class IdeaScriptAgentConfig(BaseModel):
             storyboard_generate=NodeRuntimeConfig.from_env("storyboard_generate"),
             storyboard_review=NodeRuntimeConfig.from_env("storyboard_review"),
             scoring_enabled=_as_bool(os.getenv("IDEA_SCRIPT_SCORING_ENABLED"), default=False),
+            storyboard_enabled=_as_bool(os.getenv("IDEA_SCRIPT_STORYBOARD_ENABLED"), default=True),
+            asset_match_enabled=_as_bool(os.getenv("IDEA_SCRIPT_ASSET_MATCH_ENABLED"), default=True),
+            edit_plan_enabled=_as_bool(os.getenv("IDEA_SCRIPT_EDIT_PLAN_ENABLED"), default=True),
             cache_enabled=_as_bool(os.getenv("IDEA_SCRIPT_CACHE_ENABLED"), default=False),
             cache_max_size=(64 if cache_max_size_env is None else cache_max_size_env),
             max_total_llm_calls=(20 if max_total_llm_calls_env is None else max_total_llm_calls_env),

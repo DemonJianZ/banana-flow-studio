@@ -15,6 +15,7 @@ import {
 import { Link } from "../router";
 import { useAuth } from "../auth/AuthProvider";
 import AiChatAnchorStatusCard from "../components/AiChatAnchorStatusCard";
+import { downloadMedia } from "../lib/downloadMedia";
 
 const DEFAULT_COPY_TEXT = "";
 // Keep defaults in sync with bananaflow/workflows/textoverlay.json.
@@ -1150,10 +1151,7 @@ const PipelineBatchWordArt = () => {
                             {item.videoUrl && (
                               <button
                                 onClick={() => {
-                                  const link = document.createElement("a");
-                                  link.href = item.videoUrl;
-                                  link.download = `motion-${item.id}.mp4`;
-                                  link.click();
+                                  void downloadMedia(item.videoUrl, `motion-${item.id}.mp4`);
                                 }}
                                 className="text-[11px] px-2 py-0.5 rounded border border-slate-700 text-slate-400 hover:text-white hover:border-purple-500 transition-colors"
                               >

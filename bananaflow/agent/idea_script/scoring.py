@@ -126,7 +126,7 @@ class ScoringReviewerNode:
         angles = [t.angle for t in topics]
         if len(set(angles)) == len(angles):
             score += 0.30
-        if set(angles) == {"persona", "scene", "misconception"}:
+        if len({(angle or "").strip() for angle in angles if (angle or "").strip()}) >= 3:
             score += 0.20
         unique_titles = len({(t.title or "").strip() for t in topics if (t.title or "").strip()})
         score += min(0.10, unique_titles / max(len(topics), 1) * 0.10)

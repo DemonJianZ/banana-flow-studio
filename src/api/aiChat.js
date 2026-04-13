@@ -240,7 +240,7 @@ export const AI_CHAT_ANCHOR_OPERATE_ENUM_3 = 3; // 切换对话模式
 export const AI_CHAT_ANCHOR_OPERATE_ENUM_4 = 4; // 打开页面
 export const AI_CHAT_ANCHOR_OPERATE_ENUM_5 = 5; // 刷新页面
 
-export const AI_CHAT_PART_ENUM_6 = 6; // 视频画质增强
+export const AI_CHAT_PART_ENUM_6 = 215; // 视频画质增强
 export const AI_CHAT_PART_ENUM_203 = 203; // 图片生成
 export const AI_CHAT_PART_ENUM_204 = 204; // 视频生成
 export const AI_CHAT_PART_ENUM_207 = 207; // 特征提取

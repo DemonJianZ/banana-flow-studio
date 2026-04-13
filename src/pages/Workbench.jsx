@@ -8,7 +8,6 @@ import {
   Play,
   Plus,
   Zap,
-  MousePointer2,
   Layers,
   Loader2,
   Images,
@@ -22,7 +21,6 @@ import {
   Clipboard,
   Hand,
   ShoppingBag,
-  MessageSquare,
   AlertCircle,
   ChevronRight,
   ChevronDown,
@@ -62,11 +60,14 @@ import {
 import { useAuth } from "../auth/AuthProvider";
 import { useNavigate } from "../router";
 import TopicCards from "../components/agent-canvas/TopicCards";
-import StoryboardView from "../components/agent-canvas/StoryboardView";
-import AssetMatchView from "../components/agent-canvas/AssetMatchView";
-import EditPlanView from "../components/agent-canvas/EditPlanView";
-import ExportPanel from "../components/agent-canvas/ExportPanel";
+import ScriptBriefCard from "../components/agent-canvas/ScriptBriefCard";
+import ScriptExecutionPlan from "../components/agent-canvas/ScriptExecutionPlan";
+import ScriptPlanSummary from "../components/agent-canvas/ScriptPlanSummary";
 import PreferenceSuggestionCard from "../components/agent-canvas/PreferenceSuggestionCard";
+import {
+  buildCanvasNodePrompt,
+  extractCanvasSupplementalPrompt,
+} from "../components/agent-canvas/promptUtils";
 import {
   readAgentDevMode,
   readAiChatAnchorDebugState,
@@ -76,9 +77,11 @@ import {
 import {
   extractProductKeyword,
   generateAgentChitchat,
-  exportIdeaScriptFfmpegBundle,
+  generateDramaMission,
   generateIdeaScriptMission,
-  generateIdeaScriptVideo,
+  polishCanvasPrompt,
+  runVideoSplitTask,
+  runVideoLineartTask,
   planAgentCanvas,
 } from "../api/agentCanvas";
 import {
@@ -110,6 +113,8 @@ import { detectPreferenceSuggestions } from "../agent/preferenceSuggestion";
 import { buildHitlFeedbackRows } from "../agent/hitlFeedbackHistory";
 import { AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2 } from "../config";
 import { findAIChatModelIdByKeywords } from "../lib/aiChatModelResolver";
+import { downloadMedia } from "../lib/downloadMedia";
+import { isVideoContent } from "../lib/mediaType.js";
 
 const PreferencesPanel = React.lazy(() => import("../components/agent-canvas/PreferencesPanel"));
 
@@ -120,31 +125,30 @@ const generateId = () => Math.random().toString(36).substr(2, 9);
 const GRID_SIZE = 20;
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 3;
+const MEDIA_UPLOAD_NODE_WIDTH = 280;
+const MEDIA_UPLOAD_NODE_DROP_OFFSET_Y = 96;
+const MEDIA_UPLOAD_NODE_EMPTY_HEIGHT = 132;
 const CANVAS_KEY = "bananaflow_canvas_id";
 const AGENT_SESSION_STORE_KEY = "bananaflow_agent_canvas_sessions_v1";
 const AGENT_RUN_STEPS = [
   "推断受众",
   "生成脚本",
   "合规扫描",
-  "生成分镜",
   "素材匹配",
   "生成剪辑计划",
 ];
-const AGENT_WARNING_KEYS = [
-  { key: "inference_warning", label: "Inference" },
-  { key: "compliance_warning", label: "Compliance" },
-  { key: "edit_plan_warning", label: "EditPlan" },
-  { key: "budget_exhausted", label: "Budget" },
+const DRAMA_RUN_STEPS = [
+  "理解需求",
+  "创作短剧",
+  "整理输出",
 ];
 const AGENT_QUICK_ACTIONS = [
   { id: "script", label: "生成爆款脚本" },
-  { id: "storyboard", label: "生成分镜" },
-  { id: "video", label: "生成成片视频" },
-  { id: "export", label: "导出渲染包" },
-  { id: "export_now", label: "现在导出渲染包" },
-  { id: "help", label: "查看示例" },
+  { id: "drama", label: "创作短剧" },
+  { id: "canvas", label: "搭建画布" },
 ];
-const AGENT_DEFAULT_QUICK_ACTION_IDS = ["script", "storyboard", "video", "export", "help"];
+const AGENT_DEFAULT_QUICK_ACTION_IDS = ["script", "drama", "canvas"];
+const AGENT_DRAMA_QUICK_PROMPT = "帮我创作一个竖屏短剧大纲";
 const AGENT_SCRIPT_EXAMPLES = [
   "帮我写一个洗面奶的爆款口播脚本，主打温和清洁和控油",
   "帮我写一个防晒霜的小红书种草脚本，突出清爽不搓泥",
@@ -171,8 +175,24 @@ const AGENT_PRODUCT_CHIPS = [
   "洗发水",
   "益生菌",
 ];
+const SCRIPT_PLATFORM_OPTIONS = ["抖音", "小红书", "快手", "微信", "淘宝/天猫", "京东", "拼多多", "1688"];
+const SCRIPT_PRICE_BAND_OPTIONS = ["9-49元", "50-99元", "100-199元", "200-499元", "500元以上"];
+const SCRIPT_CONVERSION_GOAL_OPTIONS = ["点击商品详情", "私信咨询", "加购下单", "收藏种草", "留资获客"];
+const SCRIPT_AUDIENCE_OPTIONS = [
+  "通勤白领",
+  "学生党",
+  "油皮女生",
+  "宝妈人群",
+  "租房青年",
+  "新手买家",
+];
+const DEFAULT_VIDEO_LINEART_STRENGTH = 2;
+const DEFAULT_VIDEO_LINEART_COLOR = "black";
+const DEFAULT_VIDEO_SPLIT_SEGMENT_LENGTH_SEC = 3;
 const CHAT_PANEL_COLLAPSED_HEIGHT = 50;
 const CHAT_PANEL_COLLAPSED_WIDTH = 168;
+const AGENT_RESULT_CARD_WIDTH = 460;
+const AGENT_CARD_SCROLL_BODY_SELECTOR = '[data-agent-card-scroll-body="true"]';
 
 const isFlagEnabled = (...values) =>
   values.some((value) =>
@@ -203,6 +223,251 @@ const LOADING_TIPS = [
   "精彩马上呈现...",
 ];
 
+const normalizeScriptBrief = (brief = {}) => ({
+  product: String(brief?.product || "").trim(),
+  audience: String(brief?.audience || "").trim(),
+  priceBand: String(brief?.priceBand || "").trim(),
+  conversionGoal: String(brief?.conversionGoal || "").trim(),
+  primaryPlatform: String(brief?.primaryPlatform || "").trim(),
+  secondaryPlatform: String(brief?.secondaryPlatform || "").trim(),
+  selectedAngle: String(brief?.selectedAngle || "").trim(),
+});
+
+const extractScriptPlatform = (text) => {
+  const source = String(text || "");
+  if (!source) return "";
+  if (/小红书/i.test(source)) return "小红书";
+  if (/抖音/i.test(source)) return "抖音";
+  if (/快手/i.test(source)) return "快手";
+  if (/微信|企微|企业微信/i.test(source)) return "微信";
+  if (/淘宝|天猫/i.test(source)) return "淘宝/天猫";
+  if (/京东/i.test(source)) return "京东";
+  if (/拼多多|拼夕夕/i.test(source)) return "拼多多";
+  if (/1688/i.test(source)) return "1688";
+  return "";
+};
+
+const buildInitialScriptBrief = (missionText, product = "") => {
+  const normalizedProduct = String(product || extractProductKeyword(missionText) || "").trim();
+  return normalizeScriptBrief({
+    product: normalizedProduct,
+    primaryPlatform: extractScriptPlatform(missionText) || "抖音",
+    conversionGoal: "点击商品详情",
+  });
+};
+
+const getAgentResultCardWidth = () => AGENT_RESULT_CARD_WIDTH;
+
+const getAgentTurnStepLabel = (turn) => {
+  const steps = turn?.intent === "DRAMA" ? DRAMA_RUN_STEPS : AGENT_RUN_STEPS;
+  return steps[Math.min(turn?.stepIndex || 0, steps.length - 1)];
+};
+
+const normalizeLatexSymbols = (value) =>
+  String(value || "")
+    .replace(/\\leftrightarrow/g, "↔")
+    .replace(/\\leftarrow/g, "←")
+    .replace(/\\rightarrow/g, "→")
+    .replace(/\\Rightarrow/g, "⇒")
+    .replace(/\\Leftarrow/g, "⇐")
+    .replace(/\\to\b/g, "→")
+    .replace(/\\times/g, "×")
+    .replace(/\\cdot/g, "·")
+    .replace(/\\leq/g, "≤")
+    .replace(/\\geq/g, "≥")
+    .replace(/\\neq/g, "≠");
+
+const normalizeInlineMath = (value) =>
+  normalizeLatexSymbols(value)
+    .replace(/\$([^$\n]{1,120})\$/g, (_, inner) => normalizeLatexSymbols(inner))
+    .replace(/\\\(([\s\S]{1,120}?)\\\)/g, (_, inner) => normalizeLatexSymbols(inner))
+    .replace(/\\\[([\s\S]{1,120}?)\\\]/g, (_, inner) => normalizeLatexSymbols(inner));
+
+const stripMarkdownControlMarkers = (value) =>
+  normalizeInlineMath(value)
+    .replace(/\r\n/g, "\n")
+    .replace(/\*\*/g, "")
+    .replace(/__/g, "")
+    .replace(/`/g, "")
+    .trim();
+
+const normalizeVideoLineartStrength = (value) => {
+  const parsed = parseInt(String(value ?? DEFAULT_VIDEO_LINEART_STRENGTH), 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_VIDEO_LINEART_STRENGTH;
+  return Math.max(1, Math.min(10, parsed));
+};
+
+const normalizeVideoLineartColor = (value) => {
+  const text = String(value || "").trim();
+  return text ? text.slice(0, 32) : DEFAULT_VIDEO_LINEART_COLOR;
+};
+
+const normalizeVideoLineartConfig = (value) => {
+  const config = value && typeof value === "object" ? value : {};
+  return {
+    lineStrength: normalizeVideoLineartStrength(config?.lineStrength),
+    lineColor: normalizeVideoLineartColor(config?.lineColor),
+  };
+};
+
+const DramaMarkdownBlock = ({ value = "", className = "" }) => {
+  const sanitized = stripMarkdownControlMarkers(value);
+  if (!sanitized) {
+    return <div className={className}>暂无结果</div>;
+  }
+
+  const lines = sanitized.split("\n");
+  return (
+    <div className={className}>
+      {lines.map((rawLine, index) => {
+        const line = String(rawLine || "");
+        const trimmed = line.trim();
+        if (!trimmed) {
+          return <div key={`drama_md_${index}`} className="h-2" />;
+        }
+
+        const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+        if (headingMatch) {
+          const level = headingMatch[1].length;
+          const headingText = headingMatch[2].trim();
+          const headingClass =
+            level <= 2
+              ? "text-[13px] font-semibold text-slate-900"
+              : "text-[12px] font-semibold text-slate-800";
+          return (
+            <div key={`drama_md_${index}`} className={`${headingClass} ${index > 0 ? "mt-3" : ""}`}>
+              {headingText}
+            </div>
+          );
+        }
+
+        const quoteMatch = trimmed.match(/^>\s?(.*)$/);
+        if (quoteMatch) {
+          return (
+            <div key={`drama_md_${index}`} className="border-l-2 border-slate-200 pl-3 text-slate-600 whitespace-pre-wrap">
+              {quoteMatch[1].trim()}
+            </div>
+          );
+        }
+
+        const bulletMatch = trimmed.match(/^[-*+]\s+(.+)$/);
+        if (bulletMatch) {
+          return (
+            <div key={`drama_md_${index}`} className="flex items-start gap-2 text-slate-700">
+              <span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-slate-400" />
+              <span className="min-w-0 whitespace-pre-wrap">{bulletMatch[1].trim()}</span>
+            </div>
+          );
+        }
+
+        const orderedMatch = trimmed.match(/^(\d+)\.\s+(.+)$/);
+        if (orderedMatch) {
+          return (
+            <div key={`drama_md_${index}`} className="flex items-start gap-2 text-slate-700">
+              <span className="shrink-0 text-slate-500">{orderedMatch[1]}.</span>
+              <span className="min-w-0 whitespace-pre-wrap">{orderedMatch[2].trim()}</span>
+            </div>
+          );
+        }
+
+        return (
+          <div key={`drama_md_${index}`} className="text-slate-700 whitespace-pre-wrap">
+            {trimmed}
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+const normalizePromptPolishVariants = (result) => {
+  const rawVariants = Array.isArray(result?.variants) ? result.variants : [];
+  const variants = [];
+  const seen = new Set();
+
+  rawVariants.forEach((item, index) => {
+    const text = String(item?.text || "").trim();
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    variants.push({
+      label: String(item?.label || `版本${index + 1}`).trim() || `版本${index + 1}`,
+      text,
+    });
+  });
+
+  if (!variants.length) {
+    const text = String(result?.text || "").trim();
+    if (text) {
+      variants.push({ label: "版本1", text });
+    }
+  }
+
+  return variants.slice(0, 3);
+};
+
+const PromptPolishPickerModal = ({ open, title, sourcePrompt, variants, onClose, onUse }) => {
+  if (!open) return null;
+  return (
+    <div
+      className="fixed inset-0 z-[160] flex items-center justify-center bg-white/55 px-4 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-4xl overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-[0_32px_96px_rgba(15,23,42,0.16)]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
+          <div>
+            <div className="text-sm font-semibold text-slate-800">{title || "AI 润色"}</div>
+            <div className="mt-1 text-[11px] text-slate-500">保留原始画面结构，直接从 3 个候选版本里选一个替换。</div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-slate-200 p-1.5 text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
+            aria-label="关闭润色结果"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="grid gap-4 p-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.35fr)]">
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">原始提示词</div>
+            <div className="mt-3 max-h-52 overflow-auto whitespace-pre-wrap text-sm leading-6 text-slate-700">
+              {sourcePrompt || "(空)"}
+            </div>
+          </div>
+
+          <div className="max-h-[60vh] space-y-3 overflow-auto pr-1">
+            {(variants || []).map((variant, index) => (
+              <button
+                key={`${variant?.label || "variant"}_${index}`}
+                type="button"
+                onClick={() => onUse?.(variant)}
+                className="group w-full rounded-2xl border border-slate-200 bg-white p-4 text-left transition hover:-translate-y-0.5 hover:border-slate-300 hover:bg-slate-50"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="inline-flex items-center gap-2 text-xs font-semibold text-slate-700">
+                    <Sparkles className="h-3.5 w-3.5" />
+                    <span>{variant?.label || `版本${index + 1}`}</span>
+                  </div>
+                  <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-1 text-[10px] text-slate-600 transition group-hover:border-slate-300 group-hover:bg-white">
+                    使用此版本
+                  </span>
+                </div>
+                <div className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-700">
+                  {variant?.text || ""}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const MODES_WITHOUT_APP_AUTH = new Set([
   "bg_replace",
   "gesture_swap",
@@ -228,27 +493,62 @@ const buildRouteDebug = (route, backendCalled) => ({
   backendCalled: !!backendCalled,
 });
 
+const getRouteIntentLabel = (intent) => {
+  const labelMap = {
+    SCRIPT: "脚本",
+    DRAMA: "短剧",
+    CANVAS: "画布",
+    CHITCHAT: "闲聊",
+    UNKNOWN: "未知",
+  };
+  return labelMap[intent] || String(intent || "未知");
+};
+
+const getFeedbackStatusLabel = (status) => {
+  const labelMap = {
+    pending: "待处理",
+    ignored: "已忽略",
+    accepted: "已采纳",
+    resolved: "已解决",
+    rejected: "已拒绝",
+    done: "完成",
+    error: "失败",
+  };
+  return labelMap[status] || String(status || "-");
+};
+
 const getChitchatReply = (text) => {
   const message = String(text || "").toLowerCase();
   if (message.includes("谢谢")) return "不客气，我在这儿，随时可以开始做脚本。";
   if (message.includes("晚安")) return "晚安，明天继续做内容也可以。";
   if (message.includes("拜拜") || message.includes("bye")) return "回头见，需要时直接叫我。";
-  return "我在。你可以让我生成脚本、分镜，或者导出渲染包。";
+  return "我在。你可以让我生成脚本、创作短剧，或者搭建画布工作流。";
 };
 
 const AGENT_HELP_TEXT = [
   "我可以帮你做：",
   "0) 自动搭画布：输入“帮我搭一个文生图接图生视频流程”",
   "1) 爆款脚本：输入“帮我做一个洗面奶爆款脚本”",
-  "2) 分镜查看：输入“给我生成分镜”",
-  "3) 生成视频：输入“帮我生成成片视频”",
-  "4) 导出渲染包：输入“导出 ffmpeg 渲染包”",
+  "2) 短剧创作：输入“帮我写一个竖屏短剧大纲”",
   "",
   "示例：",
   "• 帮我写一个防晒的口播脚本",
-  "• 把上一个脚本拆成分镜",
-  "• 导出刚才的渲染包",
+  "• 帮我设计一个隐藏总裁装穷的短剧打脸场景",
+  "• 帮我搭一个上传商品图后做多角度镜头的画布",
 ].join("\n");
+
+const CANVAS_CLARIFY_THOUGHT_PREFIX = "clarify_missing_prompt:";
+const CANVAS_PROMPT_EXAMPLES = [
+  "一瓶极简风洗面奶产品图，白底，棚拍光，高清细节。",
+  "保留主体构图，改成奶油质感电商海报，浅色背景，柔和打光。",
+];
+
+const parseCanvasClarification = (response) => {
+  const thought = String(response?.thought || "").trim();
+  if (!thought.startsWith(CANVAS_CLARIFY_THOUGHT_PREFIX)) return null;
+  const mode = thought.slice(CANVAS_CLARIFY_THOUGHT_PREFIX.length).trim();
+  return { mode };
+};
 
 const createDefaultAgentSession = () => ({
   id: `session_${makeAgentId()}`,
@@ -273,6 +573,72 @@ const readFilesAsDataUrls = (files) =>
     ),
   );
 
+const IMAGE_FILE_EXT_PATTERN = /\.(?:png|jpe?g|webp|gif|bmp|svg|avif|heic|heif)$/i;
+const VIDEO_FILE_EXT_PATTERN = /\.(?:mp4|webm|mov|m4v|avi|mkv|m3u8)$/i;
+
+const isImageFileLike = (file) => {
+  const mime = String(file?.type || "").trim().toLowerCase();
+  if (mime.startsWith("image/")) return true;
+  const name = String(file?.name || "").trim();
+  return IMAGE_FILE_EXT_PATTERN.test(name);
+};
+
+const isVideoFileLike = (file) => {
+  const mime = String(file?.type || "").trim().toLowerCase();
+  if (mime.startsWith("video/")) return true;
+  const name = String(file?.name || "").trim();
+  return VIDEO_FILE_EXT_PATTERN.test(name);
+};
+
+const isMediaFileLike = (file) => isImageFileLike(file) || isVideoFileLike(file);
+
+const getMediaUploadNodePosition = (point) => ({
+  x: point.x - MEDIA_UPLOAD_NODE_WIDTH / 2,
+  y: point.y - MEDIA_UPLOAD_NODE_DROP_OFFSET_Y,
+});
+
+const normalizeVideoSplitSecond = (value, fallback = 0) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, Math.round(parsed * 100) / 100);
+};
+
+const normalizeVideoSplitSegments = (segments, durationSec = 0) => {
+  const safeDuration = normalizeVideoSplitSecond(durationSec, 0);
+  const normalized = (Array.isArray(segments) ? segments : [])
+    .map((item) => {
+      const startSec = normalizeVideoSplitSecond(item?.startSec, 0);
+      const rawEndSec = normalizeVideoSplitSecond(item?.endSec, startSec + 1);
+      const endSec = safeDuration > 0 ? Math.min(rawEndSec, safeDuration) : rawEndSec;
+      return {
+        startSec,
+        endSec,
+      };
+    })
+    .filter((item) => item.endSec > item.startSec);
+
+  return normalized.length
+    ? normalized
+    : [{ startSec: 0, endSec: safeDuration > 0 ? Math.min(safeDuration, DEFAULT_VIDEO_SPLIT_SEGMENT_LENGTH_SEC) : DEFAULT_VIDEO_SPLIT_SEGMENT_LENGTH_SEC }];
+};
+
+const formatVideoSplitTime = (value) => {
+  const totalSec = Math.max(0, Math.round(Number(value || 0)));
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  if (hours > 0) {
+    return [hours, minutes, seconds].map((item) => String(item).padStart(2, "0")).join(":");
+  }
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+};
+
+const buildVideoSplitDrafts = (segments) =>
+  (Array.isArray(segments) ? segments : []).map((item) => ({
+    startSec: String(item?.startSec ?? ""),
+    endSec: String(item?.endSec ?? ""),
+  }));
+
 const shortenSessionTitle = (text, maxLen = 16) => {
   const value = String(text || "").trim();
   if (!value) return "新会话";
@@ -295,7 +661,9 @@ const loadAgentStore = () => {
     const sessions = parsed.sessions.map((session) => ({
       ...session,
       turns: Array.isArray(session?.turns)
-        ? session.turns.map((turn) =>
+        ? session.turns
+          .filter((turn) => turn?.intent !== "STORYBOARD")
+          .map((turn) =>
             turn?.status === "running"
               ? {
                   ...turn,
@@ -305,7 +673,7 @@ const loadAgentStore = () => {
               : turn,
           )
         : [],
-      pendingTask: session?.pendingTask || null,
+      pendingTask: session?.pendingTask?.intent === "STORYBOARD" ? null : session?.pendingTask || null,
     }));
     return {
       sessions,
@@ -502,9 +870,11 @@ const formatAIChatErrorMessage = (error) => {
 
 const IMAGE_URL_PATTERN = /(https?:\/\/[^\s"'<>]+?\.(?:png|jpe?g|webp|gif|bmp|svg)(?:\?[^\s"'<>]*)?)/i;
 const VIDEO_URL_PATTERN = /(https?:\/\/[^\s"'<>]+?\.(?:mp4|webm|mov|m4v|avi|mkv|m3u8)(?:\?[^\s"'<>]*)?)/i;
+const BIN_URL_PATTERN = /(https?:\/\/[^\s"'<>]+?\.bin(?:\?[^\s"'<>]*)?)/i;
 const URL_PATTERN = /(https?:\/\/[^\s"'<>]+)/i;
 const RELATIVE_IMAGE_PATH_PATTERN = /(\/[^\s"'<>]+?\.(?:png|jpe?g|webp|gif|bmp|svg)(?:\?[^\s"'<>]*)?)/i;
 const RELATIVE_VIDEO_PATH_PATTERN = /(\/[^\s"'<>]+?\.(?:mp4|webm|mov|m4v|avi|mkv|m3u8)(?:\?[^\s"'<>]*)?)/i;
+const RELATIVE_BIN_PATH_PATTERN = /(\/[^\s"'<>]+?\.bin(?:\?[^\s"'<>]*)?)/i;
 const MARKDOWN_IMAGE_PATTERN = /!\[[^\]]*?\]\(([^)]+)\)/i;
 
 const isLikelyImageUrl = (value) => {
@@ -589,8 +959,10 @@ const isLikelyVideoUrl = (value) => {
   if (!text) return false;
   if (text.startsWith("data:video/")) return true;
   if (VIDEO_URL_PATTERN.test(text)) return true;
+  if (BIN_URL_PATTERN.test(text)) return true;
   if (text.startsWith("/") && RELATIVE_VIDEO_PATH_PATTERN.test(text)) return true;
-  if ((text.startsWith("http://") || text.startsWith("https://")) && /(video|mp4|webm|m3u8|play)/i.test(text)) return true;
+  if (text.startsWith("/") && RELATIVE_BIN_PATH_PATTERN.test(text)) return true;
+  if ((text.startsWith("http://") || text.startsWith("https://")) && /(video|mp4|webm|m3u8|play|mime=video|content_type=video|hdai_chat)/i.test(text)) return true;
   return false;
 };
 
@@ -620,6 +992,12 @@ const pickFirstVideoUrl = (payload) => {
     return "";
   }
   if (typeof payload !== "object") return "";
+
+  const ext = String(payload?.ext || "").trim().toLowerCase();
+  if (ext === ".bin" || ext === "bin") {
+    const directBinUrl = String(payload?.url || payload?.video_url || payload?.output_video || "").trim();
+    if (directBinUrl) return directBinUrl;
+  }
 
   const directKeys = [
     "video",
@@ -720,6 +1098,20 @@ const VOLC_VIDEO_HD_TEMPLATE_ENUM_2 = 2;
 const DEFAULT_VIDEO_HD_MODEL_ID = "1";
 const DEFAULT_IMAGE_MODEL_ID = DEFAULT_AI_MODELS[0].id;
 const DEFAULT_VIDEO_MODEL_ID = DEFAULT_VIDEO_MODELS[0].id;
+
+const isSeedanceReferenceModeModel = (...values) =>
+  values.some((value) => {
+    const text = String(value || "").trim().toLowerCase();
+    if (!text) return false;
+    return (
+      text.includes("seedance2.0") ||
+      text.includes("seedance 2.0") ||
+      text.includes("seedance-2.0") ||
+      text.includes("seedance_2.0") ||
+      text === VIDEO_MODEL_1_0.toLowerCase() ||
+      text === VIDEO_MODEL_1_5.toLowerCase()
+    );
+  });
 
 const pickModelField = (record, keys) => {
   for (const key of keys) {
@@ -940,6 +1332,10 @@ const buildAIChatParamPayload = (paramList) => {
     }
     if (name.includes("时长") || name.includes("duration")) {
       payload.ai_video_param_duration_id = valueId;
+      continue;
+    }
+    if (name.includes("imagetype") || name.includes("模式")) {
+      payload.ai_video_param_imagetype_id = valueId;
     }
   }
   return payload;
@@ -1002,6 +1398,19 @@ const listAIChatParamValues = (paramList, keywords = []) => {
   if (!item) return EMPTY_LIST;
   return sortParamValues(item?.param_values || EMPTY_LIST)
     .map((val) => String(val?.param_value || "").trim())
+    .filter(Boolean);
+};
+
+const listAIChatParamChoiceOptions = (paramList, keywords = []) => {
+  const item = findAIChatParamItem(paramList, keywords);
+  if (!item) return EMPTY_LIST;
+  return sortParamValues(item?.param_values || EMPTY_LIST)
+    .map((val) => {
+      const value = String(val?.param_value || "").trim();
+      const label = String(val?.remark || val?.param_value || "").trim();
+      if (!value || !label) return null;
+      return { value, label };
+    })
     .filter(Boolean);
 };
 
@@ -1263,14 +1672,6 @@ const extractApiError = (data) => {
   return String(d);
 };
 
-const isVideoContent = (url) => {
-  if (!url) return false;
-  if (url.startsWith("data:video")) return true;
-  if (/\.(mp4|webm|mov|m4v|avi|mkv|m3u8)(?:$|\?)/i.test(url)) return true;
-  if (/\/video\b|output_video|play_url|m3u8|mime=video/i.test(url)) return true;
-  return false;
-};
-
 // --- Helper: Graph Traversal ---
 const getDownstreamNodes = (startNodeIds, nodes, connections) => {
   const visited = new Set(startNodeIds);
@@ -1302,7 +1703,7 @@ const checkNodeReady = (node, nodes, connections) => {
   const hasUpstreamImages = sourceNodes.some((n) => (n.data.images?.length || 0) > 0 || (n.data.uploadedImages?.length || 0) > 0);
   const hasUpstreamText = sourceNodes.some((n) => (n.data.text?.length || 0) > 0);
   const hasLocalImages = (node.data.uploadedImages?.length || 0) > 0;
-  const hasInternalPrompt = node.data.prompt && node.data.prompt.length > 0;
+  const hasInternalPrompt = buildCanvasNodePrompt(node).length > 0;
 
   if (node.data.mode === "text2img" || node.data.mode === "local_text2img") return hasUpstreamText || hasInternalPrompt;
   if (node.data.mode === "multi_image_generate") return hasUpstreamImages || hasLocalImages;
@@ -1314,8 +1715,8 @@ const VideoPlayer = ({ src, className, controls = false, autoPlay = true, ...pro
   const [error, setError] = useState(false);
   if (error)
     return (
-      <div className={`flex flex-col items-center justify-center bg-slate-900 text-slate-500 ${className}`}>
-        <FileWarning className="w-6 h-6 mb-1 text-red-400" />
+      <div className={`flex flex-col items-center justify-center bg-slate-100 text-slate-500 ${className}`}>
+        <FileWarning className="w-6 h-6 mb-1 text-rose-500" />
         <span className="text-[10px]">视频加载失败</span>
       </div>
     );
@@ -1347,7 +1748,7 @@ const ToolIconBtn = ({ icon, onClick, disabled, active, title }) => {
           ? "text-slate-600 cursor-not-allowed"
           : active
           ? "bg-red-500/20 text-red-400 hover:bg-red-500/30"
-          : "text-slate-500 hover:bg-slate-800 hover:text-slate-200"
+          : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
       }`}
     >
       {IconComponent ? React.createElement(IconComponent, { className: "w-4 h-4" }) : null}
@@ -1380,13 +1781,13 @@ const SidebarBtn = ({
               expanded ? "h-12 w-12 -translate-y-0.5" : "h-10 w-10"
             } ${
               active
-                ? "border-cyan-400/25 bg-[linear-gradient(180deg,rgba(15,23,42,0.95),rgba(30,41,59,0.9))] text-slate-100 shadow-[0_10px_24px_rgba(8,145,178,0.14)]"
-                : "border-transparent text-slate-300 hover:bg-slate-800/70 hover:text-slate-100"
+                ? "border-cyan-200 bg-cyan-50 text-cyan-700 shadow-[0_10px_24px_rgba(15,23,42,0.06)]"
+                : "border-transparent bg-white text-slate-600 hover:bg-slate-100 hover:text-slate-900"
             }`
           : `mx-auto min-h-[88px] w-full items-center justify-between overflow-hidden rounded-[22px] px-3.5 py-3 ${
               active
-                ? "bg-[linear-gradient(180deg,rgba(15,23,42,0.95),rgba(30,41,59,0.9))] text-slate-100 border-cyan-400/25 shadow-[0_10px_24px_rgba(8,145,178,0.14)]"
-                : "bg-[linear-gradient(180deg,rgba(15,23,42,0.82),rgba(15,23,42,0.68))] text-slate-300 border-slate-800/80 hover:border-slate-600/80 hover:bg-slate-900/90"
+                ? "bg-cyan-50 text-cyan-800 border-cyan-200 shadow-[0_10px_24px_rgba(15,23,42,0.06)]"
+                : "bg-white text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-50"
             }`
       }`}
     >
@@ -1399,7 +1800,7 @@ const SidebarBtn = ({
         className={`${
           compact ? (expanded ? "w-8 h-8" : "w-7 h-7") : "h-10 w-10"
         } rounded-2xl ${bg} flex items-center justify-center ${color} shrink-0 ring-1 transition-all ${
-          active ? "ring-cyan-400/35" : "ring-slate-700/70 group-hover:ring-slate-500/60"
+          active ? "ring-slate-300" : "ring-slate-200 group-hover:ring-slate-300"
         }`}
       >
         {IconComponent
@@ -1412,18 +1813,18 @@ const SidebarBtn = ({
         <>
           <div className="ml-3 min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <div className={`truncate text-[13px] font-medium leading-5 ${active ? "text-slate-100" : "text-slate-200 group-hover:text-slate-100"}`}>{label}</div>
+              <div className={`truncate text-[13px] font-medium leading-5 ${active ? "text-cyan-800" : "text-slate-800 group-hover:text-slate-900"}`}>{label}</div>
               {category ? (
                 <span className={`shrink-0 rounded-full border px-2 py-1 text-[9px] leading-none ${
                   active
-                    ? "border-cyan-400/20 bg-cyan-400/10 text-cyan-100"
-                    : "border-slate-700/80 bg-slate-900/75 text-slate-400"
+                    ? "border-cyan-200 bg-white text-cyan-700"
+                    : "border-slate-200 bg-slate-50 text-slate-500"
                 }`}>
                   {category}
                 </span>
               ) : null}
             </div>
-            <div className="mt-1 text-[11px] leading-5 text-slate-400 whitespace-normal break-words">{desc}</div>
+            <div className={`mt-1 text-[11px] leading-5 whitespace-normal break-words ${active ? "text-cyan-700" : "text-slate-500"}`}>{desc}</div>
           </div>
         </>
       )}
@@ -1435,59 +1836,77 @@ const SidebarSectionHeader = ({ title, open, onToggle }) => (
   <button
     type="button"
     onClick={onToggle}
-    className="inline-flex w-full items-center gap-2 rounded-xl px-1 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-300 transition-colors hover:text-slate-100"
+    className="inline-flex w-full items-center gap-2 rounded-xl px-1 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500 transition-colors hover:text-slate-800"
   >
     <span className={`transition-transform ${open ? "rotate-90" : ""}`}>
       <ChevronRight className="w-3 h-3 text-slate-500" />
     </span>
-    <span className="h-1.5 w-1.5 rounded-full bg-yellow-400/90 shrink-0" />
+    <span className="h-1.5 w-1.5 rounded-full bg-slate-400 shrink-0" />
     <span>{title}</span>
-    <span className="h-px flex-1 bg-gradient-to-r from-yellow-500/25 via-slate-500/25 to-transparent" />
+    <span className="h-px flex-1 bg-gradient-to-r from-slate-300 via-slate-200 to-transparent" />
   </button>
 );
 
 const AgentResultCardContent = ({
   turn,
   onRetry,
-  onSelectPrimary,
-  onExport,
-  onCopyPath,
+  onBriefChange,
+  onBriefSubmit,
+  onBriefSubmitDefaults,
+  onBriefCancel,
+  onSelectAngle,
 }) => {
   const response = turn?.response || null;
   const topics = response?.topics || [];
-  const matchedAssets = response?.matched_assets || {};
-  const plans = turn?.localEditPlans || response?.edit_plans || [];
-  const exportMap = turn?.exports || {};
+  const brief = normalizeScriptBrief(turn?.scriptBrief || turn?.scriptBriefDraft || {});
+  const isDramaTurn = turn?.intent === "DRAMA";
 
   if (turn?.status === "running") {
     return (
       <div className="space-y-2">
-        <div className="inline-flex items-center gap-2 text-xs text-slate-200">
+        <div className="inline-flex items-center gap-2 text-xs text-slate-700">
           <Loader2 className="w-3.5 h-3.5 animate-spin" />
           Agent 执行中
         </div>
         <div className="text-[11px] text-slate-400">
-          当前步骤：{AGENT_RUN_STEPS[Math.min(turn?.stepIndex || 0, AGENT_RUN_STEPS.length - 1)]}
+          当前步骤：{getAgentTurnStepLabel(turn)}
         </div>
       </div>
     );
   }
 
   if (turn?.status === "clarify") {
-    return <div className="text-xs text-slate-200">{turn?.assistantText || "你想做哪个产品/品类？"}</div>;
+    return (
+      <div className="space-y-2">
+        <div className="text-xs text-slate-700">{turn?.assistantText || "先确认脚本设定。"}</div>
+        {turn?.scriptBriefDraft ? (
+          <ScriptBriefCard
+            draft={brief}
+            audienceOptions={SCRIPT_AUDIENCE_OPTIONS}
+            priceBandOptions={SCRIPT_PRICE_BAND_OPTIONS}
+            conversionGoalOptions={SCRIPT_CONVERSION_GOAL_OPTIONS}
+            platformOptions={SCRIPT_PLATFORM_OPTIONS}
+            onChange={(nextBrief) => onBriefChange?.(turn?.id, nextBrief)}
+            onSubmit={() => onBriefSubmit?.(turn?.id)}
+            onSubmitDefaults={() => onBriefSubmitDefaults?.(turn?.id)}
+            onCancel={() => onBriefCancel?.(turn?.id)}
+          />
+        ) : null}
+      </div>
+    );
   }
 
   if (turn?.status === "error") {
     return (
       <div className="space-y-2">
-        <div className="inline-flex items-center gap-1.5 text-xs text-red-300">
+        <div className="inline-flex items-center gap-1.5 text-xs text-rose-600">
           <AlertCircle className="w-3.5 h-3.5" />
           {turn?.error || "请求失败"}
         </div>
         <button
           type="button"
           onClick={() => onRetry?.(turn?.id)}
-          className="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-700 text-[11px] text-slate-200 hover:bg-slate-800"
+          className="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-200 text-[11px] text-slate-700 hover:bg-slate-100"
         >
           <RotateCcw className="w-3 h-3" />
           重试
@@ -1500,79 +1919,35 @@ const AgentResultCardContent = ({
     return <div className="text-xs text-slate-500">暂无结果</div>;
   }
 
+  if (isDramaTurn) {
+    return (
+      <div className="space-y-2">
+        {response?.summary ? (
+          <div className="text-[11px] tracking-[0.12em] text-slate-500 text-left">短剧摘要</div>
+        ) : null}
+        {response?.summary ? (
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs leading-6">
+            <DramaMarkdownBlock value={response.summary} className="space-y-1.5" />
+          </div>
+        ) : null}
+        <div className="text-[11px] tracking-[0.12em] text-slate-500 text-left">创作结果</div>
+        <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs leading-6">
+          <DramaMarkdownBlock value={response?.text || ""} className="space-y-1.5" />
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="space-y-2.5">
-      <div className="grid grid-cols-2 gap-1 text-[11px] text-slate-300">
-        <div>persona: {response?.audience_context?.persona || "-"}</div>
-        <div>confidence: {response?.audience_context?.confidence ?? "-"}</div>
-        <div>prompt: {response?.prompt_version || "-"}</div>
-        <div>policy: {response?.policy_version || "-"}</div>
-        <div>llm_calls: {response?.total_llm_calls ?? 0}</div>
-      </div>
-      <div className="flex flex-wrap gap-1">
-        {AGENT_WARNING_KEYS.map((item) => {
-          const active = !!response?.[item.key];
-          return (
-            <span
-              key={item.key}
-              className={`px-1.5 py-0.5 rounded border text-[10px] ${
-                active
-                  ? "bg-amber-500/15 border-amber-400/40 text-amber-200"
-                  : "bg-slate-800 border-slate-700 text-slate-400"
-              }`}
-            >
-              {item.label}:{active ? "Y" : "N"}
-            </span>
-          );
-        })}
-      </div>
-
-      <details className="rounded border border-slate-800 bg-slate-950/70" open>
-        <summary className="cursor-pointer px-2 py-1.5 text-xs text-slate-200">Topics</summary>
-        <div className="px-2 pb-2">
-          <TopicCards topics={topics} />
-        </div>
-      </details>
-
-      <details
-        className="rounded border border-slate-800 bg-slate-950/70"
-        open={turn?.uiFocusSection === "storyboard"}
-      >
-        <summary className="cursor-pointer px-2 py-1.5 text-xs text-slate-200">Storyboard</summary>
-        <div className="px-2 pb-2">
-          <StoryboardView topics={topics} />
-        </div>
-      </details>
-
-      <details className="rounded border border-slate-800 bg-slate-950/70">
-        <summary className="cursor-pointer px-2 py-1.5 text-xs text-slate-200">Asset Match</summary>
-        <div className="px-2 pb-2">
-          <AssetMatchView
-            topics={topics}
-            matchedAssets={matchedAssets}
-            onSelectPrimary={(shotId, candidate) => onSelectPrimary?.(turn?.id, shotId, candidate)}
-          />
-        </div>
-      </details>
-
-      <details className="rounded border border-slate-800 bg-slate-950/70">
-        <summary className="cursor-pointer px-2 py-1.5 text-xs text-slate-200">EditPlan</summary>
-        <div className="px-2 pb-2">
-          <EditPlanView plans={plans} />
-        </div>
-      </details>
-
-      <details className="rounded border border-slate-800 bg-slate-950/70">
-        <summary className="cursor-pointer px-2 py-1.5 text-xs text-slate-200">Export</summary>
-        <div className="px-2 pb-2">
-          <ExportPanel
-            plans={plans}
-            exportMap={exportMap}
-            onExport={(plan) => onExport?.(turn?.id, plan)}
-            onCopyPath={onCopyPath}
-          />
-        </div>
-      </details>
+    <div className="space-y-2">
+      <ScriptPlanSummary brief={brief} />
+      <div className="text-[11px] tracking-[0.12em] text-slate-500 text-left">脚本主题</div>
+      <TopicCards
+        topics={topics}
+        selectedAngle={brief?.selectedAngle || ""}
+        onSelectAngle={(angle) => onSelectAngle?.(turn?.id, angle)}
+      />
+      <ScriptExecutionPlan brief={brief} topics={topics} response={response} />
     </div>
   );
 };
@@ -1584,15 +1959,20 @@ const PropertyPanel = ({
   node,
   updateData,
   onClose,
+  apiFetch,
+  onOpenPromptPolishPicker,
   imageModelOptions = EMPTY_LIST,
   videoModelOptions = EMPTY_LIST,
   resolveModelParamsForId,
 }) => {
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [promptPolishLoading, setPromptPolishLoading] = useState(false);
+  const [promptPolishError, setPromptPolishError] = useState("");
   const [videoParamOptions, setVideoParamOptions] = useState(() => ({
     resolution: EMPTY_LIST,
     ratio: EMPTY_LIST,
     duration: EMPTY_LIST,
+    imageType: EMPTY_LIST,
   }));
   const [videoParamLoading, setVideoParamLoading] = useState(false);
   const [videoParamError, setVideoParamError] = useState("");
@@ -1613,9 +1993,9 @@ const PropertyPanel = ({
   const activeTemplates = PROMPT_TEMPLATES[node?.data?.mode];
 
   const theme = (() => {
-    if (isPostProcessor) return { text: "text-cyan-400", bg: "bg-cyan-600", border: "border-cyan-500" };
-    if (isVideoGen) return { text: "text-rose-400", bg: "bg-rose-600", border: "border-rose-500" };
-    return { text: "text-purple-400", bg: "bg-purple-600", border: "border-purple-500" };
+    if (isPostProcessor) return { text: "text-cyan-700", bg: "bg-cyan-50", border: "border-cyan-200" };
+    if (isVideoGen) return { text: "text-rose-700", bg: "bg-rose-50", border: "border-rose-200" };
+    return { text: "text-purple-700", bg: "bg-purple-50", border: "border-purple-200" };
   })();
 
   const availableTools = Object.keys(TOOL_CARDS).filter((key) => {
@@ -1643,6 +2023,20 @@ const PropertyPanel = ({
     (node?.data?.mode === "text2img" || node?.data?.mode === "multi_image_generate");
   const currentVideoModelId = String(node?.data?.model || "").trim();
   const currentImageModelId = String(node?.data?.model || "").trim();
+  const currentVideoModelOption = useMemo(
+    () => videoModelOptions.find((item) => String(item?.id || "").trim() === currentVideoModelId) || null,
+    [videoModelOptions, currentVideoModelId]
+  );
+  const supportsReferenceMode = useMemo(
+    () =>
+      isSeedanceReferenceModeModel(
+        currentVideoModelId,
+        currentVideoModelOption?.name,
+        currentVideoModelOption?.label,
+        currentVideoModelOption?.remark
+      ),
+    [currentVideoModelId, currentVideoModelOption]
+  );
 
   useEffect(() => {
     const tid = window.setTimeout(() => {
@@ -1677,6 +2071,7 @@ const PropertyPanel = ({
           resolution: readOptions(["resolution", "分辨率"]),
           ratio: readOptions(["ratio", "比例", "宽高比"]),
           duration: readOptions(["duration", "时长"]),
+          imageType: listAIChatParamChoiceOptions(paramList, ["imagetype", "模式"]),
         });
       })
       .catch((error) => {
@@ -1741,6 +2136,17 @@ const PropertyPanel = ({
     return ["16:9", "9:16", "3:4", "21:9", "adaptive"];
   }, [videoParamOptions.ratio]);
 
+  const remoteImageTypeOptions = useMemo(() => {
+    if (videoParamOptions.imageType.length) return videoParamOptions.imageType;
+    if (supportsReferenceMode) {
+      return [
+        { value: "2", label: "首尾帧" },
+        { value: "4", label: "全能参考" },
+      ];
+    }
+    return EMPTY_LIST;
+  }, [videoParamOptions.imageType, supportsReferenceMode]);
+
   const remoteImageSizeOptions = useMemo(() => {
     if (imageParamOptions.size.length) return imageParamOptions.size;
     return imageParamLoading || imageParamError ? ["1024x1024", "2k", "4k"] : EMPTY_LIST;
@@ -1784,8 +2190,15 @@ const PropertyPanel = ({
       changed = true;
     }
 
+    const currentImageType = String(currentTemplates.imageType || "").trim();
+    const allowedImageTypes = new Set(remoteImageTypeOptions.map((item) => String(item?.value || "").trim()).filter(Boolean));
+    if (remoteImageTypeOptions.length && !allowedImageTypes.has(currentImageType)) {
+      nextTemplates.imageType = String(remoteImageTypeOptions[0]?.value || "").trim();
+      changed = true;
+    }
+
     if (changed) updateData(node.id, { templates: nextTemplates });
-  }, [isRemoteImg2Video, remoteResolutionOptions, remoteDurationOptions, remoteRatioOptions, node?.data?.templates, node?.id, updateData]);
+  }, [isRemoteImg2Video, remoteResolutionOptions, remoteDurationOptions, remoteRatioOptions, remoteImageTypeOptions, node?.data?.templates, node?.id, updateData]);
 
   useEffect(() => {
     if (!isRemoteImageGen || !node) return;
@@ -1862,27 +2275,65 @@ const PropertyPanel = ({
     updateData(node.id, { templates: newTemplates, prompt: node.data.mode === "relight" ? autoPrompt : (node.data.prompt || autoPrompt) });
   };
 
-  const previewPrompt = [
-    node?.data?.prompt,
-    node?.data?.templates?.style,
-    node?.data?.templates?.direction,
-    node?.data?.templates?.vibe,
-    node?.data?.templates?.note,
-  ]
-    .filter(Boolean)
-    .join(", ");
+  const promptValue = promptModes.includes(node?.data?.mode)
+    ? (node?.data?.prompt || "")
+    : (node?.data?.templates?.note || node?.data?.prompt || "");
+  const previewPrompt = buildCanvasNodePrompt(node);
+  const showPromptPolishButton = Boolean(
+    promptModes.includes(node?.data?.mode) ||
+    node?.data?.mode === "img2video" ||
+    node?.data?.mode === "local_img2video" ||
+    node?.data?.mode === "relight",
+  );
+
+  const handlePolishPrompt = async () => {
+    const sourcePrompt = String(promptValue || "").trim();
+    if (!sourcePrompt) {
+      setPromptPolishError("请先输入提示词");
+      return;
+    }
+    if (!apiFetch) {
+      setPromptPolishError("缺少 API 连接");
+      return;
+    }
+    setPromptPolishLoading(true);
+    setPromptPolishError("");
+    try {
+      const result = await polishCanvasPrompt(
+        { prompt: sourcePrompt, mode: node?.data?.mode },
+        apiFetch,
+      );
+      const variants = normalizePromptPolishVariants(result);
+      if (!variants.length) {
+        throw new Error("润色结果为空");
+      }
+      onOpenPromptPolishPicker?.({
+        title: "提示词润色",
+        sourcePrompt,
+        variants,
+        onUse: (text) => {
+          if (promptModes.includes(node?.data?.mode)) updateData(node.id, { prompt: text });
+          else updateTemplateData("note", text);
+        },
+      });
+    } catch (error) {
+      setPromptPolishError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPromptPolishLoading(false);
+    }
+  };
 
   if (!hasConfigNode) return null;
 
   return (
-  <div className="w-80 bg-slate-900 border-l border-slate-800 z-40 flex flex-col shadow-xl shrink-0 h-full min-h-0 overflow-hidden animate-in slide-in-from-right duration-200">
+  <div className="w-80 bg-white border-l border-slate-200 z-40 flex flex-col shadow-[0_24px_48px_rgba(15,23,42,0.08)] shrink-0 h-full min-h-0 overflow-hidden animate-in slide-in-from-right duration-200">
     {/* Header（固定） */}
-    <div className="flex items-center justify-between border-b border-slate-800 p-4">
+    <div className="flex items-center justify-between border-b border-slate-200 p-4">
       <div className="flex items-center gap-2">
-        <Sliders className="w-4 h-4 text-slate-400" />
-        <span className="font-bold text-sm text-slate-200">配置面板</span>
+        <Sliders className="w-4 h-4 text-slate-500" />
+        <span className="font-bold text-sm text-slate-800">配置面板</span>
       </div>
-      <button onClick={onClose} className="text-slate-500 hover:text-white p-1 rounded hover:bg-slate-800">
+      <button onClick={onClose} className="text-slate-500 hover:text-slate-900 p-1 rounded hover:bg-slate-100">
         <X className="w-4 h-4" />
       </button>
     </div>
@@ -1911,12 +2362,12 @@ const PropertyPanel = ({
                     className={`relative flex flex-col p-2 rounded-lg border text-left transition-all ${
                       isActive
                         ? `bg-opacity-10 ${theme.bg} ${theme.border} shadow-sm`
-                        : "bg-slate-950 border-slate-800 hover:border-slate-600"
+                        : "bg-white border-slate-200 hover:border-slate-300"
                     }`}
                   >
                     <div className="flex items-center gap-2 mb-1">
                       <tool.icon className={`w-4 h-4 ${isActive ? theme.text : "text-slate-500"}`} />
-                      <span className={`text-xs font-bold ${isActive ? theme.text : "text-slate-300"}`}>{tool.short}</span>
+                      <span className={`text-xs font-bold ${isActive ? theme.text : "text-slate-600"}`}>{tool.short}</span>
                     </div>
                   </button>
                 );
@@ -1937,8 +2388,8 @@ const PropertyPanel = ({
                       }}
                       className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg border text-[10px] transition-colors ${
                         isActive
-                          ? "bg-purple-600/10 border-purple-500 text-purple-400"
-                          : "bg-slate-950 border-slate-800 text-slate-500 hover:border-slate-600"
+                          ? "bg-purple-50 border-purple-200 text-purple-700"
+                          : "bg-white border-slate-200 text-slate-600 hover:border-slate-300"
                       }`}
                     >
                       <tool.icon className="w-3 h-3" />
@@ -1955,12 +2406,12 @@ const PropertyPanel = ({
   <div className="space-y-1">
     <div className="flex justify-between items-center">
       <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">尾帧参考图</div>
-      <span className="text-[9px] text-slate-500 bg-slate-800 px-1.5 rounded">可选</span>
+      <span className="text-[9px] text-slate-500 bg-slate-100 border border-slate-200 px-1.5 rounded">可选</span>
     </div>
 
     <div
-      className={`relative w-full rounded border border-dashed bg-slate-950/50 flex items-center justify-center group transition-colors ${
-        node.data.refImage ? `h-32 border-rose-500/50` : `h-24 border-slate-700 hover:border-rose-500`
+      className={`relative w-full rounded border border-dashed bg-slate-50 flex items-center justify-center group transition-colors ${
+        node.data.refImage ? `h-32 border-rose-300/60` : `h-24 border-slate-300 hover:border-rose-400`
       }`}
     >
       {node.data.refImage ? (
@@ -1976,10 +2427,10 @@ const PropertyPanel = ({
               e.stopPropagation();
               updateData(node.id, { refImage: null });
             }}
-            className="absolute top-1 right-1 bg-black/60 rounded-full p-1.5 hover:bg-red-500 z-20 transition-colors"
+            className="absolute top-1 right-1 bg-white/90 rounded-full border border-slate-200 p-1.5 hover:bg-red-50 z-20 transition-colors"
             title="移除尾帧"
           >
-            <X className="w-3 h-3 text-white" />
+            <X className="w-3 h-3 text-slate-600" />
           </button>
         </>
       ) : (
@@ -2005,26 +2456,42 @@ const PropertyPanel = ({
             <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
               {promptModes.includes(node.data.mode) ? "提示词" : "补充描述 / Note"}
             </div>
-            <textarea
-              className={`w-full bg-slate-950 border rounded p-2 text-xs text-slate-200 outline-none resize-none transition-colors border-slate-800 focus:${theme.border}`}
-              rows={3}
-              placeholder={
-                node.data.mode === "relight"
-                  ? "例如: 增加暖色调氛围..."
-                  : node.data.mode === "rmbg"
-                  ? "背景移除无需提示词"
-                  : "输入额外指令..."
-              }
-              value={
-                promptModes.includes(node.data.mode)
-                  ? (node.data.prompt || "")
-                  : (node.data.templates?.note || node.data.prompt || "")
-              }
-              onChange={(e) => {
-                if (promptModes.includes(node.data.mode)) updateData(node.id, { prompt: e.target.value });
-                else updateTemplateData("note", e.target.value);
-              }}
-            />
+            <div className="relative">
+              <textarea
+            className={`w-full bg-white border rounded p-2 pr-10 pb-9 text-xs text-slate-700 outline-none resize-none transition-colors border-slate-200 focus:${theme.border}`}
+                rows={3}
+                placeholder={
+                  node.data.mode === "relight"
+                    ? "例如: 增加暖色调氛围..."
+                    : node.data.mode === "rmbg"
+                    ? "背景移除无需提示词"
+                    : "输入额外指令..."
+                }
+                value={promptValue}
+                onChange={(e) => {
+                  setPromptPolishError("");
+                  if (promptModes.includes(node.data.mode)) updateData(node.id, { prompt: e.target.value });
+                  else updateTemplateData("note", e.target.value);
+                }}
+              />
+
+              {showPromptPolishButton && (
+                <button
+                  type="button"
+                  onClick={handlePolishPrompt}
+                  disabled={promptPolishLoading || !String(promptValue || "").trim()}
+                  className={`absolute bottom-2 right-2 inline-flex h-7 w-7 items-center justify-center rounded-md border transition-colors ${
+                    promptPolishLoading
+                      ? "border-purple-200 bg-purple-50 text-purple-700"
+                      : "border-slate-200 bg-white text-slate-600 hover:border-purple-300 hover:bg-purple-50 hover:text-purple-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                  }`}
+                  title="提示词润色"
+                >
+                  {promptPolishLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                </button>
+              )}
+            </div>
+            {promptPolishError && <div className="text-[10px] text-amber-400">{promptPolishError}</div>}
           </div>
         )}
       </div>
@@ -2034,7 +2501,7 @@ const PropertyPanel = ({
         <>
           <button
             onClick={() => setShowAdvanced(!showAdvanced)}
-            className="flex items-center justify-between text-xs text-slate-400 bg-slate-800/50 p-2 rounded hover:bg-slate-800 mt-2"
+            className="flex items-center justify-between text-xs text-slate-500 bg-slate-50 p-2 rounded hover:bg-slate-100 mt-2"
             type="button"
           >
             <span>{isVideoUpscaleSkill ? "高级设置 (输出规格)" : (isSkillProcessor ? "高级设置 (尺寸/比例/数量)" : "高级设置 (模型/尺寸/风格)")}</span>
@@ -2062,8 +2529,8 @@ const PropertyPanel = ({
                           })}
                           className={`px-2 py-1.5 rounded-md text-[10px] border transition-all ${
                             isSelected
-                              ? "bg-rose-600 border-rose-500 text-white"
-                              : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-600"
+                              ? "bg-rose-50 border-rose-200 text-rose-700"
+                              : "bg-white border-slate-200 text-slate-600 hover:border-slate-300"
                           }`}
                         >
                           {item.label}
@@ -2089,8 +2556,8 @@ const PropertyPanel = ({
                     onClick={() => updateData(node.id, { model: m.id })}
                     className={`flex items-center gap-2 p-2 rounded-lg border text-xs transition-all text-left ${
                       node.data.model === m.id
-                        ? "bg-indigo-600/20 border-indigo-500 text-indigo-300"
-                        : "bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-600"
+                        ? "bg-indigo-50 border-indigo-200 text-indigo-700"
+                        : "bg-white border-slate-200 text-slate-600 hover:border-slate-300"
                     }`}
                     type="button"
                   >
@@ -2130,8 +2597,8 @@ const PropertyPanel = ({
                     }}
                     className={`flex items-center gap-2 p-2 rounded-lg border text-xs transition-all text-left ${
                       node.data.model === m.id
-                        ? "bg-rose-600/20 border-rose-500 text-rose-200"
-                        : "bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-600"
+                        ? "bg-rose-50 border-rose-200 text-rose-700"
+                        : "bg-white border-slate-200 text-slate-600 hover:border-slate-300"
                     }`}
                     type="button"
                   >
@@ -2161,7 +2628,7 @@ const PropertyPanel = ({
           const clamped = Math.min(20, Math.max(1, isNaN(v) ? 5 : v));
           updateData(node.id, { templates: { ...(node.data.templates || {}), duration: clamped } });
         }}
-        className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-200 outline-none"
+        className="w-full bg-white border border-slate-200 rounded p-2 text-xs text-slate-700 outline-none"
       />
     ) : (
       <div className="grid grid-cols-4 gap-2">
@@ -2175,7 +2642,7 @@ const PropertyPanel = ({
               type="button"
               onClick={() => updateData(node.id, { templates: { ...(node.data.templates || {}), duration: secText } })}
               className={`px-2 py-1.5 rounded-md text-[10px] border transition-all ${
-                isSel ? "bg-rose-600 border-rose-500 text-white" : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-600"
+                isSel ? "bg-rose-50 border-rose-200 text-rose-700" : "bg-white border-slate-200 text-slate-600 hover:border-slate-300"
               }`}
             >
               {secText}秒
@@ -2192,8 +2659,8 @@ const PropertyPanel = ({
   <div className="space-y-2">
     <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">分辨率</div>
 
-    <div className="grid grid-cols-3 gap-2">
-      {(isLocalImg2Video ? ["480p", "720p"] : remoteResolutionOptions).map((r) => {
+	                  <div className="grid grid-cols-3 gap-2">
+	      {(isLocalImg2Video ? ["480p", "720p"] : remoteResolutionOptions).map((r) => {
         const fallbackResolution = isLocalImg2Video ? "480p" : "1080p";
         const remoteFallbackResolution = String(remoteResolutionOptions[0] || fallbackResolution);
         const isSel = (node.data.templates?.resolution || remoteFallbackResolution) === r;
@@ -2203,7 +2670,7 @@ const PropertyPanel = ({
             key={r}
             onClick={() => updateData(node.id, { templates: { ...(node.data.templates || {}), resolution: r } })}
             className={`px-2 py-1.5 rounded-md text-[10px] border transition-all ${
-              isSel ? "bg-rose-600 border-rose-500 text-white" : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-600"
+              isSel ? "bg-rose-50 border-rose-200 text-rose-700" : "bg-white border-slate-200 text-slate-600 hover:border-slate-300"
             }`}
           >
             {label}
@@ -2211,10 +2678,37 @@ const PropertyPanel = ({
         );
       })}
     </div>
-  </div>
-)}
+	  </div>
+	)}
 
-          {/* Size & Ratio */}
+		          {isVideoGen && !isLocalImg2Video && remoteImageTypeOptions.length > 0 && (
+	  <div className="space-y-2">
+	    <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">参考模式</div>
+
+	    <div className="grid grid-cols-2 gap-2">
+	      {remoteImageTypeOptions.map((item) => {
+	        const value = String(item?.value || "").trim();
+	        const label = String(item?.label || value).trim();
+	        const fallbackValue = String(remoteImageTypeOptions[0]?.value || "").trim();
+	        const isSel = String(node.data.templates?.imageType || fallbackValue) === value;
+	        return (
+	          <button
+	            key={value}
+	            onClick={() => updateData(node.id, { templates: { ...(node.data.templates || {}), imageType: value } })}
+	            className={`px-2 py-1.5 rounded-md text-[10px] border transition-all ${
+	              isSel ? "bg-rose-50 border-rose-200 text-rose-700" : "bg-white border-slate-200 text-slate-600 hover:border-slate-300"
+	            }`}
+	            type="button"
+	          >
+	            {label}
+	          </button>
+	        );
+	      })}
+	    </div>
+	  </div>
+	)}
+
+	          {/* Size & Ratio */}
           {isProcessor &&
             (node.data.mode === "text2img" ||
               node.data.mode === "local_text2img" ||
@@ -2237,7 +2731,7 @@ const PropertyPanel = ({
                             updateData(node.id, { templates: nextTemplates });
                           }}
                           className={`px-2 py-1 rounded-md text-[10px] border transition-all ${
-                            isSelected ? "bg-purple-600 border-purple-500 text-white" : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-600"
+                            isSelected ? "bg-purple-50 border-purple-200 text-purple-700" : "bg-white border-slate-200 text-slate-600 hover:border-slate-300"
                           }`}
                           type="button"
                         >
@@ -2264,8 +2758,8 @@ const PropertyPanel = ({
                           onClick={() => updateData(node.id, { templates: { ...(node.data.templates || {}), size: value } })}
                           className={`px-2 py-1.5 rounded-md text-[10px] border transition-all ${
                             isSelected
-                              ? "bg-purple-600 border-purple-500 text-white"
-                              : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-600"
+                              ? "bg-purple-50 border-purple-200 text-purple-700"
+                              : "bg-white border-slate-200 text-slate-600 hover:border-slate-300"
                           }`}
                           type="button"
                         >
@@ -2307,8 +2801,8 @@ const PropertyPanel = ({
                           }}
                           className={`px-2 py-1 rounded-md text-[10px] border transition-all ${
                             isSelected
-                              ? "bg-purple-600 border-purple-500 text-white"
-                              : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-600"
+                              ? "bg-purple-50 border-purple-200 text-purple-700"
+                              : "bg-white border-slate-200 text-slate-600 hover:border-slate-300"
                           }`}
                           type="button"
                         >
@@ -2340,8 +2834,8 @@ const PropertyPanel = ({
                           }}
                           className={`flex flex-col items-center gap-1 p-1 rounded-md border transition-all ${
                             isSelected
-                              ? "bg-purple-600 border-purple-500 text-white"
-                              : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-600 hover:bg-slate-800"
+                              ? "bg-purple-50 border-purple-200 text-purple-700"
+                              : "bg-white border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50"
                           }`}
                           title={ar.label}
                           type="button"
@@ -2376,7 +2870,7 @@ const PropertyPanel = ({
                         })
                       }
                       className={`px-2 py-1 rounded-md text-[10px] border transition-all ${
-                        isSelected ? `${theme.bg} ${theme.border} text-white` : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-600"
+                        isSelected ? `${theme.bg} ${theme.border} ${theme.text}` : "bg-white border-slate-200 text-slate-600 hover:border-slate-300"
                       }`}
                       type="button"
                     >
@@ -2402,7 +2896,7 @@ const PropertyPanel = ({
                     step="1"
                     value={node.data.batchSize || 1}
                     onChange={(e) => updateData(node.id, { batchSize: parseInt(e.target.value) })}
-                    className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer"
+                    className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer"
                   />
                 </div>
               )}
@@ -2413,9 +2907,9 @@ const PropertyPanel = ({
     </div>
 
     {/* Preview（固定在底部） */}
-    <div className="p-4 border-t border-slate-800">
+    <div className="p-4 border-t border-slate-200">
       <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">提示词预览</div>
-      <div className="text-[10px] text-slate-400 font-mono bg-black/20 p-2 rounded border border-slate-800/50 break-words">
+      <div className="text-[10px] text-slate-500 font-mono bg-slate-50 p-2 rounded border border-slate-200 break-words">
         {previewPrompt || "(暂无内容)"}
       </div>
     </div>
@@ -2427,6 +2921,8 @@ const NodeComponent = ({
   selected,
   onMouseDown,
   updateData,
+  apiFetch,
+  onOpenPromptPolishPicker,
   onDelete,
   onConnectStart,
   onConnectEnd,
@@ -2440,18 +2936,29 @@ const NodeComponent = ({
   onRunCompactRemoveWatermark,
   onRunCompactThreeView,
   onRunCompactVideoUpscale,
+  onRunVideoLineart,
+  onRunVideoSplit,
 }) => {
   const [showCopied, setShowCopied] = useState(false);
   const [compactActiveIndex, setCompactActiveIndex] = useState(0);
+  const [simpleMediaActionIndex, setSimpleMediaActionIndex] = useState(-1);
   const [showCompactInputActions, setShowCompactInputActions] = useState(false);
   const [showCompactVideoUpscaleOptions, setShowCompactVideoUpscaleOptions] = useState(false);
+  const [showSimpleVideoEditor, setShowSimpleVideoEditor] = useState(false);
   const [compactRemovePending, setCompactRemovePending] = useState(false);
   const [compactThreeViewPending, setCompactThreeViewPending] = useState(false);
   const [compactVideoUpscalePending, setCompactVideoUpscalePending] = useState(false);
+  const [videoLineartPending, setVideoLineartPending] = useState(false);
+  const [videoSplitPending, setVideoSplitPending] = useState(false);
+  const [videoSplitDuration, setVideoSplitDuration] = useState(0);
+  const [videoSplitSegments, setVideoSplitSegments] = useState(() => normalizeVideoSplitSegments([]));
+  const [videoSplitDrafts, setVideoSplitDrafts] = useState(() => buildVideoSplitDrafts(normalizeVideoSplitSegments([])));
+  const [promptPolishLoading, setPromptPolishLoading] = useState(false);
+  const [promptPolishError, setPromptPolishError] = useState("");
   const nodeRootRef = useRef(null);
 
   const handleFileUpload = (e) => {
-    const files = Array.from(e.target.files || []);
+    const files = Array.from(e.target.files || []).filter((file) => isMediaFileLike(file));
     if (!files.length) return;
 
     readFilesAsDataUrls(files).then((newImages) => {
@@ -2469,9 +2976,14 @@ const NodeComponent = ({
 
   const downloadAll = () => {
     (node.data.images || []).forEach((img, i) => {
+      const filename = `batch_result_${i}.${isVideoContent(img) ? "mp4" : "png"}`;
+      if (isVideoContent(img)) {
+        void downloadMedia(img, filename);
+        return;
+      }
       const link = document.createElement("a");
       link.href = img;
-      link.download = `batch_result_${i}.${isVideoContent(img) ? "mp4" : "png"}`;
+      link.download = filename;
       link.click();
     });
   };
@@ -2494,17 +3006,54 @@ const NodeComponent = ({
     setTimeout(() => setShowCopied(false), 2000);
   };
 
+  const handlePolishTextInputPrompt = async () => {
+    const sourcePrompt = String(node.data.text || "").trim();
+    if (!sourcePrompt) {
+      setPromptPolishError("请先输入提示词");
+      return;
+    }
+    if (!apiFetch) {
+      setPromptPolishError("缺少 API 连接");
+      return;
+    }
+    setPromptPolishLoading(true);
+    setPromptPolishError("");
+    try {
+      const result = await polishCanvasPrompt({ prompt: sourcePrompt, mode: "text2img" }, apiFetch);
+      const variants = normalizePromptPolishVariants(result);
+      if (!variants.length) {
+        throw new Error("润色结果为空");
+      }
+      onOpenPromptPolishPicker?.({
+        title: "提示词润色",
+        sourcePrompt,
+        variants,
+        onUse: (text) => updateData(node.id, { text }),
+      });
+    } catch (error) {
+      setPromptPolishError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPromptPolishLoading(false);
+    }
+  };
+
   const isProcessor = node.type === NODE_TYPES.PROCESSOR;
   const isPostProcessor = node.type === NODE_TYPES.POST_PROCESSOR;
   const isVideoGen = node.type === NODE_TYPES.VIDEO_GEN;
   const isAI = isProcessor || isPostProcessor || isVideoGen;
   const isInput = node.type === NODE_TYPES.INPUT;
   const isOutput = node.type === NODE_TYPES.OUTPUT;
+  const isTextInputNode = node.type === NODE_TYPES.TEXT_INPUT;
   const isCompactInput = isInput && !!node.data.compact;
+  const isSimpleMediaInputNode = isInput && !isCompactInput;
   const compactImages = isCompactInput ? (node.data.images || []) : EMPTY_LIST;
   const compactActiveImage = compactImages[compactActiveIndex] || compactImages[0] || "";
   const compactActiveIsVideo = isVideoContent(compactActiveImage);
   const hasCompactThreeViewResult = isCompactInput && !!String(node.data.compactThreeViewSourceImage || "").trim();
+  const compactActionBusy = compactRemovePending || compactThreeViewPending || compactVideoUpscalePending || videoLineartPending;
+  const simpleMediaImages = isSimpleMediaInputNode ? (node.data.images || []) : EMPTY_LIST;
+  const simpleMediaActiveVideo = simpleMediaActionIndex >= 0 ? simpleMediaImages[simpleMediaActionIndex] || "" : "";
+  const hasSimpleMediaVideoSelection = isSimpleMediaInputNode && simpleMediaActionIndex >= 0 && isVideoContent(simpleMediaActiveVideo);
 
   useEffect(() => {
     setCompactActiveIndex((prev) => {
@@ -2514,9 +3063,29 @@ const NodeComponent = ({
   }, [compactImages.length]);
 
   useEffect(() => {
+    setSimpleMediaActionIndex((prev) => {
+      const mediaCount = Array.isArray(node.data?.images) ? node.data.images.length : 0;
+      if (mediaCount <= 0) return -1;
+      return Math.min(prev, mediaCount - 1);
+    });
+  }, [node.data?.images?.length]);
+
+  useEffect(() => {
+    if (simpleMediaActionIndex < 0) {
+      setShowSimpleVideoEditor(false);
+    }
+  }, [simpleMediaActionIndex]);
+
+  useEffect(() => {
     setShowCompactInputActions(false);
     setShowCompactVideoUpscaleOptions(false);
+    setShowSimpleVideoEditor(false);
     setCompactActiveIndex(0);
+    setSimpleMediaActionIndex(-1);
+    setVideoSplitDuration(0);
+    const nextSegments = normalizeVideoSplitSegments([]);
+    setVideoSplitSegments(nextSegments);
+    setVideoSplitDrafts(buildVideoSplitDrafts(nextSegments));
   }, [node.id]);
 
   useEffect(() => {
@@ -2526,21 +3095,32 @@ const NodeComponent = ({
   }, [showCompactInputActions]);
 
   useEffect(() => {
-    if (!showCompactInputActions) return undefined;
+    if (!showCompactInputActions && simpleMediaActionIndex < 0) return undefined;
 
     const handleOutsideMouseDown = (event) => {
       if (nodeRootRef.current?.contains(event.target)) return;
       setShowCompactInputActions(false);
+      setShowCompactVideoUpscaleOptions(false);
+      setSimpleMediaActionIndex(-1);
+      setShowSimpleVideoEditor(false);
     };
 
     document.addEventListener("mousedown", handleOutsideMouseDown, true);
     return () => {
       document.removeEventListener("mousedown", handleOutsideMouseDown, true);
     };
-  }, [showCompactInputActions]);
+  }, [showCompactInputActions, simpleMediaActionIndex]);
+
+  useEffect(() => {
+    if (!showSimpleVideoEditor) return;
+    setVideoSplitDuration(0);
+    const nextSegments = normalizeVideoSplitSegments([]);
+    setVideoSplitSegments(nextSegments);
+    setVideoSplitDrafts(buildVideoSplitDrafts(nextSegments));
+  }, [showSimpleVideoEditor, simpleMediaActiveVideo]);
 
   const handleCompactThreeViewClick = async () => {
-    if (compactRemovePending || compactThreeViewPending || compactVideoUpscalePending) return;
+    if (compactActionBusy) return;
     try {
       setCompactThreeViewPending(true);
       await onRunCompactThreeView?.(node.id, compactActiveIndex);
@@ -2553,7 +3133,7 @@ const NodeComponent = ({
   };
 
   const handleCompactRemoveClick = async () => {
-    if (compactRemovePending || compactThreeViewPending || compactVideoUpscalePending) return;
+    if (compactActionBusy) return;
     try {
       setCompactRemovePending(true);
       await onRunCompactRemoveWatermark?.(node.id, compactActiveIndex);
@@ -2566,12 +3146,12 @@ const NodeComponent = ({
   };
 
   const handleCompactVideoUpscaleClick = async () => {
-    if (compactRemovePending || compactThreeViewPending || compactVideoUpscalePending) return;
+    if (compactActionBusy) return;
     setShowCompactVideoUpscaleOptions((prev) => !prev);
   };
 
   const handleCompactVideoUpscaleOptionClick = async (templateEnum) => {
-    if (compactRemovePending || compactThreeViewPending || compactVideoUpscalePending) return;
+    if (compactActionBusy) return;
     try {
       setCompactVideoUpscalePending(true);
       await onRunCompactVideoUpscale?.(node.id, compactActiveIndex, templateEnum);
@@ -2584,30 +3164,162 @@ const NodeComponent = ({
     }
   };
 
+  const handleVideoLineartRun = async (mediaIndex = 0) => {
+    if (compactActionBusy) return;
+    try {
+      setVideoLineartPending(true);
+      await onRunVideoLineart?.(node.id, mediaIndex, {
+        lineStrength: DEFAULT_VIDEO_LINEART_STRENGTH,
+        lineColor: DEFAULT_VIDEO_LINEART_COLOR,
+      });
+      setShowCompactInputActions(false);
+      setShowCompactVideoUpscaleOptions(false);
+    } catch (error) {
+      console.error("[Workbench] video_lineart_direct:error", error);
+    } finally {
+      setVideoLineartPending(false);
+    }
+  };
+
+  const handleCompactVideoLineartClick = async () => {
+    if (compactActionBusy) return;
+    setShowCompactVideoUpscaleOptions(false);
+    await handleVideoLineartRun(compactActiveIndex);
+  };
+
+  const handleSimpleVideoLineartClick = async () => {
+    if (videoLineartPending) return;
+    setShowSimpleVideoEditor(false);
+    await handleVideoLineartRun(simpleMediaActionIndex);
+  };
+
+  const handleSimpleVideoEditorClick = () => {
+    if (videoSplitPending) return;
+    setShowSimpleVideoEditor(true);
+  };
+
+  const handleVideoSplitMetadataLoaded = (event) => {
+    const nextDuration = Number(event.currentTarget?.duration || 0);
+    if (!Number.isFinite(nextDuration) || nextDuration <= 0) return;
+    setVideoSplitDuration(nextDuration);
+    setVideoSplitSegments((prev) => {
+      const normalized = normalizeVideoSplitSegments(prev, nextDuration);
+      setVideoSplitDrafts(buildVideoSplitDrafts(normalized));
+      return normalized;
+    });
+  };
+
+  const commitVideoSplitDrafts = useCallback(
+    (drafts = videoSplitDrafts) => {
+      const next = drafts.map((item, index) => {
+        const base = videoSplitSegments[index] || { startSec: 0, endSec: DEFAULT_VIDEO_SPLIT_SEGMENT_LENGTH_SEC };
+        const startSec =
+          String(item?.startSec ?? "").trim() === ""
+            ? base.startSec
+            : normalizeVideoSplitSecond(item?.startSec, base.startSec);
+        const endSec =
+          String(item?.endSec ?? "").trim() === ""
+            ? base.endSec
+            : normalizeVideoSplitSecond(item?.endSec, base.endSec);
+        return {
+          startSec,
+          endSec,
+        };
+      });
+      const normalized = normalizeVideoSplitSegments(next, videoSplitDuration);
+      setVideoSplitSegments(normalized);
+      setVideoSplitDrafts(buildVideoSplitDrafts(normalized));
+      return normalized;
+    },
+    [videoSplitDrafts, videoSplitSegments, videoSplitDuration],
+  );
+
+  const handleVideoSplitSegmentChange = (index, key, value) => {
+    setVideoSplitDrafts((prev) =>
+      prev.map((item, itemIndex) =>
+        itemIndex === index
+          ? {
+              ...item,
+              [key]: value,
+            }
+          : item,
+      ),
+    );
+  };
+
+  const handleVideoSplitSegmentAdd = () => {
+    setVideoSplitSegments((prev) => {
+      const normalizedPrev = normalizeVideoSplitSegments(prev, videoSplitDuration);
+      const last = normalizedPrev[normalizedPrev.length - 1] || { startSec: 0, endSec: 0 };
+      let startSec = normalizeVideoSplitSecond(last.endSec, 0);
+      let endSec = startSec + DEFAULT_VIDEO_SPLIT_SEGMENT_LENGTH_SEC;
+      if (videoSplitDuration > 0) {
+        if (startSec >= videoSplitDuration) {
+          startSec = Math.max(0, videoSplitDuration - 1);
+        }
+        endSec = Math.min(videoSplitDuration, Math.max(startSec + 0.5, endSec));
+      }
+      const normalized = normalizeVideoSplitSegments(
+        [
+          ...normalizedPrev,
+          {
+            startSec,
+            endSec,
+          },
+        ],
+        videoSplitDuration,
+      );
+      setVideoSplitDrafts(buildVideoSplitDrafts(normalized));
+      return normalized;
+    });
+  };
+
+  const handleVideoSplitSegmentRemove = (index) => {
+    setVideoSplitSegments((prev) => {
+      const normalized = normalizeVideoSplitSegments(prev.filter((_, itemIndex) => itemIndex !== index), videoSplitDuration);
+      setVideoSplitDrafts(buildVideoSplitDrafts(normalized));
+      return normalized;
+    });
+  };
+
+  const handleVideoSplitRun = async () => {
+    if (videoSplitPending || simpleMediaActionIndex < 0) return;
+    try {
+      setVideoSplitPending(true);
+      const normalized = commitVideoSplitDrafts();
+      await onRunVideoSplit?.(node.id, simpleMediaActionIndex, normalized);
+      setShowSimpleVideoEditor(false);
+    } catch (error) {
+      console.error("[Workbench] video_split_direct:error", error);
+    } finally {
+      setVideoSplitPending(false);
+    }
+  };
+
   let statusColor =
-    "border-slate-800/85 shadow-[0_24px_56px_rgba(2,6,23,0.42)] hover:border-slate-700/90";
+    "border-slate-200 shadow-[0_24px_56px_rgba(15,23,42,0.08)] hover:border-slate-300";
   if (node.data.status === "error") {
     statusColor =
-      "border-red-900/70 shadow-[0_24px_60px_rgba(127,29,29,0.28)] ring-1 ring-red-500/12";
+      "border-rose-200 shadow-[0_24px_60px_rgba(244,63,94,0.08)] ring-1 ring-rose-100";
   } else if (node.data.status === "success") {
     statusColor =
-      "border-emerald-900/55 shadow-[0_24px_60px_rgba(2,44,34,0.28)]";
+      "border-emerald-200 shadow-[0_24px_60px_rgba(16,185,129,0.08)]";
   } else if (selected) {
     statusColor =
-      "border-cyan-800/80 ring-1 ring-cyan-400/22 shadow-[0_28px_64px_rgba(8,145,178,0.18)]";
+      "border-cyan-300 ring-1 ring-cyan-100 shadow-[0_28px_64px_rgba(6,182,212,0.08)]";
   }
 
   let title = "Node";
-  if (isInput) title = node.data.title || (isCompactInput ? "图片编辑区" : `图片/视频上传 (${node.data.images?.length || 0})`);
+  if (isInput) title = node.data.title || (isCompactInput ? "图片编辑区" : "图片/视频上传");
   if (isOutput) title = node.data.title || (node.data.angleLabel ? `${node.data.angleLabel} 输出 (${node.data.images?.length || 0})` : `输出 (${node.data.images?.length || 0})`);
   if (isProcessor) title = node.data.title || TOOL_CARDS[node.data.mode]?.name || "图片生成";
   if (isPostProcessor) title = node.data.title || TOOL_CARDS[node.data.mode]?.name || "后期增强";
   if (isVideoGen) title = node.data.title || TOOL_CARDS[node.data.mode]?.name || "视频生成";
-  if (node.type === NODE_TYPES.TEXT_INPUT) title = "提示词";
+  if (isTextInputNode) title = "提示词";
 
   const getThemeColor = () => {
     const modeCard = TOOL_CARDS[node.data.mode] || null;
-    if (node.type === NODE_TYPES.TEXT_INPUT) return { text: "text-amber-300", icon: Clipboard };
+    if (isTextInputNode) return { text: "text-amber-300", icon: Clipboard };
     if (isPostProcessor) return { text: "text-cyan-400", icon: modeCard?.icon || Palette };
     if (isVideoGen) return { text: "text-rose-400", icon: modeCard?.icon || Film };
     if (isInput) return { text: "text-blue-400", icon: Upload };
@@ -2635,8 +3347,8 @@ const NodeComponent = ({
     return (
       <div
         key={i}
-        className={`aspect-square relative group overflow-hidden rounded-[18px] border bg-[linear-gradient(150deg,rgba(6,11,21,0.98),rgba(13,22,39,0.95)_58%,rgba(9,17,31,0.98))] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] cursor-pointer ${
-          isActive ? "border-amber-700/80 ring-1 ring-amber-400/18" : "border-slate-800/90"
+        className={`aspect-square relative group overflow-hidden rounded-[18px] border bg-white shadow-[0_12px_28px_rgba(15,23,42,0.08)] cursor-pointer ${
+          isActive ? "border-amber-300 ring-1 ring-amber-200" : "border-slate-200"
         }`}
         onPointerDown={(e) => e.stopPropagation()}
         onMouseDown={(e) => e.stopPropagation()}
@@ -2658,7 +3370,7 @@ const NodeComponent = ({
         {/* ✅ 真正可点的“选中产物”按钮：只选中，不预览 */}
         <button
           type="button"
-          className="nodrag absolute bottom-1.5 left-1.5 text-[9px] px-2 py-1 rounded-full border border-slate-700/80 bg-slate-950/84 text-slate-100 opacity-0 backdrop-blur-sm group-hover:opacity-100 hover:border-amber-700/60 hover:bg-amber-500/12 hover:text-amber-100 transition"
+          className="nodrag absolute bottom-1.5 left-1.5 text-[9px] px-2 py-1 rounded-full border border-slate-200 bg-white/95 text-slate-700 opacity-0 backdrop-blur-sm group-hover:opacity-100 hover:border-amber-300 hover:bg-amber-50 hover:text-amber-700 transition"
           onPointerDown={(e) => e.stopPropagation()}
           onMouseDown={(e) => e.stopPropagation()}
           onClick={(e) => {
@@ -2690,24 +3402,34 @@ const NodeComponent = ({
     );
   };
 
+  const nodeShellClass = isTextInputNode
+    ? `absolute w-[280px] overflow-visible border bg-white shadow-none flex flex-col transition-colors duration-200 ${
+        node.data.status === "error" ? "border-rose-300" : selected ? "border-cyan-400" : "border-slate-300"
+      }`
+    : isSimpleMediaInputNode
+    ? `absolute w-[280px] overflow-visible border bg-white shadow-none flex flex-col transition-colors duration-200 ${
+        selected ? "border-cyan-400" : "border-slate-300"
+      }`
+    : `absolute ${isCompactInput ? "w-[292px] overflow-visible rounded-[22px] border-slate-200" : "w-[280px] overflow-hidden rounded-[30px]"} border bg-white backdrop-blur-xl shadow-[0_24px_56px_rgba(15,23,42,0.12)] flex flex-col transition-colors transition-shadow duration-200 ${isCompactInput ? "" : "before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:h-14 before:bg-[linear-gradient(180deg,rgba(255,255,255,0.78),rgba(255,255,255,0))]"} ${statusColor}`;
+
   return (
     <div
       ref={nodeRootRef}
-      className={`absolute ${isCompactInput ? "w-[292px] overflow-visible rounded-[22px] border-slate-800/70" : "w-[280px] overflow-hidden rounded-[30px]"} border bg-[linear-gradient(155deg,rgba(6,12,24,0.98),rgba(10,19,35,0.96)_50%,rgba(7,15,29,0.98))] backdrop-blur-xl shadow-[0_30px_80px_rgba(2,6,23,0.48)] flex flex-col transition-colors transition-shadow duration-200 ${isCompactInput ? "" : "before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:h-14 before:bg-[linear-gradient(180deg,rgba(148,163,184,0.06),rgba(148,163,184,0))]"} ${statusColor}`}
+      className={nodeShellClass}
       style={{ left: node.x, top: node.y }}
       onMouseDown={onMouseDown}
     >
-      {!isCompactInput && (
+      {!isCompactInput && !isTextInputNode && !isSimpleMediaInputNode && (
         <div
-          className={`relative flex justify-between items-center px-4 py-3.5 border-b border-slate-800/80 bg-[linear-gradient(180deg,rgba(15,23,42,0.28),rgba(15,23,42,0.06))] handle cursor-grab active:cursor-grabbing ${
-            selected ? "bg-cyan-950/24" : ""
+          className={`relative flex justify-between items-center px-4 py-3.5 border-b border-slate-200 bg-slate-50 handle cursor-grab active:cursor-grabbing ${
+            selected ? "bg-cyan-50" : ""
           }`}
         >
           <div className="flex items-center gap-2 overflow-hidden">
-            <div className="flex h-8 w-8 items-center justify-center rounded-[14px] border border-slate-800/80 bg-slate-900/70 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+            <div className="flex h-8 w-8 items-center justify-center rounded-[14px] border border-slate-200 bg-white shadow-[0_6px_18px_rgba(15,23,42,0.06)]">
               <Icon className={`w-4 h-4 ${theme.text}`} />
             </div>
-            <span className="font-medium text-[13px] tracking-[0.01em] text-slate-100 truncate select-none">{title}</span>
+            <span className="font-medium text-[13px] tracking-[0.01em] text-slate-800 truncate select-none">{title}</span>
             {isReady && (
               <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.85)]" title="Ready to Run" />
             )}
@@ -2720,7 +3442,7 @@ const NodeComponent = ({
                   e.stopPropagation();
                   onRetry?.();
                 }}
-                className="rounded-full border border-red-900/70 bg-red-950/50 p-1.5 text-red-300 transition hover:border-red-800 hover:bg-red-900/60"
+                className="rounded-full border border-rose-200 bg-rose-50 p-1.5 text-rose-600 transition hover:border-rose-300 hover:bg-rose-100"
                 title="重试"
                 type="button"
               >
@@ -2729,7 +3451,7 @@ const NodeComponent = ({
             )}
 
             {isAI && (
-              <div className={`rounded-full border p-1.5 ${selected ? "border-slate-700/90 bg-slate-900/80 text-white" : "border-slate-800/80 bg-slate-900/55 text-slate-500"}`}>
+              <div className={`rounded-full border p-1.5 ${selected ? "border-slate-300 bg-slate-100 text-slate-800" : "border-slate-200 bg-white text-slate-500"}`}>
                 <Settings2 className="w-3.5 h-3.5" />
               </div>
             )}
@@ -2740,13 +3462,211 @@ const NodeComponent = ({
                 e.stopPropagation();
                 onDelete?.();
               }}
-              className="rounded-full border border-slate-800/80 bg-slate-900/55 p-1.5 text-slate-500 transition-colors hover:border-red-900 hover:bg-red-950/55 hover:text-red-300"
+              className="rounded-full border border-slate-200 bg-white p-1.5 text-slate-500 transition-colors hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
               type="button"
             >
               <X className="w-3.5 h-3.5" />
             </button>
           </div>
         </div>
+      )}
+
+      {isTextInputNode && (
+        <div className="absolute -top-5 left-0 cursor-grab select-none text-[11px] font-medium tracking-[0.08em] text-slate-500 active:cursor-grabbing">
+          {title}
+        </div>
+      )}
+
+	      {isSimpleMediaInputNode && (
+	        <>
+	          {hasSimpleMediaVideoSelection ? (
+	            <div
+	              className="absolute bottom-full left-0 z-30 mb-3 w-max min-w-[252px] max-w-[calc(100vw-48px)] border border-slate-200 bg-white p-2 shadow-[0_22px_54px_rgba(15,23,42,0.12)]"
+	              onMouseDown={(e) => e.stopPropagation()}
+	            >
+	              <div className="flex gap-2">
+	                <button
+	                  type="button"
+	                  className="inline-flex h-8 w-8 items-center justify-center border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700"
+	                  onClick={() => onPreview?.(simpleMediaActiveVideo)}
+	                  title="预览视频"
+	                  aria-label="预览视频"
+	                >
+	                  <Play className="h-3.5 w-3.5" />
+	                </button>
+	                <button
+	                  type="button"
+	                  disabled={videoSplitPending}
+	                  className="flex min-w-[108px] items-center justify-center gap-1.5 border border-slate-200 bg-white px-4 py-2 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-65"
+	                  onClick={handleSimpleVideoEditorClick}
+	                >
+	                  <Scissors className="h-3.5 w-3.5" />
+	                  <span>视频编辑</span>
+	                </button>
+	                <button
+	                  type="button"
+	                  disabled={videoLineartPending || videoSplitPending}
+	                  className="flex min-w-[108px] items-center justify-center gap-1.5 border border-slate-200 bg-white px-4 py-2 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-65"
+	                  onClick={handleSimpleVideoLineartClick}
+	                >
+	                  <Scan className="h-3.5 w-3.5" />
+	                  <span>转线稿</span>
+	                </button>
+	                <button
+	                  type="button"
+	                  className="inline-flex h-8 w-8 items-center justify-center border border-slate-200 bg-white text-slate-500 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
+	                  onClick={() => {
+	                    removeImage(simpleMediaActionIndex);
+	                    setSimpleMediaActionIndex(-1);
+	                  }}
+	                  title="删除素材"
+	                  aria-label="删除素材"
+	                >
+	                  <Trash2 className="h-3.5 w-3.5" />
+	                </button>
+	              </div>
+	            </div>
+	          ) : null}
+	          {showSimpleVideoEditor && hasSimpleMediaVideoSelection ? (
+	            <div
+	              className="fixed inset-0 z-[170] flex items-center justify-center bg-white/42 px-4 backdrop-blur-[2px]"
+	              onMouseDown={(e) => {
+	                e.stopPropagation();
+	                setShowSimpleVideoEditor(false);
+	              }}
+	            >
+	              <div
+	                className="relative w-full max-w-3xl border border-slate-200 bg-white shadow-[0_28px_80px_rgba(15,23,42,0.12)]"
+	                onMouseDown={(e) => e.stopPropagation()}
+	              >
+	                <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+	                  <div>
+	                    <div className="text-sm font-medium text-slate-900">视频编辑</div>
+	                    <div className="mt-1 text-[11px] text-slate-500">对当前视频做多段分割，导出后会追加回当前上传组件。</div>
+	                  </div>
+	                  <button
+	                    type="button"
+	                    className="inline-flex h-8 w-8 items-center justify-center border border-slate-200 bg-white text-slate-500 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
+	                    onClick={() => setShowSimpleVideoEditor(false)}
+	                    title="关闭编辑器"
+	                    aria-label="关闭编辑器"
+	                  >
+	                    <X className="h-4 w-4" />
+	                  </button>
+	                </div>
+	                <div className="grid gap-0 md:grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)]">
+	                  <div className="border-b border-slate-200 bg-slate-50 p-4 md:border-b-0 md:border-r">
+	                    <div className="overflow-hidden border border-slate-200 bg-black">
+	                      <video
+	                        src={simpleMediaActiveVideo}
+	                        controls
+	                        playsInline
+	                        className="block aspect-video w-full bg-black object-contain"
+	                        onLoadedMetadata={handleVideoSplitMetadataLoaded}
+	                      />
+	                    </div>
+	                    <div className="mt-3 flex items-center justify-between text-[11px] text-slate-500">
+	                      <span>当前视频</span>
+	                      <span>{videoSplitDuration > 0 ? `总时长 ${formatVideoSplitTime(videoSplitDuration)}` : "读取时长中..."}</span>
+	                    </div>
+	                  </div>
+	                  <div className="p-4">
+	                    <div className="flex items-center justify-between">
+	                      <div className="text-[12px] font-medium text-slate-800">分段列表</div>
+	                      <button
+	                        type="button"
+	                        className="inline-flex h-8 items-center justify-center gap-1.5 border border-slate-200 bg-white px-3 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+	                        onClick={handleVideoSplitSegmentAdd}
+	                      >
+	                        <Plus className="h-3.5 w-3.5" />
+	                        新增分段
+	                      </button>
+	                    </div>
+	                    <div className="mt-3 space-y-2">
+	                      {videoSplitSegments.map((segment, index) => (
+	                        <div key={`${node.id}-split-${index}`} className="border border-slate-200 bg-slate-50 p-3">
+	                          <div className="mb-2 flex items-center justify-between text-[11px] text-slate-500">
+	                            <span>片段 {index + 1}</span>
+	                            {videoSplitSegments.length > 1 ? (
+	                              <button
+	                                type="button"
+	                                className="inline-flex h-7 w-7 items-center justify-center border border-slate-200 bg-white text-slate-500 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
+	                                onClick={() => handleVideoSplitSegmentRemove(index)}
+	                                title="删除分段"
+	                                aria-label="删除分段"
+	                              >
+	                                <Trash2 className="h-3.5 w-3.5" />
+	                              </button>
+	                            ) : null}
+	                          </div>
+	                          <div className="grid grid-cols-2 gap-2">
+	                            <label className="text-[10px] text-slate-500">
+	                              <div className="mb-1">开始秒数</div>
+	                              <input
+	                                type="number"
+	                                step="0.1"
+	                                value={videoSplitDrafts[index]?.startSec ?? ""}
+	                                disabled={videoSplitPending}
+	                                className="h-8 w-full border border-slate-200 bg-white px-2 text-[11px] text-slate-700 outline-none disabled:cursor-wait disabled:opacity-60"
+	                                onChange={(e) => handleVideoSplitSegmentChange(index, "startSec", e.target.value)}
+	                                onBlur={() => commitVideoSplitDrafts()}
+	                              />
+	                            </label>
+	                            <label className="text-[10px] text-slate-500">
+	                              <div className="mb-1">结束秒数</div>
+	                              <input
+	                                type="number"
+	                                step="0.1"
+	                                value={videoSplitDrafts[index]?.endSec ?? ""}
+	                                disabled={videoSplitPending}
+	                                className="h-8 w-full border border-slate-200 bg-white px-2 text-[11px] text-slate-700 outline-none disabled:cursor-wait disabled:opacity-60"
+	                                onChange={(e) => handleVideoSplitSegmentChange(index, "endSec", e.target.value)}
+	                                onBlur={() => commitVideoSplitDrafts()}
+	                              />
+	                            </label>
+	                          </div>
+	                          <div className="mt-2 text-[10px] text-slate-500">
+	                            {formatVideoSplitTime(segment.startSec)} - {formatVideoSplitTime(segment.endSec)}
+	                          </div>
+	                        </div>
+	                      ))}
+	                    </div>
+		                    <div className="mt-4 flex items-center justify-between gap-3 border-t border-slate-200 pt-4">
+		                      <div className="text-[10px] leading-5 text-slate-500">
+		                        支持多段导出。每段都会生成一个独立上传组件并排布到画布中。
+		                      </div>
+	                      <button
+	                        type="button"
+	                        disabled={videoSplitPending}
+	                        className="inline-flex h-9 items-center justify-center gap-1.5 border border-slate-200 bg-white px-4 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-65"
+	                        onClick={handleVideoSplitRun}
+	                      >
+	                        {videoSplitPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Scissors className="h-3.5 w-3.5" />}
+	                        {videoSplitPending ? "分割中..." : "导出分段"}
+	                      </button>
+	                    </div>
+	                  </div>
+	                </div>
+	              </div>
+	            </div>
+	          ) : null}
+	          <div className="absolute -top-5 left-0 cursor-grab select-none text-[11px] font-medium tracking-[0.08em] text-slate-500 active:cursor-grabbing">
+	            {title}
+	          </div>
+          <button
+            type="button"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete?.();
+            }}
+            className="nodrag absolute right-2 top-2 z-20 inline-flex h-7 w-7 items-center justify-center border border-slate-200 bg-white text-slate-500 transition-colors hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
+            title="删除组件"
+            aria-label="删除组件"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        </>
       )}
 
       {isCompactInput && (
@@ -2756,7 +3676,7 @@ const NodeComponent = ({
             e.stopPropagation();
             onDelete?.();
           }}
-          className="nodrag absolute right-2.5 top-2.5 z-20 rounded-full border border-slate-800/90 bg-slate-950/82 p-1.5 text-slate-300 transition hover:border-red-900 hover:bg-red-950/55 hover:text-red-300"
+          className="nodrag absolute right-2.5 top-2.5 z-20 rounded-full border border-slate-200 bg-white/95 p-1.5 text-slate-500 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
           type="button"
           title="删除"
         >
@@ -2764,15 +3684,15 @@ const NodeComponent = ({
         </button>
       )}
 
-      <div className={`${isCompactInput ? "nodrag space-y-2 p-1.5" : "space-y-3 p-4"}`}>
+      <div className={`${isCompactInput ? "nodrag space-y-2 p-1.5" : isTextInputNode || isSimpleMediaInputNode ? "p-0" : "space-y-3 p-4"}`}>
         {/* Error */}
-        {node.data.status === "error" && (
-          <div className="rounded-[22px] border border-red-900/70 bg-[linear-gradient(180deg,rgba(69,10,10,0.7),rgba(28,10,10,0.76))] px-3 py-2.5 text-xs text-red-200 flex flex-col gap-2 animate-in fade-in zoom-in-95 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+        {node.data.status === "error" && !isTextInputNode && !isSimpleMediaInputNode && (
+          <div className="rounded-[22px] border border-rose-200 bg-rose-50 px-3 py-2.5 text-xs text-rose-700 flex flex-col gap-2 animate-in fade-in zoom-in-95">
             <div className="flex items-start gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-500" />
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-500" />
               <span className="break-all font-mono">{node.data.error || "Unknown Error"}</span>
             </div>
-            <div className="mt-1 flex justify-end gap-2 border-t border-red-400/10 pt-1">
+            <div className="mt-1 flex justify-end gap-2 border-t border-rose-200 pt-1">
               <button
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
@@ -2792,8 +3712,8 @@ const NodeComponent = ({
         {isAI && (
           <div className="space-y-2">
             {node.data.status === "loading" && (
-              <div className="space-y-1.5 rounded-[22px] border border-slate-800/80 bg-slate-900/42 px-3 py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
-                <div className="flex justify-between text-[10px] text-slate-300">
+              <div className="space-y-1.5 rounded-[22px] border border-slate-200 bg-slate-50 px-3 py-2.5">
+                <div className="flex justify-between text-[10px] text-slate-600">
                   <span className="flex items-center gap-1">
                     <Loader2 className="w-3 h-3 animate-spin" /> 处理中...
                   </span>
@@ -2801,7 +3721,7 @@ const NodeComponent = ({
                     {node.data.progress || 0}/{node.data.total || 0}
                   </span>
                 </div>
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-950/90">
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
                   <div className="h-full bg-[linear-gradient(90deg,rgba(34,211,238,0.88),rgba(59,130,246,0.92))] transition-all duration-300" style={{ width: safeProgressWidth }} />
                 </div>
               </div>
@@ -2816,7 +3736,7 @@ const NodeComponent = ({
               </div>
             ) : (
               !["loading", "error"].includes(node.data.status) && (
-                <div className="flex flex-col items-center justify-center rounded-[24px] border border-dashed border-slate-800/85 bg-[linear-gradient(180deg,rgba(15,23,42,0.34),rgba(15,23,42,0.16))] py-7 text-slate-500 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+                <div className="flex flex-col items-center justify-center rounded-[24px] border border-dashed border-slate-200 bg-slate-50 py-7 text-slate-500">
                   {isReady ? <Play className="mb-2 h-6 w-6 text-emerald-300/70" /> : <Icon className="mb-2 h-6 w-6 opacity-25" />}
                   <span className="text-[10px] tracking-[0.03em]">{isReady ? "准备就绪" : "等待连接..."}</span>
                 </div>
@@ -2830,7 +3750,7 @@ const NodeComponent = ({
                   e.stopPropagation();
                   onContinue?.(node.id);
                 }}
-                className="flex w-full items-center justify-center gap-1 rounded-full border border-slate-800/80 bg-slate-900/60 py-2 text-[10px] text-slate-200 transition-colors hover:border-cyan-800 hover:bg-cyan-950/36"
+                className="flex w-full items-center justify-center gap-1 rounded-full border border-slate-200 bg-white py-2 text-[10px] text-slate-700 transition-colors hover:border-cyan-300 hover:bg-cyan-50"
                 type="button"
               >
                 <Film className="w-3 h-3" /> 生成视频 <ArrowRight className="w-3 h-3" />
@@ -2844,7 +3764,7 @@ const NodeComponent = ({
                   e.stopPropagation();
                   onIterateImg2Img?.(node.id);
                 }}
-                className="flex w-full items-center justify-center gap-1 rounded-full border border-slate-800/80 bg-slate-900/60 py-2 text-[10px] text-slate-200 transition-colors hover:border-cyan-800 hover:bg-cyan-950/36"
+                className="flex w-full items-center justify-center gap-1 rounded-full border border-slate-200 bg-white py-2 text-[10px] text-slate-700 transition-colors hover:border-cyan-300 hover:bg-cyan-50"
                 title="先点缩略图选中你要迭代的产物，再点这里"
               >
                 <ImageIcon className="w-3 h-3" /> 继续图生图 <ArrowRight className="w-3 h-3" />
@@ -2857,10 +3777,10 @@ const NodeComponent = ({
         {isInput && isCompactInput && (
           <div className="space-y-2">
             <div className="relative overflow-visible">
-              <div className="overflow-hidden rounded-[18px] border border-slate-800/75 bg-[linear-gradient(160deg,rgba(5,9,18,0.98),rgba(11,18,32,0.96)_56%,rgba(7,13,24,0.98))] shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+              <div className="overflow-hidden rounded-[18px] border border-slate-200 bg-slate-50 shadow-[0_12px_28px_rgba(15,23,42,0.08)]">
                 <button
                   type="button"
-                  className={`nodrag relative block h-[286px] w-full overflow-hidden bg-black/35 transition-[transform,filter,box-shadow] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+                  className={`nodrag relative block h-[286px] w-full overflow-hidden bg-slate-100 transition-[transform,filter,box-shadow] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${
                     showCompactInputActions
                       ? "scale-[0.985] shadow-[0_18px_45px_rgba(8,15,34,0.5)]"
                       : "hover:scale-[1.01] hover:brightness-105"
@@ -2868,10 +3788,11 @@ const NodeComponent = ({
                   onMouseDown={(e) => {
                     e.stopPropagation();
                   }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setShowCompactInputActions((prev) => !prev);
-                  }}
+	                  onClick={(e) => {
+	                    e.stopPropagation();
+	                    setShowCompactVideoUpscaleOptions(false);
+	                    setShowCompactInputActions((prev) => !prev);
+	                  }}
                 >
                   {compactActiveImage ? (
                     compactActiveIsVideo ? (
@@ -2900,12 +3821,12 @@ const NodeComponent = ({
                       <div className="absolute inset-y-0 left-1/2 w-[44%] -translate-x-1/2 bg-[linear-gradient(90deg,rgba(255,255,255,0),rgba(255,255,255,0.18),rgba(125,211,252,0.14),rgba(255,255,255,0))] opacity-80 blur-xl animate-pulse" />
                       <div className="absolute inset-x-0 top-[18%] h-px bg-[linear-gradient(90deg,rgba(34,211,238,0),rgba(34,211,238,0.7),rgba(34,211,238,0))] shadow-[0_0_18px_rgba(34,211,238,0.35)] animate-pulse" />
                       <div className="absolute inset-0 flex items-center justify-center">
-                        <div className="rounded-[20px] border border-white/14 bg-[linear-gradient(145deg,rgba(255,255,255,0.18),rgba(255,255,255,0.06))] px-4 py-3 text-center text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_16px_40px_rgba(2,6,23,0.24)] backdrop-blur-xl">
+                        <div className="rounded-[20px] border border-slate-200 bg-white px-4 py-3 text-center text-slate-700 shadow-[0_16px_40px_rgba(15,23,42,0.12)] backdrop-blur-xl">
                           <div className="flex items-center justify-center gap-2">
-                            <Loader2 className="h-4 w-4 animate-spin text-cyan-100" />
-                            <span className="text-[12px] font-medium tracking-[0.04em] text-slate-50">正在去除水印</span>
+                            <Loader2 className="h-4 w-4 animate-spin text-cyan-700" />
+                            <span className="text-[12px] font-medium tracking-[0.04em] text-slate-800">正在去除水印</span>
                           </div>
-                          <div className="mt-1 text-[10px] text-slate-200/80">请稍候，图片正在轻量修复中</div>
+                          <div className="mt-1 text-[10px] text-slate-600">请稍候，图片正在轻量修复中</div>
                         </div>
                       </div>
                     </div>
@@ -2916,12 +3837,28 @@ const NodeComponent = ({
                       <div className="absolute inset-y-0 left-1/2 w-[46%] -translate-x-1/2 bg-[linear-gradient(90deg,rgba(255,255,255,0),rgba(251,113,133,0.16),rgba(244,63,94,0.22),rgba(255,255,255,0))] opacity-85 blur-xl animate-pulse" />
                       <div className="absolute inset-x-0 top-[22%] h-px bg-[linear-gradient(90deg,rgba(244,63,94,0),rgba(251,113,133,0.7),rgba(244,63,94,0))] shadow-[0_0_18px_rgba(244,63,94,0.3)] animate-pulse" />
                       <div className="absolute inset-0 flex items-center justify-center">
-                        <div className="rounded-[20px] border border-white/14 bg-[linear-gradient(145deg,rgba(255,255,255,0.18),rgba(255,255,255,0.06))] px-4 py-3 text-center text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_16px_40px_rgba(2,6,23,0.24)] backdrop-blur-xl">
+                        <div className="rounded-[20px] border border-slate-200 bg-white px-4 py-3 text-center text-slate-700 shadow-[0_16px_40px_rgba(15,23,42,0.12)] backdrop-blur-xl">
                           <div className="flex items-center justify-center gap-2">
-                            <Loader2 className="h-4 w-4 animate-spin text-rose-100" />
-                            <span className="text-[12px] font-medium tracking-[0.04em] text-slate-50">正在视频超清</span>
+                            <Loader2 className="h-4 w-4 animate-spin text-rose-600" />
+                            <span className="text-[12px] font-medium tracking-[0.04em] text-slate-800">正在视频超清</span>
                           </div>
-                          <div className="mt-1 text-[10px] text-slate-200/80">请稍候，正在直接生成清晰版本</div>
+                          <div className="mt-1 text-[10px] text-slate-600">请稍候，正在直接生成清晰版本</div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+                  {videoLineartPending ? (
+                    <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
+                      <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(15,23,42,0.24),rgba(15,23,42,0.68))] backdrop-blur-[2px]" />
+                      <div className="absolute inset-y-0 left-1/2 w-[48%] -translate-x-1/2 bg-[linear-gradient(90deg,rgba(255,255,255,0),rgba(226,232,240,0.18),rgba(148,163,184,0.2),rgba(255,255,255,0))] opacity-85 blur-xl animate-pulse" />
+                      <div className="absolute inset-x-0 top-[22%] h-px bg-[linear-gradient(90deg,rgba(148,163,184,0),rgba(148,163,184,0.85),rgba(148,163,184,0))] shadow-[0_0_18px_rgba(148,163,184,0.28)] animate-pulse" />
+                      <div className="absolute inset-0 flex items-center justify-center">
+                        <div className="rounded-[20px] border border-slate-200 bg-white px-4 py-3 text-center text-slate-700 shadow-[0_16px_40px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+                          <div className="flex items-center justify-center gap-2">
+                            <Loader2 className="h-4 w-4 animate-spin text-slate-700" />
+                            <span className="text-[12px] font-medium tracking-[0.04em] text-slate-800">正在转线稿</span>
+                          </div>
+                          <div className="mt-1 text-[10px] text-slate-600">请稍候，正在生成线稿视频</div>
                         </div>
                       </div>
                     </div>
@@ -2932,7 +3869,7 @@ const NodeComponent = ({
                 {compactActiveImage ? (
                   <button
                     type="button"
-                    className="nodrag absolute bottom-3 right-3 z-10 flex h-9 w-9 items-center justify-center rounded-full border border-slate-700/80 bg-slate-950/78 text-slate-100 shadow-[0_12px_24px_rgba(2,6,23,0.35)] backdrop-blur-md transition duration-200 hover:-translate-y-0.5 hover:border-cyan-500/55 hover:bg-cyan-500/12 hover:text-cyan-100"
+                    className="nodrag absolute bottom-3 right-3 z-10 flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-white/95 text-slate-700 shadow-[0_12px_24px_rgba(15,23,42,0.12)] backdrop-blur-md transition duration-200 hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-700"
                     onMouseDown={(e) => e.stopPropagation()}
                     onClick={(e) => {
                       e.stopPropagation();
@@ -2945,63 +3882,81 @@ const NodeComponent = ({
                 ) : null}
               </div>
 
-              {compactActiveImage ? (
+              {compactActiveImage && compactActiveIsVideo ? (
+	                <div
+	                  className={`nodrag absolute bottom-full left-0 z-30 mb-3 w-max min-w-[252px] max-w-[calc(100vw-48px)] border border-slate-200 bg-white p-2 shadow-[0_22px_54px_rgba(15,23,42,0.12)] transition-all duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+	                    showCompactInputActions
+	                      ? "pointer-events-auto translate-y-0 opacity-100"
+                      : "pointer-events-none translate-y-2 opacity-0"
+                  }`}
+                  onMouseDown={(e) => e.stopPropagation()}
+                >
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      disabled={compactActionBusy}
+                      className="flex flex-1 items-center justify-center gap-1.5 border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-65"
+                      onClick={handleCompactVideoLineartClick}
+                    >
+                      <Scan className="h-3.5 w-3.5" />
+                      <span>转线稿</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={compactActionBusy}
+                      className="flex flex-1 items-center justify-center gap-1.5 border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] font-medium text-rose-700 transition hover:border-rose-300 hover:bg-rose-100 disabled:cursor-wait disabled:opacity-65"
+                      onClick={handleCompactVideoUpscaleClick}
+                    >
+                      <TrendingUp className="h-3.5 w-3.5" />
+                      <span>视频超清</span>
+                    </button>
+                  </div>
+	                  {showCompactVideoUpscaleOptions ? (
+                    <div className="mt-2 grid grid-cols-2 gap-2 border border-rose-100 bg-rose-50/60 p-2">
+                      {VIDEO_HD_TEMPLATE_OPTIONS.map((item) => (
+                        <button
+                          key={item.value}
+                          type="button"
+                          disabled={compactActionBusy}
+                          className="border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-wait disabled:opacity-65"
+                          onClick={() => handleCompactVideoUpscaleOptionClick(item.value)}
+                        >
+                          {item.label}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {compactActiveImage && !compactActiveIsVideo ? (
                 <div
-                  className={`nodrag absolute left-full top-1/2 z-30 ml-3 -translate-y-1/2 rounded-[22px] border border-slate-700/80 bg-[linear-gradient(180deg,rgba(2,6,23,0.98),rgba(15,23,42,0.96))] p-2 shadow-[0_22px_54px_rgba(2,6,23,0.48)] backdrop-blur-xl transition-all duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+                  className={`nodrag absolute left-full top-1/2 z-30 ml-3 -translate-y-1/2 rounded-[22px] border border-slate-200 bg-white p-2 shadow-[0_22px_54px_rgba(15,23,42,0.12)] backdrop-blur-xl transition-all duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${
                     showCompactInputActions
                       ? "pointer-events-auto translate-x-0 scale-100 opacity-100"
                       : "pointer-events-none -translate-x-3 scale-95 opacity-0"
                   }`}
                   onMouseDown={(e) => e.stopPropagation()}
                 >
-                  {compactActiveIsVideo ? (
-                    <div className="w-full space-y-2">
-                      <button
-                        type="button"
-                        disabled={compactRemovePending || compactThreeViewPending || compactVideoUpscalePending}
-                        className="flex w-full items-center justify-center gap-1.5 rounded-full border border-rose-300/20 bg-[linear-gradient(135deg,rgba(244,63,94,0.2),rgba(190,24,93,0.16))] px-4 py-2 text-[11px] font-medium text-rose-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_14px_28px_rgba(76,5,25,0.22)] backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-rose-300/35 hover:bg-[linear-gradient(135deg,rgba(251,113,133,0.24),rgba(244,63,94,0.18))] disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65 disabled:brightness-100"
-                        onClick={handleCompactVideoUpscaleClick}
-                      >
-                        {compactVideoUpscalePending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <TrendingUp className="h-3.5 w-3.5" />}
-                        {compactVideoUpscalePending ? "处理中..." : "视频超清"}
-                      </button>
-                      {showCompactVideoUpscaleOptions ? (
-                        <div className="grid grid-cols-2 gap-2">
-                          {VIDEO_HD_TEMPLATE_OPTIONS.map((item) => (
-                            <button
-                              key={item.value}
-                              type="button"
-                              disabled={compactVideoUpscalePending}
-                              className="rounded-[14px] border border-slate-700/80 bg-slate-950/72 px-3 py-2 text-[11px] font-medium text-slate-100 transition hover:-translate-y-0.5 hover:border-rose-400/45 hover:bg-rose-500/10 disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65"
-                              onClick={() => handleCompactVideoUpscaleOptionClick(item.value)}
-                            >
-                              {item.label}
-                            </button>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
-                  ) : (
-                    <>
-                      <button
-                        type="button"
-                        disabled={compactRemovePending || compactThreeViewPending || compactVideoUpscalePending}
-                        className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-full border border-cyan-300/20 bg-[linear-gradient(135deg,rgba(34,211,238,0.18),rgba(14,116,144,0.16))] px-4 py-2 text-[11px] font-medium text-cyan-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_14px_28px_rgba(8,47,73,0.22)] backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-cyan-300/35 hover:bg-[linear-gradient(135deg,rgba(34,211,238,0.24),rgba(56,189,248,0.18))] disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65 disabled:brightness-100"
-                        onClick={handleCompactThreeViewClick}
-                      >
-                        {compactThreeViewPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Layout className="h-3.5 w-3.5" />}
-                        {compactThreeViewPending ? "生成中..." : hasCompactThreeViewResult ? "重试三视图" : "三视图"}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={compactRemovePending || compactThreeViewPending || compactVideoUpscalePending}
-                        className="rounded-full border border-white/18 bg-[linear-gradient(135deg,rgba(255,255,255,0.16),rgba(255,255,255,0.07))] px-4 py-2 text-[11px] font-medium text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_14px_28px_rgba(2,6,23,0.22)] backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-cyan-300/35 hover:bg-[linear-gradient(135deg,rgba(255,255,255,0.22),rgba(125,211,252,0.12))] hover:text-cyan-50 disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65 disabled:brightness-100"
-                        onClick={handleCompactRemoveClick}
-                      >
-                        {compactRemovePending ? "处理中..." : "去水印"}
-                      </button>
-                    </>
-                  )}
+                  <>
+                    <button
+                      type="button"
+                      disabled={compactRemovePending || compactThreeViewPending || compactVideoUpscalePending}
+                      className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-full border border-cyan-200 bg-cyan-50 px-4 py-2 text-[11px] font-medium text-cyan-700 shadow-[0_14px_28px_rgba(34,211,238,0.08)] backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-100 disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65 disabled:brightness-100"
+                      onClick={handleCompactThreeViewClick}
+                    >
+                      {compactThreeViewPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Layout className="h-3.5 w-3.5" />}
+                      {compactThreeViewPending ? "生成中..." : hasCompactThreeViewResult ? "重试三视图" : "三视图"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={compactRemovePending || compactThreeViewPending || compactVideoUpscalePending}
+                      className="rounded-full border border-slate-200 bg-white px-4 py-2 text-[11px] font-medium text-slate-700 shadow-[0_14px_28px_rgba(15,23,42,0.08)] backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-700 disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65 disabled:brightness-100"
+                      onClick={handleCompactRemoveClick}
+                    >
+                      {compactRemovePending ? "处理中..." : "去水印"}
+                    </button>
+                  </>
                 </div>
               ) : null}
             </div>
@@ -3017,7 +3972,7 @@ const NodeComponent = ({
                       className={`nodrag relative h-16 w-16 shrink-0 overflow-hidden rounded-[16px] border transition duration-200 ${
                         isThumbActive
                           ? "border-cyan-500/60 ring-1 ring-cyan-400/25 shadow-[0_10px_24px_rgba(6,182,212,0.16)]"
-                          : "border-slate-800/85 hover:border-slate-700 hover:-translate-y-0.5"
+                          : "border-slate-200 hover:border-slate-300 hover:-translate-y-0.5"
                       }`}
                       onMouseDown={(e) => e.stopPropagation()}
                       onClick={(e) => {
@@ -3040,35 +3995,61 @@ const NodeComponent = ({
         )}
 
         {isInput && !isCompactInput && (
-          <div className="relative flex h-32 flex-col overflow-hidden rounded-[24px] border border-slate-800/85 bg-[linear-gradient(160deg,rgba(5,9,18,0.98),rgba(11,18,32,0.96)_56%,rgba(7,13,24,0.98))] shadow-[inset_0_1px_0_rgba(255,255,255,0.02)] group transition-colors hover:border-cyan-800">
-            <div className="flex-1 overflow-y-auto p-2 custom-scrollbar">
-              {node.data.images?.length > 0 ? (
-                <div className="grid grid-cols-3 gap-1">
-                  {node.data.images.map((img, i) => (
-                    <div key={i} className="aspect-square relative group/img">
-                      {/* ✅ 点图只预览；选中用按钮 */}
-                      {isVideoContent(img) ? (
-                        <video
-                          src={img}
-                          className={`w-full h-full object-cover rounded cursor-pointer border ${
-                            activeArtifact?.url === img ? "border-amber-700 ring-1 ring-amber-400/18" : "border-transparent"
-                          }`}
-                          onMouseDown={(e) => e.stopPropagation()}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onPreview?.(img);
-                          }}
-                          title="点击预览"
-                          muted
-                          loop
-                          playsInline
-                        />
-                      ) : (
+          <div className="relative overflow-hidden bg-white">
+            {node.data.images?.length > 0 ? (
+              <div className="nodrag max-h-[520px] overflow-y-auto custom-scrollbar">
+	                {node.data.images.map((img, i) => {
+	                  const isActive = activeArtifact?.url === img;
+	                  const isVideoItem = isVideoContent(img);
+	                  const showVideoActions = isVideoItem && simpleMediaActionIndex === i;
+	                  const showVideoLineartOverlay = isVideoItem && videoLineartPending && simpleMediaActionIndex === i;
+	                  return (
+	                    <div
+	                      key={i}
+	                      className={`group/img relative bg-white ${i > 0 ? "border-t border-slate-200" : ""} ${
+                        isActive
+                          ? "outline outline-1 outline-amber-300 outline-offset-[-1px]"
+                          : showVideoActions
+                          ? "outline outline-1 outline-slate-300 outline-offset-[-1px]"
+                          : ""
+	                      }`}
+	                    >
+	                      {isVideoItem ? (
+	                        <>
+	                          <video
+	                            src={img}
+	                            className="block h-auto max-h-[420px] w-full cursor-pointer bg-black object-contain"
+	                            onMouseDown={(e) => e.stopPropagation()}
+	                            onClick={(e) => {
+	                              e.stopPropagation();
+	                              setSimpleMediaActionIndex((prev) => (prev === i ? -1 : i));
+	                            }}
+	                            title="点击显示操作"
+	                            muted
+	                            loop
+	                            playsInline
+	                          />
+	                          {showVideoLineartOverlay ? (
+	                            <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
+	                              <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(15,23,42,0.24),rgba(15,23,42,0.68))] backdrop-blur-[2px]" />
+	                              <div className="absolute inset-y-0 left-1/2 w-[48%] -translate-x-1/2 bg-[linear-gradient(90deg,rgba(255,255,255,0),rgba(226,232,240,0.18),rgba(148,163,184,0.2),rgba(255,255,255,0))] opacity-85 blur-xl animate-pulse" />
+	                              <div className="absolute inset-x-0 top-[22%] h-px bg-[linear-gradient(90deg,rgba(148,163,184,0),rgba(148,163,184,0.85),rgba(148,163,184,0))] shadow-[0_0_18px_rgba(148,163,184,0.28)] animate-pulse" />
+	                              <div className="absolute inset-0 flex items-center justify-center px-4">
+	                                <div className="border border-slate-200 bg-white px-4 py-3 text-center text-slate-700 shadow-[0_16px_40px_rgba(15,23,42,0.12)]">
+	                                  <div className="flex items-center justify-center gap-2">
+	                                    <Loader2 className="h-4 w-4 animate-spin text-slate-700" />
+	                                    <span className="text-[12px] font-medium tracking-[0.04em] text-slate-800">正在转线稿</span>
+	                                  </div>
+	                                  <div className="mt-1 text-[10px] text-slate-600">请稍候，正在生成线稿视频</div>
+	                                </div>
+	                              </div>
+	                            </div>
+	                          ) : null}
+	                        </>
+	                      ) : (
                         <img
                           src={img}
-                          className={`w-full h-full object-cover rounded cursor-pointer border ${
-                            activeArtifact?.url === img ? "border-amber-700 ring-1 ring-amber-400/18" : "border-transparent"
-                          }`}
+                          className="block h-auto max-h-[420px] w-full cursor-pointer object-contain"
                           onMouseDown={(e) => e.stopPropagation()}
                           onClick={(e) => {
                             e.stopPropagation();
@@ -3079,60 +4060,45 @@ const NodeComponent = ({
                         />
                       )}
 
-                      <button
-                        type="button"
-                        className="nodrag absolute bottom-1.5 left-1.5 rounded-full border border-slate-700/80 bg-slate-950/84 px-1.5 py-0.5 text-[9px] text-white opacity-0 backdrop-blur-sm transition group-hover/img:opacity-100 hover:border-amber-700/60 hover:bg-amber-500/12 hover:text-amber-100"
-                        onMouseDown={(e) => e.stopPropagation()}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onSelectArtifact?.({
-                            url: img,
-                            kind: isVideoContent(img) ? "video" : "image",
-                            fromNodeId: node.id,
-                            createdAt: Date.now(),
-                            meta: { mode: "input" },
-                          });
-                        }}
-                        title="选中为 Agent 上下文"
-                      >
-                        选中
-                      </button>
-
-                      <button
-                        onMouseDown={(e) => e.stopPropagation()}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          removeImage(i);
-                        }}
-                        className="absolute -right-1 -top-1 rounded-full border border-red-300/18 bg-red-500/90 p-0.5 opacity-0 transition group-hover/img:opacity-100"
-                        type="button"
-                        title="删除"
-                      >
-                        <X className="w-2 h-2 text-white" />
-                      </button>
+                      {!isVideoItem && (
+                        <div className="absolute bottom-2 right-2 flex gap-1 opacity-0 transition-opacity group-hover/img:opacity-100">
+                          <button
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              removeImage(i);
+                            }}
+                            className="nodrag inline-flex h-7 w-7 items-center justify-center border border-slate-200 bg-white/95 text-slate-500 backdrop-blur-sm transition-colors hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
+                            type="button"
+                            title="删除素材"
+                            aria-label="删除素材"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      )}
                     </div>
-                  ))}
+                  );
+                })}
 
-                  <div className="relative flex aspect-square cursor-pointer items-center justify-center rounded-[18px] border border-dashed border-slate-800/85 bg-slate-900/45 transition hover:border-cyan-800 hover:bg-cyan-950/30">
-                    <Plus className="w-4 h-4 text-slate-300" />
-                    <input type="file" multiple accept="image/*,video/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={handleFileUpload} />
-                  </div>
-                </div>
-              ) : (
-                <div className="relative flex h-full flex-col items-center justify-center text-slate-400">
-                  <Images className="mb-1 h-6 w-6 opacity-55" />
-                  <span className="text-[10px]">点击上传</span>
-                  <input type="file" multiple accept="image/*,video/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={handleFileUpload} />
-                </div>
-              )}
-            </div>
+                <label className="block cursor-pointer border-t border-slate-200 bg-white px-3 py-2 text-center text-[11px] text-slate-500 transition hover:bg-slate-50 hover:text-slate-700">
+                  添加图片/视频
+                  <input type="file" multiple accept="image/*,video/*" className="hidden" onChange={handleFileUpload} />
+                </label>
+              </div>
+            ) : (
+              <label className="nodrag flex min-h-[132px] cursor-pointer items-center justify-center px-4 py-8 text-[11px] text-slate-500 transition hover:bg-slate-50 hover:text-slate-700">
+                点击上传图片/视频
+                <input type="file" multiple accept="image/*,video/*" className="hidden" onChange={handleFileUpload} />
+              </label>
+            )}
           </div>
         )}
 
         {/* Output */}
         {isOutput && (
           <div
-            className="relative min-h-[100px] max-h-[200px] overflow-y-auto rounded-[24px] border border-slate-800/85 bg-[linear-gradient(160deg,rgba(5,9,18,0.98),rgba(11,18,32,0.96)_56%,rgba(7,13,24,0.98))] p-1.5 custom-scrollbar nodrag shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]"
+            className="relative min-h-[100px] max-h-[200px] overflow-y-auto rounded-[24px] border border-slate-200 bg-white p-1.5 custom-scrollbar nodrag shadow-[0_12px_28px_rgba(15,23,42,0.08)]"
             onMouseDown={(e) => e.stopPropagation()}
           >
             {node.data.images?.length > 0 ? (
@@ -3161,7 +4127,7 @@ const NodeComponent = ({
                   e.stopPropagation();
                   downloadAll();
                 }}
-                className="mt-2 flex w-full items-center justify-center gap-1 rounded-full border border-emerald-900/60 bg-emerald-950/50 py-1.5 text-[10px] text-emerald-200 transition hover:border-emerald-800 hover:bg-emerald-950/70"
+                className="mt-2 flex w-full items-center justify-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 py-1.5 text-[10px] text-emerald-700 transition hover:border-emerald-300 hover:bg-emerald-100"
                 type="button"
               >
                 <Download className="w-3 h-3" /> 下载全部
@@ -3171,30 +4137,67 @@ const NodeComponent = ({
         )}
 
         {/* Text input */}
-        {node.type === NODE_TYPES.TEXT_INPUT && (
-          <textarea
-            className="w-full resize-none rounded-[24px] border border-slate-800/85 bg-[linear-gradient(160deg,rgba(5,9,18,0.98),rgba(11,18,32,0.96)_56%,rgba(7,13,24,0.98))] px-3 py-2.5 text-xs text-slate-100 outline-none shadow-[inset_0_1px_0_rgba(255,255,255,0.02)] nodrag placeholder:text-slate-500"
-            rows={3}
-            placeholder="输入提示词..."
-            value={node.data.text || ""}
-            onChange={(e) => updateData(node.id, { text: e.target.value })}
-            onMouseDown={(e) => e.stopPropagation()}
-          />
+        {isTextInputNode && (
+          <>
+            <div className="relative">
+              <textarea
+                className="block min-h-[116px] w-full resize-none border-0 bg-transparent px-3 py-3 pr-20 pb-10 text-xs leading-5 text-slate-700 outline-none nodrag placeholder:text-slate-400"
+                rows={3}
+                placeholder="输入提示词..."
+                value={node.data.text || ""}
+                onChange={(e) => {
+                  setPromptPolishError("");
+                  updateData(node.id, { text: e.target.value });
+                }}
+                onMouseDown={(e) => e.stopPropagation()}
+              />
+
+              <button
+                type="button"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={handlePolishTextInputPrompt}
+                disabled={promptPolishLoading || !String(node.data.text || "").trim() || !apiFetch}
+                className={`nodrag absolute bottom-2 right-10 inline-flex h-7 w-7 items-center justify-center border border-slate-200 bg-white text-slate-500 transition-colors hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-700 disabled:cursor-not-allowed disabled:opacity-40 ${
+                  promptPolishLoading
+                    ? "border-cyan-300 bg-cyan-50 text-cyan-700"
+                    : ""
+                }`}
+                title="提示词润色"
+                aria-label="提示词润色"
+              >
+                {promptPolishLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
+              </button>
+              <button
+                type="button"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete?.();
+                }}
+                className="nodrag absolute bottom-2 right-2 inline-flex h-7 w-7 items-center justify-center border border-slate-200 bg-white text-slate-500 transition-colors hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
+                title="删除提示词组件"
+                aria-label="删除提示词组件"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            {promptPolishError && <div className="px-3 pb-2 text-[10px] text-rose-500">{promptPolishError}</div>}
+          </>
         )}
       </div>
 
       {/* Ports */}
-      <div className="pointer-events-none absolute top-[58px] w-full flex justify-between px-0">
-        {node.type !== NODE_TYPES.INPUT && node.type !== NODE_TYPES.TEXT_INPUT && (
+      <div className={`pointer-events-none absolute ${isTextInputNode ? "top-1/2 -translate-y-1/2" : "top-[58px]"} w-full flex justify-between px-0`}>
+        {node.type !== NODE_TYPES.INPUT && !isTextInputNode && (
           <div
             onMouseUp={onConnectEnd}
-            className="pointer-events-auto -ml-1.5 h-3 w-3 cursor-crosshair rounded-full border border-slate-700 bg-slate-900 shadow-[0_0_0_2px_rgba(2,6,23,0.65)] transition hover:border-cyan-700 hover:bg-cyan-950 z-20"
+            className="pointer-events-auto -ml-1.5 h-3 w-3 cursor-crosshair rounded-full border border-slate-300 bg-white shadow-[0_0_0_2px_rgba(255,255,255,0.9)] transition hover:border-cyan-400 hover:bg-cyan-50 z-20"
           />
         )}
         {node.type !== NODE_TYPES.OUTPUT && (
           <div
             onMouseDown={onConnectStart}
-            className="pointer-events-auto -mr-1.5 ml-auto h-3 w-3 cursor-crosshair rounded-full border border-slate-700 bg-slate-900 shadow-[0_0_0_2px_rgba(2,6,23,0.65)] transition hover:border-cyan-700 hover:bg-cyan-950 z-20"
+            className="pointer-events-auto -mr-1.5 ml-auto h-3 w-3 cursor-crosshair rounded-full border border-slate-300 bg-white shadow-[0_0_0_2px_rgba(255,255,255,0.9)] transition hover:border-cyan-400 hover:bg-cyan-50 z-20"
           />
         )}
       </div>
@@ -3230,6 +4233,7 @@ const Workbench = () => {
   const [connectingSource, setConnectingSource] = useState(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const [canvasDropActive, setCanvasDropActive] = useState(false);
+  const [canvasDropUploading, setCanvasDropUploading] = useState(null);
 
   const [isRunning, setIsRunning] = useState(false);
   const [runScope, setRunScope] = useState("selected_downstream");
@@ -3254,10 +4258,13 @@ const Workbench = () => {
     learning: false,
   });
   const [activeSidebarItemKey, setActiveSidebarItemKey] = useState("");
-  const [rightPanelWidth, setRightPanelWidth] = useState(292);
+  const [rightPanelWidth, setRightPanelWidth] = useState(460);
   const [agentStore, setAgentStore] = useState(() => loadAgentStore());
   const [agentInput, setAgentInput] = useState("");
   const [agentInputFocused, setAgentInputFocused] = useState(false);
+  const [agentPromptPolishLoading, setAgentPromptPolishLoading] = useState(false);
+  const [agentPromptPolishError, setAgentPromptPolishError] = useState("");
+  const [promptPolishDialog, setPromptPolishDialog] = useState(null);
   const [activeComposerActionId, setActiveComposerActionId] = useState("");
   const [showScriptExamples, setShowScriptExamples] = useState(false);
   const [showCanvasExamples, setShowCanvasExamples] = useState(false);
@@ -3324,9 +4331,9 @@ const Workbench = () => {
   const agentComposerRef = useRef(null);
   const workspaceShellRef = useRef(null);
   const viewportRef = useRef(viewport);
+  const promptPolishApplyRef = useRef(null);
   const agentCardDragRef = useRef(null);
   const agentConversationBottomRef = useRef(null);
-  const exportAgentPlanRef = useRef(null);
   const rightPanelResizeRef = useRef(null);
   const nodeDragCleanupRef = useRef(null);
   const previewOpenedBySpaceRef = useRef(false);
@@ -3340,10 +4347,41 @@ const Workbench = () => {
   );
   const agentTurns = activeAgentSession?.turns ?? EMPTY_LIST;
   const activePendingTask = activeAgentSession?.pendingTask || null;
+  const isCanvasPromptPending =
+    activePendingTask?.intent === "CANVAS" && (activePendingTask?.missing || []).includes("prompt");
   const isAgentMissionRunning = agentTurns.some((turn) => turn.status === "running");
   const hasActiveAgentConversation = agentTurns.length > 0 || !!activePendingTask;
   const hasAgentResultCards = agentResultCards.length > 0;
   const minimizedAgentCards = agentResultCards.filter((card) => card.minimized);
+
+  const openPromptPolishPicker = useCallback(({ title = "AI 润色", sourcePrompt = "", variants = [], onUse }) => {
+    const normalizedVariants = normalizePromptPolishVariants({ variants });
+    if (!normalizedVariants.length) return;
+    promptPolishApplyRef.current = typeof onUse === "function" ? onUse : null;
+    setPromptPolishDialog({
+      title,
+      sourcePrompt: String(sourcePrompt || "").trim(),
+      variants: normalizedVariants,
+    });
+  }, []);
+
+  const closePromptPolishPicker = useCallback(() => {
+    setPromptPolishDialog(null);
+    promptPolishApplyRef.current = null;
+  }, []);
+
+  const usePromptPolishVariant = useCallback(
+    (variant) => {
+      const text = String(variant?.text || "").trim();
+      if (!text) return;
+      const apply = promptPolishApplyRef.current;
+      closePromptPolishPicker();
+      if (typeof apply === "function") {
+        apply(text);
+      }
+    },
+    [closePromptPolishPicker],
+  );
 
   useEffect(() => {
     return () => {
@@ -3879,7 +4917,7 @@ const Workbench = () => {
       const drag = rightPanelResizeRef.current;
       if (!drag) return;
       const delta = drag.startX - event.clientX;
-      const next = Math.min(420, Math.max(280, drag.startWidth + delta));
+      const next = Math.min(620, Math.max(420, drag.startWidth + delta));
       setRightPanelWidth(next);
     };
     const onMouseUp = () => {
@@ -3901,9 +4939,10 @@ const Workbench = () => {
           const turnsNext = (session.turns || []).map((turn) => {
             if (turn.status !== "running") return turn;
             hasRunning = true;
+            const stepCount = turn?.intent === "DRAMA" ? DRAMA_RUN_STEPS.length : AGENT_RUN_STEPS.length;
             return {
               ...turn,
-              stepIndex: ((turn.stepIndex || 0) + 1) % AGENT_RUN_STEPS.length,
+              stepIndex: ((turn.stepIndex || 0) + 1) % stepCount,
             };
           });
           if (!hasRunning) return session;
@@ -3923,13 +4962,17 @@ const Workbench = () => {
       const prevByTurnId = new Map(prev.map((item) => [item.turnId, item]));
       return resultTurns.map((turn, idx) => {
         const existing = prevByTurnId.get(turn.id);
-        if (existing) return existing;
+        if (existing) {
+          const targetWidth = getAgentResultCardWidth(turn);
+          if (existing.w === targetWidth) return existing;
+          return { ...existing, w: targetWidth };
+        }
         return {
           id: `agent_card_${makeAgentId()}`,
           turnId: turn.id,
           x: 120 + (idx % 2) * 500,
           y: 120 + Math.floor(idx / 2) * 360,
-          w: 460,
+          w: getAgentResultCardWidth(turn),
           collapsed: false,
           minimized: false,
         };
@@ -4227,6 +5270,9 @@ const Workbench = () => {
   };
 
   const handleWheel = (e) => {
+    if (e.target instanceof Element && e.target.closest('[data-agent-card-root="true"]')) {
+      return;
+    }
     if (e.ctrlKey || e.metaKey) e.preventDefault();
     zoomCanvas(-e.deltaY * 0.001, { x: e.clientX, y: e.clientY });
   };
@@ -4384,22 +5430,21 @@ const handleNodeMouseDown = (e, nid) => {
 
   const getCursor = () => (interactionMode === "panning" || isSpacePressed ? "grab" : interactionMode === "dragging_node" ? "grabbing" : "default");
 
-  const createCompactInputNodeAt = useCallback((point, mediaItems) => {
+  const createMediaUploadNodeAt = useCallback((point, mediaItems) => {
     const safeMediaItems = Array.isArray(mediaItems) ? mediaItems.filter(Boolean) : [];
     if (!safeMediaItems.length) return;
-    const hasVideos = safeMediaItems.some((item) => isVideoContent(item));
+    const position = getMediaUploadNodePosition(point);
 
     pushHistory();
     const nodeId = generateId();
     const nextNode = {
       id: nodeId,
       type: NODE_TYPES.INPUT,
-      x: point.x - 118,
-      y: point.y - 88,
+      x: position.x,
+      y: position.y,
       data: {
         images: safeMediaItems,
-        compact: true,
-        title: hasVideos ? "图片/视频编辑区" : "图片编辑区",
+        title: "图片/视频上传",
       },
     };
 
@@ -4413,7 +5458,9 @@ const handleNodeMouseDown = (e, nid) => {
     const hasMediaFiles = Array.from(e.dataTransfer?.items || []).some(
       (item) =>
         item.kind === "file" &&
-        (String(item.type || "").startsWith("image/") || String(item.type || "").startsWith("video/")),
+        (String(item.type || "").startsWith("image/") ||
+          String(item.type || "").startsWith("video/") ||
+          Array.from(e.dataTransfer?.types || []).includes("Files")),
     );
     if (!hasMediaFiles) return;
     canvasDragDepthRef.current += 1;
@@ -4424,7 +5471,9 @@ const handleNodeMouseDown = (e, nid) => {
     const hasMediaFiles = Array.from(e.dataTransfer?.items || []).some(
       (item) =>
         item.kind === "file" &&
-        (String(item.type || "").startsWith("image/") || String(item.type || "").startsWith("video/")),
+        (String(item.type || "").startsWith("image/") ||
+          String(item.type || "").startsWith("video/") ||
+          Array.from(e.dataTransfer?.types || []).includes("Files")),
     );
     if (!hasMediaFiles) return;
     e.preventDefault();
@@ -4440,18 +5489,30 @@ const handleNodeMouseDown = (e, nid) => {
   }, []);
 
   const handleCanvasDrop = useCallback(async (e) => {
-    const files = Array.from(e.dataTransfer?.files || []).filter(
-      (file) => String(file.type || "").startsWith("image/") || String(file.type || "").startsWith("video/"),
-    );
+    const files = Array.from(e.dataTransfer?.files || []).filter((file) => isMediaFileLike(file));
     canvasDragDepthRef.current = 0;
     setCanvasDropActive(false);
+    e.preventDefault();
     if (!files.length) return;
 
-    e.preventDefault();
     const point = screenToCanvas(e.clientX, e.clientY);
-    const droppedMediaItems = await readFilesAsDataUrls(files);
-    createCompactInputNodeAt(point, droppedMediaItems);
-  }, [createCompactInputNodeAt, screenToCanvas]);
+    const position = getMediaUploadNodePosition(point);
+    const imageCount = files.filter((file) => isImageFileLike(file)).length;
+    const videoCount = files.length - imageCount;
+    setCanvasDropUploading({
+      x: position.x,
+      y: position.y,
+      total: files.length,
+      images: imageCount,
+      videos: videoCount,
+    });
+    try {
+      const droppedMediaItems = await readFilesAsDataUrls(files);
+      createMediaUploadNodeAt(point, droppedMediaItems);
+    } finally {
+      setCanvasDropUploading(null);
+    }
+  }, [createMediaUploadNodeAt, screenToCanvas]);
 
   const addNode = (t, modePreset = null) => {
     if (t === NODE_TYPES.POST_PROCESSOR) return;
@@ -4889,6 +5950,123 @@ const handleNodeMouseDown = (e, nid) => {
     [apiFetch, pushHistory],
   );
 
+  const runVideoLineart = useCallback(
+    async (sourceNodeId, mediaIndex = 0, config = {}) => {
+      try {
+        const sourceNode = nodesRef.current.find((node) => node.id === sourceNodeId);
+        const sourceImages = Array.isArray(sourceNode?.data?.images) ? sourceNode.data.images : [];
+        const safeIndex = Math.max(0, Math.min(mediaIndex, sourceImages.length - 1));
+        const retrySources =
+          sourceNode?.data?.videoLineartSourceVideos && typeof sourceNode.data.videoLineartSourceVideos === "object"
+            ? sourceNode.data.videoLineartSourceVideos
+            : {};
+        const retrySourceVideo = String(retrySources?.[safeIndex] || "").trim();
+        const sourceVideo = retrySourceVideo || sourceImages[safeIndex] || sourceImages[0] || "";
+        if (!sourceVideo || !isVideoContent(sourceVideo)) {
+          throw new Error("缺少可用于转线稿的视频素材");
+        }
+
+        const safeConfig = normalizeVideoLineartConfig(config);
+        const result = await runVideoLineartTask(
+          {
+            video: sourceVideo,
+            lineStrength: safeConfig.lineStrength,
+            lineColor: safeConfig.lineColor,
+          },
+          apiFetch,
+        );
+        const resultUrl = String(result?.video || "").trim();
+        if (!resultUrl) {
+          throw new Error("视频转线稿未返回结果");
+        }
+
+        pushHistory();
+        const nextImages = [...sourceImages];
+        nextImages[safeIndex] = resultUrl;
+        updateNodeData(sourceNodeId, {
+          images: nextImages,
+          videoLineartSourceVideos: {
+            ...retrySources,
+            [safeIndex]: retrySourceVideo || sourceVideo,
+          },
+          videoLineartLastResultVideo: resultUrl,
+          videoLineartConfig: safeConfig,
+          status: "idle",
+          error: "",
+        });
+        setRunToast({ message: "视频转线稿完成", type: "info" });
+        setTimeout(() => setRunToast(null), 2200);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error || "视频转线稿失败");
+        setRunToast({ message: `视频转线稿失败：${message}`, type: "error" });
+        setTimeout(() => setRunToast(null), 2600);
+        throw error;
+      }
+    },
+    [apiFetch, pushHistory],
+  );
+
+  const runVideoSplit = useCallback(
+    async (sourceNodeId, mediaIndex = 0, segments = []) => {
+      try {
+        const sourceNode = nodesRef.current.find((node) => node.id === sourceNodeId);
+        const sourceImages = Array.isArray(sourceNode?.data?.images) ? sourceNode.data.images : [];
+        const safeIndex = Math.max(0, Math.min(mediaIndex, sourceImages.length - 1));
+        const sourceVideo = sourceImages[safeIndex] || sourceImages[0] || "";
+        if (!sourceVideo || !isVideoContent(sourceVideo)) {
+          throw new Error("缺少可用于编辑的视频素材");
+        }
+
+        const safeSegments = normalizeVideoSplitSegments(segments);
+        const result = await runVideoSplitTask(
+          {
+            video: sourceVideo,
+            segments: safeSegments,
+          },
+          apiFetch,
+        );
+        const outputVideos = Array.isArray(result?.videos)
+          ? result.videos.map((item) => String(item || "").trim()).filter(Boolean)
+          : [];
+        if (!outputVideos.length) {
+          throw new Error("视频分割未返回结果");
+        }
+
+        pushHistory();
+        const baseX = Number(sourceNode?.x || 0) + 320;
+        const baseY = Number(sourceNode?.y || 0);
+        const columnCount = outputVideos.length > 3 ? 2 : 1;
+        const newNodes = outputVideos.map((video, index) => {
+          const column = index % columnCount;
+          const row = Math.floor(index / columnCount);
+          return {
+            id: generateId(),
+            type: NODE_TYPES.INPUT,
+            x: baseX + column * 320,
+            y: baseY + row * 220,
+            data: {
+              images: [video],
+              title: `视频分段 ${index + 1}`,
+            },
+          };
+        });
+
+        setNodes((prev) => [...prev, ...newNodes]);
+        setSelectedNodeIds(new Set(newNodes.map((node) => node.id)));
+        setSelectedConnectionIds(new Set());
+        setActiveNodeId(newNodes[0]?.id || null);
+        setRunToast({ message: `视频分割完成，已生成 ${outputVideos.length} 个组件`, type: "info" });
+        setTimeout(() => setRunToast(null), 2400);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error || "视频分割失败");
+        setRunToast({ message: `视频分割失败：${message}`, type: "error" });
+        setTimeout(() => setRunToast(null), 2600);
+        throw error;
+      }
+    },
+    [apiFetch, pushHistory],
+  );
+
   const updateActiveAgentSession = useCallback((updater) => {
     setAgentStore((prev) => {
       const sessionsNext = (prev.sessions || []).map((session) => {
@@ -5011,7 +6189,13 @@ const handleNodeMouseDown = (e, nid) => {
 
   const ensureAgentResultCard = useCallback((turnId) => {
     setAgentResultCards((prev) => {
-      if (prev.some((card) => card.turnId === turnId)) return prev;
+      const existing = prev.find((card) => card.turnId === turnId);
+      const turn = (activeAgentSession?.turns || []).find((item) => item.id === turnId);
+      const targetWidth = getAgentResultCardWidth(turn);
+      if (existing) {
+        if (existing.w === targetWidth) return prev;
+        return prev.map((card) => (card.turnId === turnId ? { ...card, w: targetWidth } : card));
+      }
       const idx = prev.length;
       return [
         ...prev,
@@ -5020,13 +6204,13 @@ const handleNodeMouseDown = (e, nid) => {
           turnId,
           x: 120 + (idx % 2) * 500,
           y: 120 + Math.floor(idx / 2) * 360,
-          w: 460,
+          w: targetWidth,
           collapsed: false,
           minimized: false,
         },
       ];
     });
-  }, []);
+  }, [activeAgentSession?.turns]);
 
   const handleAgentCardMouseDown = (e, cardId) => {
     e.preventDefault();
@@ -5107,6 +6291,67 @@ const handleNodeMouseDown = (e, nid) => {
     ensureAgentResultCard(turnId);
   }, [agentResultCards, ensureAgentResultCard]);
 
+  const revealAgentResultCardInCanvas = useCallback(
+    (turnId) => {
+      const card = agentResultCards.find((item) => item.turnId === turnId);
+      if (!card) {
+        ensureAgentResultCard(turnId);
+        return;
+      }
+
+      setAgentResultCards((prev) =>
+        prev.map((item) =>
+          item.turnId === turnId ? { ...item, minimized: false, collapsed: false } : item,
+        ),
+      );
+      setSelectedAgentCardIds(new Set([card.id]));
+      setActiveAgentCardId(card.id);
+
+      const canvasEl = canvasRef.current;
+      const turn = (activeAgentSession?.turns || []).find((item) => item.id === turnId);
+      if (!canvasEl) return;
+
+      const currentViewport = viewportRef.current || { x: 0, y: 0, zoom: 1 };
+      const zoom = currentViewport.zoom || 1;
+      const padding = 64;
+      const estimatedHeight = 680;
+
+      const visibleLeft = -currentViewport.x / zoom;
+      const visibleTop = -currentViewport.y / zoom;
+      const visibleRight = visibleLeft + canvasEl.clientWidth / zoom;
+      const visibleBottom = visibleTop + canvasEl.clientHeight / zoom;
+
+      const cardLeft = card.x;
+      const cardTop = card.y;
+      const cardRight = card.x + card.w;
+      const cardBottom = card.y + estimatedHeight;
+
+      let nextX = currentViewport.x;
+      let nextY = currentViewport.y;
+
+      if (cardLeft < visibleLeft + padding) {
+        nextX = -(cardLeft - padding) * zoom;
+      } else if (cardRight > visibleRight - padding) {
+        nextX = (canvasEl.clientWidth - (cardRight + padding) * zoom);
+      }
+
+      if (cardTop < visibleTop + padding) {
+        nextY = -(cardTop - padding) * zoom;
+      } else if (cardBottom > visibleBottom - padding) {
+        nextY = (canvasEl.clientHeight - (cardBottom + padding) * zoom);
+      }
+
+      if (nextX !== currentViewport.x || nextY !== currentViewport.y) {
+        setViewport((prev) => ({
+          ...prev,
+          x: nextX,
+          y: nextY,
+        }));
+      }
+    },
+    [activeAgentSession?.turns, agentResultCards, ensureAgentResultCard],
+  );
+
   const toggleAgentResultCardCollapsed = (cardId) => {
     setAgentResultCards((prev) =>
       prev.map((item) =>
@@ -5129,10 +6374,43 @@ const handleNodeMouseDown = (e, nid) => {
     if (activeAgentCardId === cardId) setActiveAgentCardId(null);
   };
 
+  const handleAgentCardWheelCapture = useCallback((e) => {
+    e.stopPropagation();
+    const cardEl = e.currentTarget;
+    const scrollBody = cardEl.querySelector(AGENT_CARD_SCROLL_BODY_SELECTOR);
+    if (!(scrollBody instanceof HTMLElement)) {
+      e.preventDefault();
+      return;
+    }
+
+    if (e.target instanceof Node && scrollBody.contains(e.target)) {
+      return;
+    }
+
+    const maxScrollTop = Math.max(0, scrollBody.scrollHeight - scrollBody.clientHeight);
+    if (maxScrollTop <= 0) {
+      e.preventDefault();
+      return;
+    }
+
+    const nextScrollTop = Math.max(0, Math.min(scrollBody.scrollTop + e.deltaY, maxScrollTop));
+    if (nextScrollTop !== scrollBody.scrollTop) {
+      scrollBody.scrollTop = nextScrollTop;
+    }
+    e.preventDefault();
+  }, []);
+
   const runMissionOnTurn = useCallback(
-    async (turnId, userText, extractedProduct, routeMeta = {}) => {
+    async (turnId, userText, extractedProduct, routeMeta = {}, scriptBrief = null) => {
       try {
-        const response = await generateIdeaScriptMission(extractedProduct, apiFetch, routeMeta);
+        const normalizedBrief = normalizeScriptBrief(
+          scriptBrief || { product: extractedProduct },
+        );
+        const response = await generateIdeaScriptMission(
+          normalizedBrief.product ? normalizedBrief : extractedProduct,
+          apiFetch,
+          routeMeta,
+        );
         updateActiveAgentSession((session) => {
           const turnsNext = (session.turns || []).map((turn) =>
             turn.id === turnId
@@ -5141,50 +6419,12 @@ const handleNodeMouseDown = (e, nid) => {
                   status: "done",
                   stepIndex: AGENT_RUN_STEPS.length - 1,
                   response,
-                  localEditPlans: cloneDeep(response?.edit_plans || []),
                   exports: turn.exports || {},
+                  scriptBrief: normalizedBrief,
+                  scriptBriefDraft: null,
                 }
               : turn,
           );
-          const planCount = (response?.edit_plans || []).length;
-          const hasShots = !!(response?.topics || []).some((topic) => (topic?.shots || []).length > 0);
-          const pendingTask = session?.pendingTask || null;
-          if (planCount > 0 && pendingTask?.intent === "EXPORT") {
-            turnsNext.push({
-              id: `turn_${makeAgentId()}`,
-              userText: "",
-              extractedProduct: "",
-              status: "assistant",
-              assistantText: "剪辑计划已就绪。要现在导出渲染包吗？",
-              quickActions: ["export_now"],
-              productChips: [],
-              routeDebug: buildRouteDebug(
-                { intent: "EXPORT", reason: "pending_task_plan_ready", product: extractedProduct || "" },
-                false,
-              ),
-              createdAt: Date.now(),
-              stepIndex: 0,
-            });
-            return { ...session, turns: turnsNext, pendingTask: null };
-          }
-          if (hasShots && pendingTask?.intent === "STORYBOARD") {
-            turnsNext.push({
-              id: `turn_${makeAgentId()}`,
-              userText: "",
-              extractedProduct: "",
-              status: "assistant",
-              assistantText: "脚本与分镜素材已准备好，需要我现在帮你定位分镜吗？",
-              quickActions: ["storyboard"],
-              productChips: [],
-              routeDebug: buildRouteDebug(
-                { intent: "STORYBOARD", reason: "pending_task_script_ready", product: extractedProduct || "" },
-                false,
-              ),
-              createdAt: Date.now(),
-              stepIndex: 0,
-            });
-            return { ...session, turns: turnsNext, pendingTask: null };
-          }
           return { ...session, turns: turnsNext };
         });
         ensureAgentResultCard(turnId);
@@ -5208,15 +6448,60 @@ const handleNodeMouseDown = (e, nid) => {
     [apiFetch, ensureAgentResultCard, updateActiveAgentSession],
   );
 
+  const runDramaMissionOnTurn = useCallback(
+    async (turnId, dramaPayload, routeMeta = {}) => {
+      try {
+        const payload = dramaPayload && typeof dramaPayload === "object"
+          ? dramaPayload
+          : { prompt: String(dramaPayload || "").trim() };
+        const response = await generateDramaMission(payload, apiFetch, routeMeta);
+        updateActiveAgentSession((session) => ({
+          ...session,
+          turns: (session.turns || []).map((turn) =>
+            turn.id === turnId
+              ? {
+                  ...turn,
+                  status: "done",
+                  stepIndex: AGENT_RUN_STEPS.length - 1,
+                  response,
+                  exports: turn.exports || {},
+                  dramaPayload: payload,
+                }
+              : turn,
+          ),
+        }));
+        ensureAgentResultCard(turnId);
+      } catch (error) {
+        updateActiveAgentSession((session) => ({
+          ...session,
+          turns: (session.turns || []).map((turn) =>
+            turn.id === turnId
+              ? {
+                  ...turn,
+                  status: "error",
+                  error: error?.message || String(error) || "请求失败",
+                }
+              : turn,
+          ),
+        }));
+        ensureAgentResultCard(turnId);
+        setRunToast({ message: error?.message || "短剧创作失败", type: "error" });
+      }
+    },
+    [apiFetch, ensureAgentResultCard, updateActiveAgentSession],
+  );
+
   const appendAssistantTurn = useCallback(
     (userText, assistantText, options = {}) => {
       const {
+        status = "assistant",
         quickActions = [],
         productChips = [],
         routeDebug = null,
         memorySuggestions = [],
         showCancelPending = false,
         userTextOverride,
+        scriptBriefDraft = null,
       } = options || {};
       const finalUserText = userTextOverride !== undefined ? String(userTextOverride || "") : String(userText || "");
       const turnId = `turn_${makeAgentId()}`;
@@ -5232,7 +6517,7 @@ const handleNodeMouseDown = (e, nid) => {
             id: turnId,
             userText: finalUserText,
             extractedProduct: "",
-            status: "assistant",
+            status,
             assistantText,
             quickActions,
             productChips,
@@ -5243,6 +6528,7 @@ const handleNodeMouseDown = (e, nid) => {
             })),
             showCancelPending: !!showCancelPending,
             routeDebug,
+            scriptBriefDraft: scriptBriefDraft ? normalizeScriptBrief(scriptBriefDraft) : null,
             createdAt: Date.now(),
             stepIndex: 0,
           },
@@ -5367,110 +6653,12 @@ const handleNodeMouseDown = (e, nid) => {
     [apiFetch, defaultLanguageModelId, pushApiDebugDetail, resolveModelParamsForId, updateActiveAgentSession, updateApiDebugStatus],
   );
 
-  const runVideoMissionOnTurn = useCallback(
-    async (turnId, userText, extractedProduct, routeMeta = {}) => {
-      try {
-        const response = await generateIdeaScriptVideo(
-          {
-            product: extractedProduct,
-            outDir: "./exports/video_generation",
-            outputWidth: 720,
-            outputHeight: 1280,
-            fps: 24,
-            clipLength: 81,
-            retriesPerStep: 1,
-            maxShots: 0,
-            motionHint: "",
-          },
-          apiFetch,
-          routeMeta,
-        );
-        const ideaScript = response?.idea_script || {};
-        updateActiveAgentSession((session) => ({
-          ...session,
-          turns: (session.turns || []).map((turn) =>
-            turn.id === turnId
-              ? {
-                  ...turn,
-                  status: "done",
-                  stepIndex: AGENT_RUN_STEPS.length - 1,
-                  response: ideaScript,
-                  localEditPlans: cloneDeep(ideaScript?.edit_plans || []),
-                  exports: turn.exports || {},
-                  videoResult: {
-                    enabled: !!response?.video_generation_enabled,
-                    mode: response?.fallback_mode || "",
-                    outputDir: response?.output_dir || "",
-                    outputVideo: response?.output_video || "",
-                    shotsTotal: Number(response?.shots_total || 0),
-                    shotsSucceeded: Number(response?.shots_succeeded || 0),
-                    shotsFailed: Number(response?.shots_failed || 0),
-                    error: response?.error || "",
-                  },
-                }
-              : turn,
-          ),
-        }));
-        ensureAgentResultCard(turnId);
-        const videoPath = String(response?.output_video || "").trim();
-        if (videoPath) {
-          appendAssistantTurn("", `视频生成完成：${videoPath}`, {
-            userTextOverride: "",
-            routeDebug: buildRouteDebug(
-              { intent: "VIDEO", reason: "video_generation_completed", product: extractedProduct || "" },
-              false,
-            ),
-          });
-        } else if (response?.video_generation_enabled === false) {
-          appendAssistantTurn("", "视频生成功能当前未开启（BANANAFLOW_ENABLE_VIDEO_GENERATION=1）。已返回脚本结果。", {
-            userTextOverride: "",
-            routeDebug: buildRouteDebug(
-              { intent: "VIDEO", reason: "video_generation_disabled", product: extractedProduct || "" },
-              false,
-            ),
-          });
-        } else if (response?.error) {
-          appendAssistantTurn("", `视频生成失败：${response.error}`, {
-            userTextOverride: "",
-            routeDebug: buildRouteDebug(
-              { intent: "VIDEO", reason: "video_generation_error", product: extractedProduct || "" },
-              false,
-            ),
-          });
-        } else {
-          appendAssistantTurn("", "视频生成已完成，请查看输出目录。", {
-            userTextOverride: "",
-            routeDebug: buildRouteDebug(
-              { intent: "VIDEO", reason: "video_generation_done_no_path", product: extractedProduct || "" },
-              false,
-            ),
-          });
-        }
-      } catch (error) {
-        updateActiveAgentSession((session) => ({
-          ...session,
-          turns: (session.turns || []).map((turn) =>
-            turn.id === turnId
-              ? {
-                  ...turn,
-                  status: "error",
-                  error: error?.message || String(error) || "请求失败",
-                }
-              : turn,
-          ),
-        }));
-        ensureAgentResultCard(turnId);
-        setRunToast({ message: error?.message || "视频生成失败", type: "error" });
-      }
-    },
-    [apiFetch, appendAssistantTurn, ensureAgentResultCard, updateActiveAgentSession],
-  );
-
   const runCanvasPlanMission = useCallback(
-    async (userText, routeMeta = {}) => {
+    async (userText, routeMeta = {}, requestOptions = {}) => {
       const response = await planAgentCanvas(
         {
           prompt: userText,
+          supplementalPrompt: String(requestOptions?.supplementalPrompt || "").trim(),
           currentNodes: cloneDeep(nodesRef.current || []),
           currentConnections: cloneDeep(connectionsRef.current || []),
           selectedArtifact: activeArtifact
@@ -5490,12 +6678,14 @@ const handleNodeMouseDown = (e, nid) => {
       );
 
       const patch = Array.isArray(response?.patch) ? response.patch : [];
-      if (!patch.length) {
+      if (!patch.length && !parseCanvasClarification(response)) {
         throw new Error("Agent 未返回可执行的画布补丁");
       }
 
-      pushHistory();
-      _applyPatch(patch);
+      if (patch.length) {
+        pushHistory();
+        _applyPatch(patch);
+      }
       return response;
     },
     [activeArtifact, apiFetch, canvasId, _applyPatch, pushHistory],
@@ -5504,16 +6694,6 @@ const handleNodeMouseDown = (e, nid) => {
   const getLatestResultTurn = useCallback(() => {
     const turns = activeAgentSession?.turns || [];
     return [...turns].reverse().find((turn) => turn?.status === "done" && turn?.response) || null;
-  }, [activeAgentSession?.turns]);
-
-  const getLatestPlanTurn = useCallback(() => {
-    const turns = activeAgentSession?.turns || [];
-    return (
-      [...turns].reverse().find((turn) => {
-        const plans = turn?.localEditPlans || turn?.response?.edit_plans || [];
-        return turn?.status === "done" && plans.length > 0;
-      }) || null
-    );
   }, [activeAgentSession?.turns]);
 
   const toValueArray = useCallback((value) => {
@@ -5531,12 +6711,123 @@ const handleNodeMouseDown = (e, nid) => {
     const byExtractor = extractProductKeyword(raw);
     if (byExtractor) return byExtractor;
     if (raw.length <= 24 && !/[，。,.;；\s]/.test(raw)) {
-      if (!/(脚本|分镜|导出|渲染|帮助|怎么|你好|谢谢)/.test(raw)) {
+      if (!/(脚本|导出|渲染|帮助|怎么|你好|谢谢)/.test(raw)) {
         return raw;
       }
     }
     return "";
   }, []);
+
+  const updateScriptBriefDraft = useCallback((turnId, nextBrief) => {
+    updateActiveAgentSession((session) => ({
+      ...session,
+      turns: (session.turns || []).map((turn) =>
+        turn.id === turnId
+          ? {
+              ...turn,
+              scriptBriefDraft: normalizeScriptBrief(nextBrief),
+            }
+          : turn,
+      ),
+    }));
+  }, [updateActiveAgentSession]);
+
+  const selectScriptAngleForTurn = useCallback((turnId, angle) => {
+    updateActiveAgentSession((session) => ({
+      ...session,
+      turns: (session.turns || []).map((turn) => {
+        if (turn.id !== turnId) return turn;
+        const baseBrief = normalizeScriptBrief(turn.scriptBrief || turn.scriptBriefDraft || {});
+        return {
+          ...turn,
+          scriptBrief: {
+            ...baseBrief,
+            selectedAngle: angle,
+          },
+        };
+      }),
+    }));
+  }, [updateActiveAgentSession]);
+
+  const cancelScriptBriefTurn = useCallback((turnId) => {
+    updateActiveAgentSession((session) => ({
+      ...session,
+      turns: (session.turns || []).map((turn) =>
+        turn.id === turnId
+          ? {
+              ...turn,
+              status: "assistant",
+              assistantText: "已取消这次脚本设定。",
+              scriptBriefDraft: null,
+            }
+          : turn,
+      ),
+    }));
+  }, [updateActiveAgentSession]);
+
+  const submitScriptBriefTurn = useCallback((turnId, { useDefaults = false } = {}) => {
+    const turn = (activeAgentSession?.turns || []).find((item) => item.id === turnId);
+    if (!turn) return;
+    const fallbackBrief = buildInitialScriptBrief(turn.userText || "", turn.extractedProduct || "");
+    const currentBrief = normalizeScriptBrief(turn.scriptBriefDraft || turn.scriptBrief || fallbackBrief);
+    const nextBrief = normalizeScriptBrief(
+      useDefaults
+        ? {
+            ...fallbackBrief,
+            ...currentBrief,
+            product: currentBrief.product || fallbackBrief.product,
+            primaryPlatform: currentBrief.primaryPlatform || fallbackBrief.primaryPlatform || "抖音",
+            conversionGoal: currentBrief.conversionGoal || fallbackBrief.conversionGoal || "点击商品详情",
+          }
+        : currentBrief,
+    );
+
+    if (!nextBrief.product) {
+      setRunToast({ message: "请先填写产品 / 服务", type: "error" });
+      return;
+    }
+    if (!nextBrief.primaryPlatform) {
+      setRunToast({ message: "请至少选择一个主平台", type: "error" });
+      return;
+    }
+
+    updateActiveAgentSession((session) => ({
+      ...session,
+      turns: (session.turns || []).map((item) =>
+        item.id === turnId
+          ? {
+              ...item,
+              status: "running",
+              error: "",
+              stepIndex: 0,
+              extractedProduct: nextBrief.product,
+              scriptBrief: nextBrief,
+              scriptBriefDraft: nextBrief,
+              routeDebug: buildRouteDebug(
+                {
+                  intent: "SCRIPT",
+                  product: nextBrief.product,
+                  reason: useDefaults ? "script_brief_submit_defaults" : "script_brief_submit",
+                },
+                true,
+              ),
+            }
+          : item,
+      ),
+    }));
+    ensureAgentResultCard(turnId);
+    runMissionOnTurn(
+      turnId,
+      turn.userText || "",
+      nextBrief.product,
+      {
+        intent: "SCRIPT",
+        product: nextBrief.product,
+        sessionId: activeAgentSession?.id || "",
+      },
+      nextBrief,
+    );
+  }, [activeAgentSession?.id, activeAgentSession?.turns, ensureAgentResultCard, runMissionOnTurn, setRunToast, updateActiveAgentSession]);
 
   const openPreferencesPanelWithSuggestion = useCallback((suggestion) => {
     if (!suggestion) return;
@@ -5657,7 +6948,7 @@ const handleNodeMouseDown = (e, nid) => {
   }, [agentTurns]);
 
   const sendAgentMissionFromText = useCallback(
-    async (text) => {
+    async (text, options = {}) => {
       const missionText = String(text || "").trim();
       if (!missionText) return;
       const sessionId = activeAgentSession?.id || "";
@@ -5690,6 +6981,7 @@ const handleNodeMouseDown = (e, nid) => {
         const filledProduct = resolvePendingProductCandidate(missionText);
         if (filledProduct) {
           const turnId = `turn_${makeAgentId()}`;
+          const initialBrief = buildInitialScriptBrief(pendingTask.rawText || missionText, filledProduct);
           updateActiveAgentSession((session) => ({
             ...session,
             turns: [
@@ -5698,7 +6990,8 @@ const handleNodeMouseDown = (e, nid) => {
                 id: turnId,
                 userText: pendingTask.rawText || missionText,
                 extractedProduct: filledProduct,
-                status: "running",
+                status: "clarify",
+                assistantText: "先确认这次脚本设定，再开始生成。",
                 createdAt: Date.now(),
                 stepIndex: 0,
                 exports: {},
@@ -5706,25 +6999,98 @@ const handleNodeMouseDown = (e, nid) => {
                 intentReason: "pending_task_filled",
                 routeDebug: buildRouteDebug(
                   { intent: "SCRIPT", reason: "pending_task_filled", product: filledProduct },
-                  true,
+                  false,
                 ),
+                scriptBriefDraft: initialBrief,
               },
             ],
             pendingTask: null,
           }));
-          runMissionOnTurn(turnId, pendingTask.rawText || missionText, filledProduct, {
-            intent: "SCRIPT",
-            product: filledProduct,
-            sessionId,
-          });
           return;
         }
       }
 
-      const route = detectIntent(missionText, {
+      if (pendingTask?.intent === "CANVAS" && (pendingTask?.missing || []).includes("prompt")) {
+        const supplementedPrompt = String(missionText || "").trim();
+        if (supplementedPrompt) {
+          clearPendingTaskForActiveSession();
+          try {
+            const response = await runCanvasPlanMission(
+              pendingTask.rawText || "",
+              {
+                intent: "CANVAS",
+                product: "",
+                sessionId,
+              },
+              {
+                supplementalPrompt: supplementedPrompt,
+              },
+            );
+            const clarification = parseCanvasClarification(response);
+            if (clarification) {
+              setPendingTaskForActiveSession({
+                intent: "CANVAS",
+                rawText: pendingTask.rawText || "",
+                extractedProduct: "",
+                missing: ["prompt"],
+                clarifyMode: clarification.mode,
+                createdAt: Date.now(),
+              });
+            }
+            appendAssistantTurn(
+              missionText,
+              String(response?.summary || "").trim() || "我还需要一点补充信息，才能继续搭建画布。",
+              {
+                status: clarification ? "clarify" : "assistant",
+                userTextOverride: "",
+                showCancelPending: !!clarification,
+                routeDebug: buildRouteDebug(
+                  {
+                    intent: "CANVAS",
+                    reason: clarification ? "canvas_prompt_clarification_pending" : "canvas_prompt_clarification_filled",
+                    product: "",
+                  },
+                  true,
+                ),
+              },
+            );
+            if (clarification) {
+              setRunToast({
+                message: String(response?.summary || "").trim() || "还需要你补充一句画面提示词",
+                type: "info",
+              });
+            }
+          } catch (error) {
+            appendAssistantTurn(
+              missionText,
+              error?.message || "画布自动搭建失败，请稍后重试。",
+              {
+                userTextOverride: "",
+                routeDebug: buildRouteDebug(
+                  { intent: "CANVAS", reason: "canvas_prompt_clarification_failed", product: "" },
+                  true,
+                ),
+              },
+            );
+            setRunToast({ message: error?.message || "画布自动搭建失败", type: "error" });
+          }
+          return;
+        }
+      }
+
+      const detectedRoute = detectIntent(missionText, {
         activeSessionId: sessionId,
         turns: activeAgentSession?.turns || [],
       });
+      const route =
+        options?.forcedIntent === "DRAMA"
+          ? {
+              ...detectedRoute,
+              intent: "DRAMA",
+              reason: "forced:drama_quick_action",
+            }
+          : detectedRoute;
+      const extractedSupplementalPrompt = extractCanvasSupplementalPrompt(missionText);
 
       if (route.intent === "CHITCHAT") {
         try {
@@ -5768,18 +7134,37 @@ const handleNodeMouseDown = (e, nid) => {
             intent: route.intent,
             product: route.product || "",
             sessionId,
-          });
+          }, extractedSupplementalPrompt ? { supplementalPrompt: extractedSupplementalPrompt } : {});
+          const clarification = parseCanvasClarification(response);
+          if (clarification) {
+            setPendingTaskForActiveSession({
+              intent: "CANVAS",
+              rawText: missionText,
+              extractedProduct: "",
+              missing: ["prompt"],
+              clarifyMode: clarification.mode,
+              createdAt: Date.now(),
+            });
+          }
           appendAssistantTurn(
             missionText,
             String(response?.summary || "").trim() || "已根据你的需求完成画布自动搭建。",
             {
+              status: clarification ? "clarify" : "assistant",
               userTextOverride: "",
+              showCancelPending: !!clarification,
               routeDebug: buildRouteDebug(
                 { ...route, reason: response?.thought ? `${route.reason}|${response.thought}` : route.reason },
                 true,
               ),
             },
           );
+          if (clarification) {
+            setRunToast({
+              message: String(response?.summary || "").trim() || "还需要你补充一句画面提示词",
+              type: "info",
+            });
+          }
         } catch (error) {
           appendAssistantTurn(
             missionText,
@@ -5791,6 +7176,46 @@ const handleNodeMouseDown = (e, nid) => {
           );
           setRunToast({ message: error?.message || "画布自动搭建失败", type: "error" });
         }
+        return;
+      }
+
+      if (route.intent === "DRAMA") {
+        const turnId = `turn_${makeAgentId()}`;
+        const dramaPayload = {
+          prompt: missionText,
+          taskMode: /大纲/.test(missionText)
+            ? "outline"
+            : /优化|润色|改写/.test(missionText)
+            ? "optimize"
+            : /创意|发想|脑暴/.test(missionText)
+            ? "brainstorm"
+            : "episode_script",
+        };
+        updateActiveAgentSession((session) => ({
+          ...session,
+          title: session.title === "新会话" ? shortenSessionTitle(missionText) : session.title,
+          turns: [
+            ...(session.turns || []),
+            {
+              id: turnId,
+              userText: missionText,
+              extractedProduct: "",
+              status: "running",
+              createdAt: Date.now(),
+              stepIndex: 0,
+              exports: {},
+              intent: "DRAMA",
+              intentReason: route.reason,
+              routeDebug: buildRouteDebug(route, true),
+              dramaPayload,
+            },
+          ],
+        }));
+        runDramaMissionOnTurn(turnId, dramaPayload, {
+          intent: "DRAMA",
+          product: "",
+          sessionId,
+        });
         return;
       }
 
@@ -5815,7 +7240,8 @@ const handleNodeMouseDown = (e, nid) => {
         }
         const turnId = `turn_${makeAgentId()}`;
         const routeWithProduct = { ...route, product };
-        const routeDebug = buildRouteDebug(routeWithProduct, true);
+        const routeDebug = buildRouteDebug(routeWithProduct, false);
+        const initialBrief = buildInitialScriptBrief(missionText, product);
         updateActiveAgentSession((session) => ({
           ...session,
           title: session.title === "新会话" ? shortenSessionTitle(missionText) : session.title,
@@ -5825,142 +7251,23 @@ const handleNodeMouseDown = (e, nid) => {
               id: turnId,
               userText: missionText,
               extractedProduct: product,
-              status: "running",
+              status: "clarify",
+              assistantText: "先确认这次脚本设定，再开始生成。",
               createdAt: Date.now(),
               stepIndex: 0,
               exports: {},
               intent: route.intent,
               intentReason: route.reason,
               routeDebug,
+              scriptBriefDraft: initialBrief,
             },
           ],
           pendingTask: session?.pendingTask?.intent === "SCRIPT" ? null : session?.pendingTask || null,
         }));
-        runMissionOnTurn(turnId, missionText, product, {
-          intent: route.intent,
-          product,
-          sessionId,
-        });
         return;
       }
 
-      if (route.intent === "VIDEO") {
-        const product = route.product || extractProductKeyword(missionText);
-        if (!product) {
-          appendAssistantTurn(missionText, "要生成视频，请先告诉我产品/品类（例如：帮我生成洗面奶成片视频）。", {
-            quickActions: ["script", "video", "help"],
-            productChips: AGENT_PRODUCT_CHIPS,
-            routeDebug: buildRouteDebug(route, false),
-          });
-          return;
-        }
-        const turnId = `turn_${makeAgentId()}`;
-        const routeWithProduct = { ...route, product };
-        const routeDebug = buildRouteDebug(routeWithProduct, true);
-        updateActiveAgentSession((session) => ({
-          ...session,
-          title: session.title === "新会话" ? shortenSessionTitle(missionText) : session.title,
-          turns: [
-            ...(session.turns || []),
-            {
-              id: turnId,
-              userText: missionText,
-              extractedProduct: product,
-              status: "running",
-              createdAt: Date.now(),
-              stepIndex: 0,
-              exports: {},
-              intent: route.intent,
-              intentReason: route.reason,
-              routeDebug,
-            },
-          ],
-        }));
-        runVideoMissionOnTurn(turnId, missionText, product, {
-          intent: route.intent,
-          product,
-          sessionId,
-        });
-        return;
-      }
-
-      if (route.intent === "STORYBOARD") {
-        const latestTurn = getLatestResultTurn();
-        const hasShots = !!latestTurn?.response?.topics?.some((topic) => (topic?.shots || []).length > 0);
-        if (!latestTurn || !hasShots) {
-          setPendingTaskForActiveSession({
-            intent: "STORYBOARD",
-            rawText: missionText,
-            extractedProduct: route.product || "",
-            missing: ["script"],
-            createdAt: Date.now(),
-          });
-          appendAssistantTurn(missionText, "还没有可用脚本上下文，先让我生成一次脚本，再帮你看分镜。", {
-            quickActions: ["script", "help"],
-            routeDebug: buildRouteDebug(route, false),
-          });
-          return;
-        }
-        updateActiveAgentSession((session) => ({
-          ...session,
-          turns: (session.turns || []).map((turn) =>
-            turn.id === latestTurn.id ? { ...turn, uiFocusSection: "storyboard" } : turn,
-          ),
-        }));
-        focusAgentResultCard(latestTurn.id);
-        appendAssistantTurn(missionText, "已定位到最新结果卡片。请展开 Storyboard 区域查看分镜。", {
-          routeDebug: buildRouteDebug(route, false),
-        });
-        return;
-      }
-
-      if (route.intent === "EXPORT") {
-        const latestPlanTurn = getLatestPlanTurn();
-        const plans = latestPlanTurn?.localEditPlans || latestPlanTurn?.response?.edit_plans || [];
-        if (!latestPlanTurn || plans.length === 0) {
-          setPendingTaskForActiveSession({
-            intent: "EXPORT",
-            rawText: missionText,
-            extractedProduct: route.product || "",
-            missing: ["plan"],
-            createdAt: Date.now(),
-          });
-          appendAssistantTurn(missionText, "当前没有可导出的剪辑计划，请先生成脚本与分镜。", {
-            quickActions: ["script", "storyboard"],
-            routeDebug: buildRouteDebug(route, false),
-          });
-          return;
-        }
-        const targetPlan = plans[0];
-        appendAssistantTurn(missionText, `开始导出渲染包${targetPlan?.plan_id ? `（${targetPlan.plan_id}）` : ""}，请稍等。`, {
-          routeDebug: buildRouteDebug(route, true),
-        });
-        const exportResult = await (exportAgentPlanRef.current
-          ? exportAgentPlanRef.current(latestPlanTurn.id, targetPlan, {
-              intent: route.intent,
-              product: targetPlan?.product || route.product || latestPlanTurn?.extractedProduct || "",
-              sessionId,
-            })
-          : Promise.resolve({ ok: false, error: "导出能力尚未初始化，请稍后重试。" }));
-        if (exportResult?.ok) {
-          const renderPath =
-            exportResult?.result?.render_script ||
-            exportResult?.result?.render_sh ||
-            exportResult?.result?.bundle_dir ||
-            exportResult?.result?.bundle_path ||
-            "";
-          appendAssistantTurn(missionText, renderPath ? `导出完成：${renderPath}` : "导出完成。可在结果卡片的 Export 区查看文件路径。", {
-            routeDebug: buildRouteDebug(route, false),
-          });
-        } else {
-          appendAssistantTurn(missionText, exportResult?.error || "导出失败，请稍后重试。", {
-            routeDebug: buildRouteDebug(route, false),
-          });
-        }
-        return;
-      }
-
-      appendAssistantTurn(missionText, "你想要我做脚本/分镜/导出，还是随便聊聊？", {
+      appendAssistantTurn(missionText, "你想要我做脚本、短剧，还是搭建画布工作流？", {
         quickActions: AGENT_DEFAULT_QUICK_ACTION_IDS,
         routeDebug: buildRouteDebug(route, false),
       });
@@ -5971,14 +7278,11 @@ const handleNodeMouseDown = (e, nid) => {
       activeAgentSession?.turns,
       appendAssistantTurn,
       clearPendingTaskForActiveSession,
-      focusAgentResultCard,
-      getLatestPlanTurn,
-      getLatestResultTurn,
       resolvePendingProductCandidate,
+      runDramaMissionOnTurn,
       runMissionOnTurn,
       sendAIChatLanguageStream,
       apiFetch,
-      runVideoMissionOnTurn,
       runCanvasPlanMission,
       setPendingTaskForActiveSession,
       updateActiveAgentSession,
@@ -5997,6 +7301,7 @@ const handleNodeMouseDown = (e, nid) => {
       ? `\n\n[已附参考图片: ${agentComposerFiles.map((item) => item.name).join("，")}]`
       : "";
     setAgentInput("");
+    setActiveComposerActionId("");
     setShowScriptExamples(false);
     setShowCanvasExamples(false);
     setAgentComposerFiles((prev) => {
@@ -6008,7 +7313,41 @@ const handleNodeMouseDown = (e, nid) => {
     if (agentUploadInputRef.current) {
       agentUploadInputRef.current.value = "";
     }
-    void sendAgentMissionFromText(`${text}${attachmentNote}`);
+    const forcedIntent = activeComposerActionId === "drama" ? "DRAMA" : "";
+    void sendAgentMissionFromText(`${text}${attachmentNote}`, forcedIntent ? { forcedIntent } : {});
+  };
+
+  const polishAgentPromptInput = async () => {
+    const sourcePrompt = String(agentInput || "").trim();
+    if (!sourcePrompt) {
+      setAgentPromptPolishError("请先输入提示词");
+      return;
+    }
+    if (!apiFetch) {
+      setAgentPromptPolishError("缺少 API 连接");
+      return;
+    }
+    setAgentPromptPolishLoading(true);
+    setAgentPromptPolishError("");
+    try {
+      const result = await polishCanvasPrompt({ prompt: sourcePrompt, mode: "text2img" }, apiFetch);
+      const variants = normalizePromptPolishVariants(result);
+      if (!variants.length) throw new Error("润色结果为空");
+      openPromptPolishPicker({
+        title: "提示词润色",
+        sourcePrompt,
+        variants,
+        onUse: (text) => {
+          setAgentInput(text);
+          setAgentInputFocused(true);
+          agentInputRef.current?.focus();
+        },
+      });
+    } catch (error) {
+      setAgentPromptPolishError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAgentPromptPolishLoading(false);
+    }
   };
 
   const handleAgentComposerUpload = useCallback((event) => {
@@ -6050,28 +7389,33 @@ const handleNodeMouseDown = (e, nid) => {
     });
   }, []);
 
-  const composerQuickActions = [
-    { id: "storyboard", label: "生成分镜", icon: Clapperboard },
-    { id: "video", label: "成片视频", icon: Film },
-    { id: "export", label: "导出渲染包", icon: Download },
-    { id: "help", label: "查看示例", icon: MessageSquare },
-  ];
-
   const handleAgentQuickAction = useCallback(
     (actionId) => {
-      setActiveComposerActionId((prev) => (prev === actionId ? "" : actionId));
-      setShowScriptExamples(false);
-      setShowCanvasExamples(false);
-      if (actionId === "storyboard") {
-        void sendAgentMissionFromText("生成分镜");
+      if (actionId === "script") {
+        const shouldClose = activeComposerActionId === "script" || showScriptExamples;
+        setActiveComposerActionId((prev) => (prev === "script" ? "" : "script"));
+        setShowCanvasExamples(false);
+        setShowScriptExamples(!shouldClose);
+        setAgentInputFocused(true);
+        agentInputRef.current?.focus();
         return;
       }
-      if (actionId === "video") {
-        void sendAgentMissionFromText("生成成片视频");
+      if (actionId === "drama") {
+        setActiveComposerActionId("drama");
+        setShowCanvasExamples(false);
+        setShowScriptExamples(false);
+        setAgentInput((prev) => (String(prev || "").trim() ? prev : AGENT_DRAMA_QUICK_PROMPT));
+        setAgentInputFocused(true);
+        agentInputRef.current?.focus();
         return;
       }
-      if (actionId === "export" || actionId === "export_now") {
-        void sendAgentMissionFromText("导出渲染包");
+      if (actionId === "canvas") {
+        const shouldClose = activeComposerActionId === "canvas" || showCanvasExamples;
+        setActiveComposerActionId((prev) => (prev === "canvas" ? "" : "canvas"));
+        setShowScriptExamples(false);
+        setShowCanvasExamples(!shouldClose);
+        setAgentInputFocused(true);
+        agentInputRef.current?.focus();
         return;
       }
       if (actionId === "cancel_pending") {
@@ -6085,9 +7429,14 @@ const handleNodeMouseDown = (e, nid) => {
         });
         return;
       }
-      void sendAgentMissionFromText("你能做什么");
     },
-    [appendAssistantTurn, clearPendingTaskForActiveSession, sendAgentMissionFromText],
+    [
+      activeComposerActionId,
+      appendAssistantTurn,
+      clearPendingTaskForActiveSession,
+      showCanvasExamples,
+      showScriptExamples,
+    ],
   );
 
   const handleAgentProductChip = useCallback(
@@ -6104,6 +7453,14 @@ const handleNodeMouseDown = (e, nid) => {
     },
     [activeAgentSession?.pendingTask, sendAgentMissionFromText],
   );
+
+  const insertCanvasPromptExample = useCallback((text) => {
+    const nextText = String(text || "").trim();
+    if (!nextText) return;
+    setAgentInput(nextText);
+    setAgentInputFocused(true);
+    agentInputRef.current?.focus();
+  }, []);
 
   const insertPreferenceQuickExample = useCallback((text) => {
     const nextText = String(text || "帮我用小红书语气设计洗面奶爆款脚本").trim();
@@ -6307,12 +7664,10 @@ const handleNodeMouseDown = (e, nid) => {
     (turn) => {
       if (!turn?.id) return;
       const response = turn?.response || {};
-      let reason = "资产匹配回归";
-      if (turn?.status === "error" || response?.generation_warning || response?.inference_warning) {
-        reason = "生成脚本失败";
-      } else if (response?.asset_match_warning || Number(response?.shot_match_rate || 0) < 0.5) {
-        reason = "资产匹配回归";
-      }
+      const reason =
+        turn?.status === "error" || response?.generation_warning || response?.inference_warning
+          ? (turn?.intent === "DRAMA" ? "短剧创作失败" : "生成脚本失败")
+          : (turn?.intent === "DRAMA" ? "短剧结果需要复核" : "脚本结果需要复核");
       openRegressionFeedbackDialog({
         turnId: turn.id,
         defaultReason: reason,
@@ -6326,7 +7681,42 @@ const handleNodeMouseDown = (e, nid) => {
   const retryAgentTurn = (turnId) => {
     const turn = (activeAgentSession?.turns || []).find((item) => item.id === turnId);
     if (!turn) return;
-    const product = turn.extractedProduct || extractProductKeyword(turn.userText || "");
+    if (turn?.intent === "DRAMA") {
+      const dramaPayload =
+        turn?.dramaPayload && typeof turn.dramaPayload === "object"
+          ? turn.dramaPayload
+          : { prompt: String(turn?.userText || "").trim() };
+      if (!String(dramaPayload?.prompt || "").trim()) {
+        setRunToast({ message: "缺少短剧创作内容", type: "error" });
+        return;
+      }
+      updateActiveAgentSession((session) => ({
+        ...session,
+        turns: (session.turns || []).map((item) =>
+          item.id === turnId
+            ? {
+                ...item,
+                status: "running",
+                error: "",
+                stepIndex: 0,
+                dramaPayload,
+                routeDebug: buildRouteDebug(
+                  { intent: "DRAMA", product: "", reason: "retry" },
+                  true,
+                ),
+              }
+            : item,
+        ),
+      }));
+      runDramaMissionOnTurn(turnId, dramaPayload, {
+        intent: "DRAMA",
+        product: "",
+        sessionId: activeAgentSession?.id || "",
+      });
+      return;
+    }
+    const brief = normalizeScriptBrief(turn.scriptBrief || turn.scriptBriefDraft || {});
+    const product = brief.product || turn.extractedProduct || extractProductKeyword(turn.userText || "");
     if (!product) {
       setRunToast({ message: "请先说明产品/品类", type: "error" });
       return;
@@ -6341,6 +7731,10 @@ const handleNodeMouseDown = (e, nid) => {
               error: "",
               stepIndex: 0,
               extractedProduct: product,
+              scriptBrief: {
+                ...brief,
+                product,
+              },
               routeDebug: buildRouteDebug(
                 { intent: "SCRIPT", product, reason: "retry" },
                 true,
@@ -6353,106 +7747,10 @@ const handleNodeMouseDown = (e, nid) => {
       intent: "SCRIPT",
       product,
       sessionId: activeAgentSession?.id || "",
+    }, {
+      ...brief,
+      product,
     });
-  };
-
-  const selectPrimaryAssetForShot = (turnId, shotId, candidate) => {
-    updateActiveAgentSession((session) => ({
-      ...session,
-      turns: (session.turns || []).map((turn) => {
-        if (turn.id !== turnId) return turn;
-        const plans = cloneDeep(turn.localEditPlans || turn.response?.edit_plans || []);
-        for (const plan of plans) {
-          for (const track of plan.tracks || []) {
-            for (const clip of track.clips || []) {
-              if (clip.shot_id !== shotId) continue;
-              const oldPrimary = clip.primary_asset || null;
-              clip.primary_asset = {
-                asset_id: candidate?.asset_id || "",
-                uri: candidate?.uri || "",
-                score: candidate?.score ?? 0,
-                bucket: candidate?.bucket || "fallback",
-                reason: candidate?.reason || "",
-              };
-              const merged = [oldPrimary, ...(clip.alternates || []), clip.primary_asset]
-                .filter(Boolean)
-                .filter((item, idx, arr) => arr.findIndex((x) => x.asset_id === item.asset_id) === idx);
-              clip.alternates = merged
-                .filter((item) => item.asset_id !== clip.primary_asset.asset_id)
-                .slice(0, 3);
-            }
-          }
-        }
-        return { ...turn, localEditPlans: plans };
-      }),
-    }));
-  };
-
-  async function exportAgentPlan(turnId, plan, routeMeta = {}) {
-    const planId = plan?.plan_id || `plan_${makeAgentId()}`;
-    updateActiveAgentSession((session) => ({
-      ...session,
-      turns: (session.turns || []).map((turn) => {
-        if (turn.id !== turnId) return turn;
-        const exports = { ...(turn.exports || {}) };
-        exports[planId] = { ...(exports[planId] || {}), loading: true, error: "" };
-        return { ...turn, exports };
-      }),
-    }));
-
-    try {
-      const result = await exportIdeaScriptFfmpegBundle(
-        {
-          planId: plan?.plan_id || "",
-          plan,
-          outDir: "./exports/ffmpeg",
-          w: 720,
-          h: 1280,
-          fps: 30,
-        },
-        apiFetch,
-        {
-          intent: routeMeta?.intent || "EXPORT",
-          product: routeMeta?.product || plan?.product || "",
-          sessionId: routeMeta?.sessionId || activeAgentSession?.id || "",
-        },
-      );
-
-      updateActiveAgentSession((session) => ({
-        ...session,
-        turns: (session.turns || []).map((turn) => {
-          if (turn.id !== turnId) return turn;
-          const exports = { ...(turn.exports || {}) };
-          exports[planId] = { loading: false, error: "", result };
-          return { ...turn, exports };
-        }),
-      }));
-      setRunToast({ message: "FFmpeg 渲染包导出成功", type: "info" });
-      return { ok: true, result };
-    } catch (error) {
-      updateActiveAgentSession((session) => ({
-        ...session,
-        turns: (session.turns || []).map((turn) => {
-          if (turn.id !== turnId) return turn;
-          const exports = { ...(turn.exports || {}) };
-          exports[planId] = { loading: false, error: error?.message || "导出失败" };
-          return { ...turn, exports };
-        }),
-      }));
-      setRunToast({ message: error?.message || "导出失败", type: "error" });
-      return { ok: false, error: error?.message || "导出失败" };
-    }
-  }
-  exportAgentPlanRef.current = exportAgentPlan;
-
-  const copyRenderScriptPath = async (path) => {
-    if (!path) return;
-    try {
-      await navigator.clipboard.writeText(path);
-      setRunToast({ message: "render.sh 路径已复制", type: "info" });
-    } catch {
-      setRunToast({ message: "复制 render.sh 路径失败", type: "error" });
-    }
   };
 
   const deleteNode = (id) => {
@@ -6564,7 +7862,7 @@ const handleNodeMouseDown = (e, nid) => {
 
   const renderHistoryMedia = (media, title) => {
     if (!media || media.length === 0) {
-      return <div className="w-full h-28 rounded-lg border border-dashed border-slate-800 flex items-center justify-center text-[11px] text-slate-600">暂无{title}</div>;
+      return <div className="w-full h-28 rounded-lg border border-dashed border-slate-200 bg-slate-50 flex items-center justify-center text-[11px] text-slate-500">暂无{title}</div>;
     }
     return (
       <div className="grid grid-cols-2 gap-2">
@@ -6575,7 +7873,7 @@ const handleNodeMouseDown = (e, nid) => {
               key={`${title}-${idx}`}
               type="button"
               onClick={() => setPreviewImage(item.url)}
-              className="relative block w-full h-28 rounded-lg border border-slate-800 overflow-hidden bg-slate-950"
+              className="relative block w-full h-28 rounded-lg border border-slate-200 overflow-hidden bg-slate-100"
               title="点击放大预览"
             >
               {isVideo ? (
@@ -6584,7 +7882,7 @@ const handleNodeMouseDown = (e, nid) => {
                 <img src={item.url} alt={item.label || title} className="w-full h-full object-cover" />
               )}
               {item.label && (
-                <span className="absolute left-1 top-1 text-[10px] px-1.5 py-0.5 rounded bg-black/60 text-white">
+                <span className="absolute left-1 top-1 text-[10px] px-1.5 py-0.5 rounded border border-slate-200 bg-white/90 text-slate-700">
                   {item.label}
                 </span>
               )}
@@ -6825,7 +8123,7 @@ const handleNodeMouseDown = (e, nid) => {
               let resultUrl = null;
 
               if (procNode.data.mode === "text2img" || procNode.data.mode === "local_text2img") {
-                const promptToUse = sourceText || procNode.data.prompt;
+                const promptToUse = sourceText || buildCanvasNodePrompt(procNode);
                 if (!promptToUse?.trim()) throw new Error("缺少输入文本提示词");
 
                 if (procNode.data.mode === "local_text2img") {
@@ -7024,7 +8322,7 @@ const handleNodeMouseDown = (e, nid) => {
                   model: procNode.data.model || defaultVideoModelId,
                   image: inputImages[i],
                   last_frame_image: procNode.data.refImage || null,
-                  prompt: procNode.data.prompt || sourceText || "natural motion",
+                  prompt: buildCanvasNodePrompt(procNode, sourceText) || "natural motion",
                   duration: durationInt,
                   fps: 24,
                   camera_fixed: isCameraFixed,
@@ -7057,14 +8355,19 @@ const handleNodeMouseDown = (e, nid) => {
                     const selectedResolution = String(payload.resolution || "").trim();
                     const selectedRatio = String(procNode.data.templates?.ratio || "").trim();
                     const selectedDuration = String(durationInt || "").trim();
+                    const selectedImageType = String(procNode.data.templates?.imageType || "").trim();
                     const matchedResolutionId = findAIChatParamValueId(paramList, ["resolution", "分辨率"], selectedResolution);
                     const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比"], selectedRatio);
                     const matchedDurationId = findAIChatParamValueId(paramList, ["duration", "时长"], selectedDuration);
+                    const matchedImageTypeId = findAIChatParamValueId(paramList, ["imagetype", "模式"], selectedImageType);
                     if (selectedResolution && !matchedResolutionId) {
                       throw new Error(`未匹配到resolution参数ID: ${selectedResolution}`);
                     }
                     if (selectedDuration && !matchedDurationId) {
                       throw new Error(`未匹配到duration参数ID: ${selectedDuration}`);
+                    }
+                    if (selectedImageType && !matchedImageTypeId) {
+                      throw new Error(`未匹配到imagetype参数ID: ${selectedImageType}`);
                     }
                     if (matchedResolutionId) {
                       resolvedParamPayload.ai_video_param_resolution_id = matchedResolutionId;
@@ -7079,6 +8382,9 @@ const handleNodeMouseDown = (e, nid) => {
                     }
                     if (matchedDurationId) {
                       resolvedParamPayload.ai_video_param_duration_id = matchedDurationId;
+                    }
+                    if (matchedImageTypeId) {
+                      resolvedParamPayload.ai_video_param_imagetype_id = matchedImageTypeId;
                     }
                     const authorizationInfo = resolveMemberAuthorizationInfo();
                     const imagesPayload = [payload.image, payload.last_frame_image].filter(Boolean);
@@ -7110,6 +8416,8 @@ const handleNodeMouseDown = (e, nid) => {
                           ratio_id: resolvedParamPayload.ai_video_param_ratio_id || "",
                           duration: selectedDuration || "-",
                           duration_id: resolvedParamPayload.ai_video_param_duration_id || "",
+                          imagetype: selectedImageType || "-",
+                          imagetype_id: resolvedParamPayload.ai_video_param_imagetype_id || "",
                         },
                       },
                       authorizationSource: authorizationInfo?.source || "none",
@@ -7178,7 +8486,7 @@ const handleNodeMouseDown = (e, nid) => {
                   }
                 }
               } else if (procNode.data.mode === "multi_image_generate") {
-                const promptToUse = sourceText || procNode.data.prompt;
+                const promptToUse = sourceText || buildCanvasNodePrompt(procNode);
                 if (!promptToUse?.trim()) throw new Error("缺少图生图提示词");
                 if (!Array.isArray(inputImages) || !inputImages.length) throw new Error("缺少图生图输入图片");
                 const modelId = String(procNode.data.model || defaultImageModelId || "").trim();
@@ -7840,7 +9148,7 @@ const handleNodeMouseDown = (e, nid) => {
     return (
       <>
         {visibleSections.length === 0 && !isLeftSidebarCollapsed ? (
-          <div className="rounded-md border border-slate-800/90 bg-slate-950/60 p-2.5 text-[11px] text-slate-400">
+          <div className="rounded-md border border-slate-200 bg-slate-50 p-2.5 text-[11px] text-slate-500">
             未找到匹配项，请尝试其他关键词。
           </div>
         ) : (
@@ -7852,8 +9160,8 @@ const handleNodeMouseDown = (e, nid) => {
                   key={section.key}
                   className={`flex w-full flex-col ${
                     isLeftSidebarCollapsed
-                      ? `items-center ${idx === 0 ? "" : "border-t border-slate-800/70 pt-1.5"}`
-                      : "items-stretch rounded-[20px] border border-slate-800/80 bg-[linear-gradient(180deg,rgba(7,10,18,0.72),rgba(2,6,23,0.4))] px-3 py-2.5"
+                      ? `items-center ${idx === 0 ? "" : "border-t border-slate-200 pt-1.5"}`
+                      : "items-stretch rounded-[20px] border border-slate-200 bg-white px-3 py-2.5"
                   }`}
                 >
                   {!isLeftSidebarCollapsed && (
@@ -7928,29 +9236,46 @@ const handleNodeMouseDown = (e, nid) => {
   ];
 
   const getApiDebugStatusClass = (status) => {
-    if (status === "success") return "text-emerald-300 border-emerald-700/60 bg-emerald-950/30";
-    if (status === "loading") return "text-cyan-200 border-cyan-700/60 bg-cyan-950/30";
+    if (status === "success") return "text-emerald-700 border-emerald-200 bg-emerald-50";
+    if (status === "loading") return "text-cyan-700 border-cyan-200 bg-cyan-50";
     if (status === "timeout" || status === "error" || status === "login_required") {
-      return "text-rose-200 border-rose-700/60 bg-rose-950/30";
+      return "text-rose-700 border-rose-200 bg-rose-50";
     }
-    return "text-slate-300 border-slate-700/70 bg-slate-900/60";
+    return "text-slate-600 border-slate-200 bg-white";
+  };
+
+  const workbenchLightVars = {
+    "--bf-bg": "#f7f7f2",
+    "--bf-panel": "rgba(255,255,255,0.88)",
+    "--bf-panel-strong": "rgba(255,255,255,0.96)",
+    "--bf-panel-soft": "rgba(255,255,255,0.72)",
+    "--bf-border": "rgba(15,23,42,0.08)",
+    "--bf-border-strong": "rgba(15,23,42,0.14)",
+    "--bf-text": "rgba(15,23,42,0.92)",
+    "--bf-text-muted": "rgba(71,85,105,0.92)",
+    "--bf-text-subtle": "rgba(100,116,139,0.92)",
+    "--bf-shadow-lg": "0 28px 60px -30px rgba(15,23,42,0.16)",
+    "--bf-shadow-md": "0 18px 40px -28px rgba(15,23,42,0.14)",
   };
 
   return (
-    <div className="h-screen w-screen bg-[var(--bf-bg)] text-[var(--bf-text)] overflow-hidden flex flex-col font-sans">
-      <header className="relative h-[68px] bg-[var(--bf-panel-strong)] border-b border-[var(--bf-border)] flex items-center justify-between px-4 z-50 select-none shadow-[var(--bf-shadow-md)]">
-        <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.03),transparent_45%)]" />
+    <div
+      className="h-screen w-screen bg-[var(--bf-bg)] text-[var(--bf-text)] overflow-hidden flex flex-col font-sans"
+      style={workbenchLightVars}
+    >
+      <header className="relative h-[68px] bg-[var(--bf-panel-strong)] border-b border-[var(--bf-border)] flex items-center justify-between px-4 z-50 select-none shadow-[var(--bf-shadow-md)] backdrop-blur-xl">
+        <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.9),rgba(255,255,255,0.72)_68%,rgba(255,255,255,0.38))]" />
         <div className="flex items-center gap-2.5 min-w-0">
           <div className="flex flex-col min-w-0">
-            <span className="truncate bg-[linear-gradient(135deg,rgba(248,250,252,0.94)_0%,rgba(203,213,225,0.86)_48%,rgba(148,163,184,0.72)_100%)] bg-clip-text text-[25px] font-normal leading-tight tracking-[0.10em] text-transparent [font-family:'STXingkai','Xingkai_SC','STKaiti','KaiTi','Georgia',serif] [text-shadow:0_0_14px_rgba(148,163,184,0.06)]">
+            <span className="truncate bg-[linear-gradient(135deg,#0f172a_0%,#334155_54%,#64748b_100%)] bg-clip-text text-[25px] font-normal leading-tight tracking-[0.10em] text-transparent [font-family:'STXingkai','Xingkai_SC','STKaiti','KaiTi','Georgia',serif]">
               Yu Canvas
             </span>
-            <span className="text-[10px] font-normal text-slate-400/90 tracking-[0.18em] truncate">AI小禹无限画布</span>
+            <span className="text-[10px] font-normal text-slate-500 tracking-[0.18em] truncate">AI小禹无限画布</span>
           </div>
         </div>
 
         <div className="relative flex items-center gap-2">
-          {agentDevMode && (
+          {isAdminUser && agentDevMode && (
             <div className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[10px] transition-colors ${
               apiStatus === "online"
                 ? "text-emerald-200 border-emerald-500/20 bg-emerald-500/10"
@@ -7960,43 +9285,26 @@ const handleNodeMouseDown = (e, nid) => {
             </div>
           )}
 
-          <button
-            onClick={() => setShowHistoryPanel(true)}
-            className="inline-flex h-10 items-center gap-1.5 rounded-[18px] border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))] px-3.5 text-[11px] text-slate-300 shadow-[0_14px_28px_rgba(0,0,0,0.34),inset_0_1px_0_rgba(255,255,255,0.04)] transition-colors hover:border-slate-700 hover:bg-slate-950 hover:text-white"
-          >
-            <History className="w-3 h-3" /> 历史
-          </button>
-
-          <button
-            onClick={() => {
-              setPreferencesPanelPrefill(null);
-              setShowPreferencesPanel(true);
-            }}
-            className="inline-flex h-10 items-center gap-1.5 rounded-[18px] border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))] px-3.5 text-[11px] text-slate-300 shadow-[0_14px_28px_rgba(0,0,0,0.34),inset_0_1px_0_rgba(255,255,255,0.04)] transition-colors hover:border-slate-700 hover:bg-slate-950 hover:text-white"
-          >
-            <Sliders className="w-3 h-3" /> 设置
-          </button>
-
-          <div className="flex overflow-hidden rounded-[20px] border border-slate-800/90 shadow-[0_16px_32px_rgba(0,0,0,0.36),inset_0_1px_0_rgba(255,255,255,0.04)]">
+          <div className="flex overflow-hidden rounded-[20px] border border-slate-200 bg-white shadow-[0_14px_30px_rgba(15,23,42,0.08)]">
             <button
               onClick={() => safeInvoke(handleRunClick, "运行工作流")}
               disabled={isRunning}
               className={`flex min-w-[118px] items-center justify-center gap-2 px-4 py-2.5 text-sm font-bold transition-all ${
                 isRunning
-                  ? "cursor-not-allowed bg-slate-700 text-slate-300"
-                  : "bg-[linear-gradient(180deg,rgba(28,28,32,0.98),rgba(10,10,12,0.98))] text-white hover:bg-[linear-gradient(180deg,rgba(36,36,40,0.98),rgba(12,12,14,0.98))]"
+                  ? "cursor-not-allowed bg-slate-100 text-slate-400"
+                  : "bg-cyan-50 text-cyan-700 hover:bg-cyan-100 border-r border-slate-200"
               }`}
             >
               {isRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />} <span className="truncate max-w-[150px]">{isRunning ? loadingTip : "运行"}</span>
             </button>
             <div className="relative group">
-              <button className="h-full border-l border-slate-800/90 bg-[linear-gradient(180deg,rgba(28,28,32,0.98),rgba(10,10,12,0.98))] px-3 hover:bg-[linear-gradient(180deg,rgba(36,36,40,0.98),rgba(12,12,14,0.98))]">
-                <ChevronDown className="w-4 h-4 text-slate-200" />
+              <button className="h-full border-l border-slate-200 bg-white px-3 hover:bg-slate-50">
+                <ChevronDown className="w-4 h-4 text-slate-600" />
               </button>
-              <div className="absolute right-0 top-full z-50 mt-2 hidden w-36 overflow-hidden rounded-[20px] border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.98)_55%,rgba(8,8,11,0.98))] shadow-[0_18px_36px_rgba(0,0,0,0.42)] group-hover:block">
-                <button onClick={() => setRunScope("all")} className={`w-full px-3 py-2 text-left text-xs hover:bg-white/6 ${runScope === "all" ? "text-slate-100" : "text-slate-300"}`}>运行全部</button>
-                <button onClick={() => setRunScope("selected")} className={`w-full px-3 py-2 text-left text-xs hover:bg-white/6 ${runScope === "selected" ? "text-slate-100" : "text-slate-300"}`}>运行选中</button>
-                <button onClick={() => setRunScope("selected_downstream")} className={`w-full px-3 py-2 text-left text-xs hover:bg-white/6 ${runScope === "selected_downstream" ? "text-slate-100" : "text-slate-300"}`}>选中 → 下游</button>
+              <div className="absolute right-0 top-full z-50 mt-2 hidden w-36 overflow-hidden rounded-[20px] border border-slate-200 bg-white shadow-[0_18px_36px_rgba(15,23,42,0.12)] group-hover:block">
+                <button onClick={() => setRunScope("all")} className={`w-full px-3 py-2 text-left text-xs hover:bg-slate-50 ${runScope === "all" ? "text-slate-900" : "text-slate-600"}`}>运行全部</button>
+                <button onClick={() => setRunScope("selected")} className={`w-full px-3 py-2 text-left text-xs hover:bg-slate-50 ${runScope === "selected" ? "text-slate-900" : "text-slate-600"}`}>运行选中</button>
+                <button onClick={() => setRunScope("selected_downstream")} className={`w-full px-3 py-2 text-left text-xs hover:bg-slate-50 ${runScope === "selected_downstream" ? "text-slate-900" : "text-slate-600"}`}>选中 → 下游</button>
               </div>
             </div>
           </div>
@@ -8009,11 +9317,11 @@ const handleNodeMouseDown = (e, nid) => {
               aria-label={agentHistoryCollapsed ? "展开对话（Ctrl+Shift+E）" : "收起对话（Ctrl+Shift+E）"}
               className={`inline-flex h-10 items-center gap-2 rounded-[18px] border px-3.5 text-[11px] transition-colors ${
                 agentHistoryCollapsed
-                  ? "border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))] text-slate-200 hover:border-slate-700 hover:bg-slate-950 hover:text-white"
-                  : "border-slate-700 bg-[linear-gradient(180deg,rgba(28,28,32,0.96),rgba(10,10,12,0.98))] text-white shadow-[0_10px_24px_rgba(0,0,0,0.26)]"
+                  ? "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900"
+                  : "border-cyan-200 bg-cyan-50 text-cyan-700 shadow-[0_12px_24px_rgba(15,23,42,0.08)]"
               }`}
             >
-              <History className="w-3.5 h-3.5 text-yellow-400" />
+              <History className="w-3.5 h-3.5 text-slate-500" />
               <span className="font-medium">对话流</span>
               <ChevronRight
                 className={`w-3.5 h-3.5 transition-transform duration-300 ${
@@ -8032,28 +9340,27 @@ const handleNodeMouseDown = (e, nid) => {
                 <button
                   type="button"
                   onMouseDown={handleRightPanelResizeStart}
-                  className="absolute -left-2 top-0 bottom-0 w-2 rounded-md cursor-col-resize text-slate-700 hover:text-slate-300"
+                  className="absolute -left-2 top-0 bottom-0 w-2 rounded-md cursor-col-resize text-slate-500 hover:text-cyan-600"
                   title="拖拽调整对话栏宽度"
                   aria-label="拖拽调整对话栏宽度"
                 >
                   <GripVertical className="w-3.5 h-3.5 absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none" />
                 </button>
                 <div
-                  className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-[28px] border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))]"
-                  style={{ boxShadow: "0 24px 60px rgba(0,0,0,0.48), inset 0 1px 0 rgba(255,255,255,0.05)" }}
+                  className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-[28px] border border-slate-200 bg-white"
+                  style={{ boxShadow: "0 24px 60px rgba(15,23,42,0.12)" }}
                 >
-              <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.03),transparent_24%),linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.008)_34%,transparent_100%)]" />
-              <div className="pointer-events-none absolute inset-x-6 top-0 h-px bg-white/18" />
-              <div className="relative flex h-[54px] shrink-0 items-center justify-between border-b border-white/10 bg-black/10 px-4">
+              <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.92),rgba(248,250,252,0.78)_42%,rgba(255,255,255,0.62))]" />
+              <div className="relative flex h-[54px] shrink-0 items-center justify-between border-b border-slate-200 bg-white/70 px-4">
                 <div className="inline-flex min-w-0 items-center gap-1.5 text-xs">
-                  <History className="w-3.5 h-3.5 text-yellow-400" />
-                  <span className="font-medium truncate text-slate-200">对话流</span>
+                  <History className="w-3.5 h-3.5 text-slate-500" />
+                  <span className="font-medium truncate text-slate-700">对话流</span>
                 </div>
                 <div className="ml-auto flex items-center gap-1.5 shrink-0">
                   <button
                     type="button"
                     onClick={createAgentSession}
-                    className="h-8 inline-flex items-center gap-1 px-2.5 rounded-full border border-white/10 bg-white/5 text-[11px] text-slate-200 hover:bg-white/8 hover:border-cyan-400/25 hover:text-white transition-colors"
+                    className="h-8 inline-flex items-center gap-1 px-2.5 rounded-full border border-slate-200 bg-white text-[11px] text-slate-700 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
                     title="新建会话"
                   >
                     <Plus className="w-3 h-3" />
@@ -8065,8 +9372,8 @@ const handleNodeMouseDown = (e, nid) => {
                     disabled={!hasActiveAgentConversation || isAgentMissionRunning}
                     className={`h-8 inline-flex items-center gap-1 px-2.5 rounded-full border text-[11px] transition-colors ${
                       !hasActiveAgentConversation || isAgentMissionRunning
-                        ? "border-white/5 bg-white/[0.03] text-slate-600 cursor-not-allowed"
-                        : "border-white/10 bg-white/5 text-slate-300 hover:bg-rose-500/12 hover:border-rose-500/35 hover:text-rose-100"
+                        ? "border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed"
+                        : "border-slate-200 bg-white text-slate-600 hover:bg-rose-50 hover:border-rose-200 hover:text-rose-700"
                     }`}
                     title="清除当前会话对话记录"
                   >
@@ -8078,18 +9385,18 @@ const handleNodeMouseDown = (e, nid) => {
                     onClick={toggleAgentHistoryPanel}
                     title="收起对话（Ctrl+Shift+E）"
                     aria-label="收起对话（Ctrl+Shift+E）"
-                    className="p-2 rounded-full border border-white/10 bg-white/5 text-slate-300 hover:bg-white/8 hover:border-cyan-400/25 hover:text-white transition-colors"
+                    className="p-2 rounded-full border border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
                   >
                     <ChevronRight className="w-3.5 h-3.5 rotate-90" />
                   </button>
                 </div>
               </div>
               <div className="flex min-h-0 flex-1 flex-col">
-                <div className="relative shrink-0 border-b border-white/10 bg-black/10 p-3">
+                <div className="relative shrink-0 border-b border-slate-200 bg-white/70 p-3">
                   <select
                     value={activeAgentSession?.id || ""}
                     onChange={(e) => setActiveAgentSession(e.target.value)}
-                    className="w-full rounded-[18px] border border-white/10 bg-black/20 px-3 py-2 text-[11px] text-slate-100 outline-none focus:border-cyan-400/35"
+                    className="w-full rounded-[18px] border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-700 outline-none focus:border-slate-400"
                   >
                     {agentSessions.map((session) => (
                       <option key={session.id} value={session.id}>
@@ -8099,8 +9406,8 @@ const handleNodeMouseDown = (e, nid) => {
                   </select>
                 </div>
                 {minimizedAgentCards.length > 0 && (
-                  <div className="relative shrink-0 space-y-2 border-b border-white/10 bg-black/10 p-3">
-                    <div className="text-[10px] uppercase tracking-wider text-slate-400">已最小化结果</div>
+                  <div className="relative shrink-0 space-y-2 border-b border-slate-200 bg-white/70 p-3">
+                    <div className="text-[10px] uppercase tracking-wider text-slate-500">已最小化结果</div>
                     {minimizedAgentCards.map((card) => {
                       const turn = agentTurns.find((item) => item.id === card.turnId);
                       if (!turn) return null;
@@ -8109,30 +9416,30 @@ const handleNodeMouseDown = (e, nid) => {
                           key={card.id}
                           type="button"
                           onClick={() => focusAgentResultCard(turn.id)}
-                          className="w-full rounded-[16px] border border-white/10 bg-white/5 px-3 py-2 text-left text-[11px] text-slate-200 hover:bg-white/8 hover:border-cyan-400/25 transition-colors"
+                          className="w-full rounded-[16px] border border-slate-200 bg-white px-3 py-2 text-left text-[11px] text-slate-700 hover:bg-slate-50 hover:border-slate-300 transition-colors"
                         >
-                          恢复 · {turn.extractedProduct || "result"}
+                          恢复 · {turn.extractedProduct || "结果"}
                         </button>
                       );
                     })}
                   </div>
                 )}
-                <div className="relative min-h-0 flex-1 overflow-y-auto bg-black/10 p-3 space-y-3 custom-scrollbar">
+                <div className="relative min-h-0 flex-1 overflow-y-auto bg-[#fbfbf8] p-3 space-y-3 custom-scrollbar">
                   {agentTurns.length === 0 && (
-                    <div className="space-y-2 rounded-[20px] border border-white/10 bg-white/[0.04] px-3 py-3">
-                      <div className="text-[11px] text-slate-400">暂无对话，先试一个 Mission 或快速打开模板。</div>
+                    <div className="space-y-2 rounded-[20px] border border-slate-200 bg-white px-3 py-3">
+                      <div className="text-[11px] text-slate-400">暂无对话，先试一个任务示例或快速打开模板。</div>
                       <div className="flex flex-wrap gap-1.5">
                         <button
                           type="button"
                           onClick={() => void sendAgentMissionFromText("帮我设计一个洗面奶的爆款脚本")}
-                          className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1.5 text-[10px] text-slate-200 hover:bg-white/8 hover:border-cyan-400/25 hover:text-white transition-colors"
+                          className="rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] text-slate-600 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
                         >
-                          发送 Mission 示例
+                          发送任务示例
                         </button>
                         <button
                           type="button"
                           onClick={() => safeInvoke(createText2ImgTemplate, "打开文生图模板")}
-                          className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1.5 text-[10px] text-slate-200 hover:bg-white/8 hover:border-cyan-400/25 hover:text-white transition-colors"
+                          className="rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] text-slate-600 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
                         >
                           打开模板
                         </button>
@@ -8153,20 +9460,20 @@ const handleNodeMouseDown = (e, nid) => {
                             <div className="rounded-[20px] border border-cyan-400/20 bg-[linear-gradient(180deg,rgba(14,116,144,0.24),rgba(21,94,117,0.18))] px-3 py-2.5 text-[11px] text-slate-50 whitespace-pre-wrap break-words shadow-[0_10px_24px_rgba(8,145,178,0.12)]">
                               {turn.userText}
                             </div>
-                            {agentDevMode && routeDebug && (
+                            {isAdminUser && agentDevMode && routeDebug && (
                               <div className="rounded-[16px] border border-amber-500/20 bg-amber-500/10 px-2.5 py-1.5 text-[10px] text-amber-100">
-                                intent={routeDebug.intent || "-"} | product={routeDebug.product || "-"} | reason={routeDebug.reason || "-"} | backend_call={routeDebug.backendCalled ? "Y" : "N"}
+                                意图={getRouteIntentLabel(routeDebug.intent)} | 产品={routeDebug.product || "-"} | 原因={routeDebug.reason || "-"} | 后端调用={routeDebug.backendCalled ? "是" : "否"}
                               </div>
                             )}
                           </div>
                         </div>
                       ) : null}
                       <div className="flex justify-start">
-                        <div className="max-w-[92%] rounded-[22px] border border-white/10 bg-[linear-gradient(180deg,rgba(15,23,42,0.92),rgba(15,23,42,0.80))] px-3 py-2.5 text-[11px] text-slate-200 shadow-[0_10px_24px_rgba(2,6,23,0.22)]">
+                        <div className="max-w-[92%] rounded-[22px] border border-slate-200 bg-white px-3 py-2.5 text-[11px] text-slate-700 shadow-[0_10px_24px_rgba(15,23,42,0.08)]">
                           {turn.status === "running" && (
-                            <div className="inline-flex items-center gap-1.5 text-slate-300">
+                            <div className="inline-flex items-center gap-1.5 text-slate-500">
                               <Loader2 className="w-3 h-3 animate-spin" />
-                              {AGENT_RUN_STEPS[Math.min(turn.stepIndex || 0, AGENT_RUN_STEPS.length - 1)]}
+                              {getAgentTurnStepLabel(turn)}
                             </div>
                           )}
                           {(turn.status === "assistant" || turn.status === "clarify") && (
@@ -8202,7 +9509,7 @@ const handleNodeMouseDown = (e, nid) => {
                                       key={`${turn.id}_${actionId}`}
                                       type="button"
                                       onClick={() => handleAgentQuickAction(actionId)}
-                                        className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1.5 text-[10px] text-slate-200 hover:bg-white/8 hover:border-cyan-400/25 hover:text-white transition-colors"
+                                        className="rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] text-slate-600 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
                                       >
                                         {action.label}
                                       </button>
@@ -8214,11 +9521,24 @@ const handleNodeMouseDown = (e, nid) => {
                                 <button
                                   type="button"
                                   onClick={() => handleAgentQuickAction("cancel_pending")}
-                                  className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1.5 text-[10px] text-slate-200 hover:bg-white/8 hover:border-cyan-400/25 hover:text-white transition-colors"
+                                  className="rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] text-slate-600 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
                                 >
                                   取消
                                 </button>
                               )}
+                              {turn.scriptBriefDraft ? (
+                                <ScriptBriefCard
+                                  draft={normalizeScriptBrief(turn.scriptBriefDraft)}
+                                  audienceOptions={SCRIPT_AUDIENCE_OPTIONS}
+                                  priceBandOptions={SCRIPT_PRICE_BAND_OPTIONS}
+                                  conversionGoalOptions={SCRIPT_CONVERSION_GOAL_OPTIONS}
+                                  platformOptions={SCRIPT_PLATFORM_OPTIONS}
+                                  onChange={(nextBrief) => updateScriptBriefDraft(turn.id, nextBrief)}
+                                  onSubmit={() => submitScriptBriefTurn(turn.id)}
+                                  onSubmitDefaults={() => submitScriptBriefTurn(turn.id, { useDefaults: true })}
+                                  onCancel={() => cancelScriptBriefTurn(turn.id)}
+                                />
+                              ) : null}
                               {productChips.length > 0 && (
                                 <div className="flex flex-wrap gap-1">
                                   {productChips.map((product) => (
@@ -8237,12 +9557,12 @@ const handleNodeMouseDown = (e, nid) => {
                           )}
                           {turn.status === "error" && (
                             <div className="space-y-1.5">
-                              <div className="text-red-300">{turn.error || "请求失败"}</div>
+                              <div className="text-rose-600">{turn.error || "请求失败"}</div>
                               <div className="flex flex-wrap gap-1.5">
                                 <button
                                   type="button"
                                   onClick={() => retryAgentTurn(turn.id)}
-                                  className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1.5 text-[10px] text-slate-200 hover:bg-white/8 hover:border-cyan-400/25 hover:text-white transition-colors"
+                                  className="rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] text-slate-600 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
                                 >
                                   重试
                                 </button>
@@ -8254,8 +9574,8 @@ const handleNodeMouseDown = (e, nid) => {
                                     title="将当前会话标记为回归用例，进入评估集用于后续改进"
                                     className={`rounded-full border px-2.5 py-1.5 text-[10px] ${
                                       savingFeedbackTargetId === `turn_${turn.id}`
-                                        ? "bg-white/[0.04] border-white/5 text-slate-500 cursor-not-allowed"
-                                        : "bg-fuchsia-600/20 border-fuchsia-500/60 text-fuchsia-100 hover:bg-fuchsia-600/30"
+                                        ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed"
+                                        : "bg-fuchsia-50 border-fuchsia-200 text-fuchsia-700 hover:bg-fuchsia-100"
                                     }`}
                                   >
                                     标记为回归用例
@@ -8266,14 +9586,38 @@ const handleNodeMouseDown = (e, nid) => {
                           )}
                           {turn.status === "done" && (
                             <div className="space-y-1.5">
-                              <div className="text-slate-300">
-                                已生成 {(turn.response?.topics || []).length} 个 topic / {(turn.response?.edit_plans || []).length} 个 plan
-                              </div>
+                              {turn?.intent === "DRAMA" ? (
+                                <div className="space-y-2">
+                                  <div className="text-slate-600">{turn.response?.summary || "短剧内容已生成"}</div>
+                                  <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[11px] leading-6 max-h-52 overflow-y-auto">
+                                    <DramaMarkdownBlock value={turn.response?.text || ""} className="space-y-1.5" />
+                                  </div>
+                                </div>
+                              ) : (
+                                <>
+                                  <ScriptPlanSummary brief={normalizeScriptBrief(turn.scriptBrief || {})} />
+                                  <div className="text-slate-600">已生成 {(turn.response?.topics || []).length} 个主题</div>
+                                  {(turn.response?.topics || []).length > 0 ? (
+                                    <div className="space-y-2">
+                                      <TopicCards
+                                        topics={turn.response?.topics || []}
+                                        selectedAngle={normalizeScriptBrief(turn.scriptBrief || {}).selectedAngle || ""}
+                                        onSelectAngle={(angle) => selectScriptAngleForTurn(turn.id, angle)}
+                                      />
+                                      <ScriptExecutionPlan
+                                        brief={normalizeScriptBrief(turn.scriptBrief || {})}
+                                        topics={turn.response?.topics || []}
+                                        response={turn.response || null}
+                                      />
+                                    </div>
+                                  ) : null}
+                                </>
+                              )}
                               <div className="flex gap-1.5">
                                 <button
                                   type="button"
                                   onClick={() => focusAgentResultCard(turn.id)}
-                                  className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1.5 text-[10px] text-slate-200 hover:bg-white/8 hover:border-cyan-400/25 hover:text-white transition-colors"
+                                  className="rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] text-slate-600 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
                                 >
                                   {relatedCard?.minimized ? "恢复结果卡片" : "定位结果卡片"}
                                 </button>
@@ -8281,7 +9625,7 @@ const handleNodeMouseDown = (e, nid) => {
                                   <button
                                     type="button"
                                     onClick={() => minimizeAgentResultCard(relatedCard.id)}
-                                    className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1.5 text-[10px] text-slate-200 hover:bg-white/8 hover:border-cyan-400/25 hover:text-white transition-colors"
+                                    className="rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] text-slate-600 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
                                   >
                                     最小化到对话流
                                   </button>
@@ -8294,8 +9638,8 @@ const handleNodeMouseDown = (e, nid) => {
                                     title="将当前会话标记为回归用例，进入评估集用于后续改进"
                                     className={`rounded-full border px-2.5 py-1.5 text-[10px] ${
                                       savingFeedbackTargetId === `turn_${turn.id}`
-                                        ? "bg-white/[0.04] border-white/5 text-slate-500 cursor-not-allowed"
-                                        : "bg-fuchsia-600/20 border-fuchsia-500/60 text-fuchsia-100 hover:bg-fuchsia-600/30"
+                                        ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed"
+                                        : "bg-fuchsia-50 border-fuchsia-200 text-fuchsia-700 hover:bg-fuchsia-100"
                                     }`}
                                   >
                                     标记为回归用例
@@ -8320,7 +9664,7 @@ const handleNodeMouseDown = (e, nid) => {
 
       {/* Toast */}
       {runToast && (
-        <div className={`fixed top-20 left-1/2 -translate-x-1/2 z-[60] px-4 py-2 rounded-lg shadow-2xl border flex items-center gap-2 animate-in slide-in-from-top-5 duration-300 ${runToast.type === "error" ? "bg-red-950/90 border-red-800 text-red-200" : "bg-slate-800/90 border-slate-600 text-white"}`}>
+        <div className={`fixed top-20 left-1/2 -translate-x-1/2 z-[60] px-4 py-2 rounded-lg shadow-[0_18px_36px_rgba(15,23,42,0.14)] border flex items-center gap-2 animate-in slide-in-from-top-5 duration-300 ${runToast.type === "error" ? "bg-rose-50 border-rose-200 text-rose-700" : "bg-white border-slate-200 text-slate-700"}`}>
           {runToast.type === "error" ? <AlertCircle className="w-4 h-4" /> : <Activity className="w-4 h-4 text-purple-400" />}
           <span className="text-xs font-medium">{runToast.message}</span>
           {typeof runToast.onAction === "function" && runToast.actionLabel && (
@@ -8330,7 +9674,7 @@ const handleNodeMouseDown = (e, nid) => {
                 runToast.onAction();
                 setRunToast(null);
               }}
-              className="ml-1 px-1.5 py-0.5 rounded border border-cyan-500/60 text-cyan-100 text-[10px] hover:bg-cyan-600/20"
+              className="ml-1 px-1.5 py-0.5 rounded border border-cyan-200 bg-cyan-50 text-cyan-700 text-[10px] hover:bg-cyan-100"
             >
               {runToast.actionLabel}
             </button>
@@ -8338,7 +9682,7 @@ const handleNodeMouseDown = (e, nid) => {
           <button
             type="button"
             onClick={() => setRunToast(null)}
-            className="ml-1 text-slate-400 hover:text-white"
+            className="ml-1 text-slate-400 hover:text-slate-900"
             aria-label="关闭通知"
           >
             <X className="w-3.5 h-3.5" />
@@ -8346,17 +9690,16 @@ const handleNodeMouseDown = (e, nid) => {
         </div>
       )}
 
-      {agentDevMode ? (
-        <div className="fixed right-4 bottom-4 z-[92] w-[320px] max-w-[calc(100vw-1rem)] overflow-hidden rounded-[28px] border border-white/10 bg-[linear-gradient(145deg,rgba(9,15,28,0.96),rgba(14,25,45,0.90)_55%,rgba(10,18,34,0.94))] shadow-[0_24px_60px_rgba(2,6,23,0.45),inset_0_1px_0_rgba(255,255,255,0.14)]">
-          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.14),transparent_26%),radial-gradient(circle_at_top,rgba(255,255,255,0.06),transparent_35%),linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.01)_34%,transparent_100%)]" />
-          <div className="pointer-events-none absolute inset-x-6 top-0 h-px bg-white/18" />
+      {isAdminUser && agentDevMode ? (
+        <div className="fixed right-4 bottom-4 z-[92] w-[320px] max-w-[calc(100vw-1rem)] overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_24px_60px_rgba(15,23,42,0.12)]">
+          <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(248,250,252,0.82)_48%,rgba(255,255,255,0.72))]" />
           <button
             type="button"
             onClick={() => setApiDebugOpen((prev) => !prev)}
-            className="relative flex w-full items-center justify-between border-b border-white/10 px-4 py-3 text-left"
+            className="relative flex w-full items-center justify-between border-b border-slate-200 px-4 py-3 text-left"
           >
-            <span className="text-xs font-semibold text-slate-100">新接口状态</span>
-            <span className="text-[10px] text-slate-400">{apiDebugOpen ? "收起" : "展开"}</span>
+            <span className="text-xs font-semibold text-slate-800">新接口状态</span>
+            <span className="text-[10px] text-slate-500">{apiDebugOpen ? "收起" : "展开"}</span>
           </button>
           {apiDebugOpen ? (
             <div className="relative space-y-2 p-3">
@@ -8373,11 +9716,11 @@ const handleNodeMouseDown = (e, nid) => {
                       <span className="text-[10px] opacity-70 shrink-0">{formatDebugTime(state.updatedAt)}</span>
                     </div>
                     {API_DEBUG_DETAIL_KEYS.has(item.key) && state.detail ? (
-                      <details className="mt-1.5 rounded-[14px] border border-white/10 bg-black/10">
-                        <summary className="cursor-pointer list-none px-2 py-1.5 text-[9px] text-slate-200/85 [&::-webkit-details-marker]:hidden">
+                      <details className="mt-1.5 rounded-[14px] border border-slate-200 bg-slate-50">
+                        <summary className="cursor-pointer list-none px-2 py-1.5 text-[9px] text-slate-700 [&::-webkit-details-marker]:hidden">
                           查看详细信息
                         </summary>
-                        <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all border-t border-white/10 px-2 py-1.5 text-[9px] leading-4 text-slate-100/90">
+                        <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all border-t border-slate-200 px-2 py-1.5 text-[9px] leading-4 text-slate-700">
                           {state.detail}
                         </pre>
                       </details>
@@ -8405,13 +9748,13 @@ const handleNodeMouseDown = (e, nid) => {
                     value={leftSidebarQuery}
                     onChange={(e) => setLeftSidebarQuery(e.target.value)}
                     placeholder="搜索节点 / 技能 / 工作流"
-                    className="h-9 w-full rounded-md border border-slate-800/90 bg-slate-950/70 pl-8 pr-2.5 text-[11px] text-slate-200 placeholder:text-slate-500 outline-none focus:border-yellow-500/40"
+                    className="h-9 w-full rounded-md border border-slate-200 bg-white pl-8 pr-2.5 text-[11px] text-slate-700 placeholder:text-slate-400 outline-none focus:border-slate-400"
                   />
                 </div>
               </div>
             )}
             <div className="min-h-0 w-full flex-1 overflow-y-auto overflow-x-visible custom-scrollbar [scrollbar-gutter:stable] overscroll-contain">
-              {!isLeftSidebarCollapsed && <div className="mb-2.5 h-px w-full bg-gradient-to-r from-slate-500/40 via-slate-700/20 to-transparent" />}
+              {!isLeftSidebarCollapsed && <div className="mb-2.5 h-px w-full bg-gradient-to-r from-slate-300 via-slate-200 to-transparent" />}
               {renderSidebarContent()}
             </div>
             <div className="mt-3 w-full">
@@ -8420,7 +9763,7 @@ const handleNodeMouseDown = (e, nid) => {
                 onClick={() => setLeftSidebarCollapsed((prev) => !prev)}
                 title={isLeftSidebarCollapsed ? "展开左侧菜单" : "收起左侧菜单"}
                 aria-label={isLeftSidebarCollapsed ? "展开左侧菜单" : "收起左侧菜单"}
-                className={`flex items-center justify-center rounded-xl border border-slate-700/80 bg-slate-950/95 text-slate-300 shadow-[0_10px_28px_rgba(0,0,0,0.28)] transition-colors hover:border-cyan-400/35 hover:bg-slate-900 hover:text-white ${
+                className={`flex items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 shadow-[0_10px_28px_rgba(15,23,42,0.08)] transition-colors hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900 ${
                   isLeftSidebarCollapsed ? "mx-auto h-9 w-9" : "h-10 w-full gap-2 text-[11px]"
                 }`}
               >
@@ -8433,7 +9776,7 @@ const handleNodeMouseDown = (e, nid) => {
             {isLeftSidebarCollapsed ? (
               <details className="relative group">
                 <summary
-                  className="list-none mx-auto flex h-10 w-10 cursor-pointer items-center justify-center rounded-xl border border-slate-700/90 bg-slate-900/80 text-slate-200 hover:border-yellow-500/35 hover:text-yellow-100 [&::-webkit-details-marker]:hidden"
+                  className="list-none mx-auto flex h-10 w-10 cursor-pointer items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:text-slate-900 [&::-webkit-details-marker]:hidden"
                   title={memberLabel}
                 >
                   {memberAvatar ? (
@@ -8442,19 +9785,19 @@ const handleNodeMouseDown = (e, nid) => {
                     <span className="text-xs font-semibold">{String(memberLabel || "G").slice(0, 1).toUpperCase()}</span>
                   )}
                 </summary>
-                <div className="absolute bottom-full left-0 mb-2 w-56 rounded-xl border border-slate-700/90 bg-slate-900/98 p-3 shadow-2xl z-[70]">
+                <div className="absolute bottom-full left-0 mb-2 w-56 rounded-xl border border-slate-200 bg-white p-3 shadow-[0_20px_44px_rgba(15,23,42,0.1)] z-[70]">
                   <div className="flex items-center gap-3">
-                    <div className="h-11 w-11 overflow-hidden rounded-xl border border-slate-700/90 bg-slate-800/90">
+                    <div className="h-11 w-11 overflow-hidden rounded-xl border border-slate-200 bg-slate-100">
                       {memberAvatar ? (
                         <img src={memberAvatar} alt={memberLabel} className="h-full w-full object-cover" />
                       ) : (
-                        <div className="flex h-full w-full items-center justify-center text-sm font-semibold text-slate-200">
+                        <div className="flex h-full w-full items-center justify-center text-sm font-semibold text-slate-700">
                           {String(memberLabel || "G").slice(0, 1).toUpperCase()}
                         </div>
                       )}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-semibold text-slate-100">{memberLabel}</div>
+                      <div className="truncate text-sm font-semibold text-slate-800">{memberLabel}</div>
                       <div className="text-[10px] text-slate-400">
                         {memberInfoLoginUrl ? "会员未登录" : "会员信息"}
                       </div>
@@ -8462,10 +9805,10 @@ const handleNodeMouseDown = (e, nid) => {
                         <span
                           className={`inline-flex rounded-full border px-2 py-0.5 text-[9px] ${
                             userAuthsLoading
-                              ? "border-slate-700/80 bg-slate-900/70 text-slate-400"
+                              ? "border-slate-200 bg-slate-50 text-slate-500"
                               : isAdminUser
                               ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-100"
-                              : "border-slate-700/80 bg-slate-900/70 text-slate-400"
+                              : "border-slate-200 bg-slate-50 text-slate-500"
                           }`}
                         >
                           {userAuthsLoading ? "权限加载中" : isAdminUser ? "管理员" : "普通成员"}
@@ -8474,19 +9817,19 @@ const handleNodeMouseDown = (e, nid) => {
                     </div>
                   </div>
                   <div className="mt-3 grid grid-cols-2 gap-2">
-                    <div className="rounded-lg border border-slate-800/90 bg-slate-950/80 px-2 py-1.5">
+                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5">
                       <div className="text-[10px] text-slate-500">当前积分</div>
-                      <div className="mt-0.5 text-xs font-semibold text-yellow-200">{formatMemberPoints(memberPoint)}</div>
+                      <div className="mt-0.5 text-xs font-semibold text-yellow-700">{formatMemberPoints(memberPoint)}</div>
                     </div>
-                    <div className="rounded-lg border border-slate-800/90 bg-slate-950/80 px-2 py-1.5">
+                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5">
                       <div className="text-[10px] text-slate-500">累计积分</div>
-                      <div className="mt-0.5 text-xs font-semibold text-emerald-200">{formatMemberPoints(memberTotalPoint)}</div>
+                      <div className="mt-0.5 text-xs font-semibold text-emerald-700">{formatMemberPoints(memberTotalPoint)}</div>
                     </div>
                   </div>
                   <button
                     type="button"
                     onClick={() => logout(true)}
-                    className="mt-3 w-full rounded-lg border border-slate-700/90 bg-slate-900/80 px-3 py-2 text-left text-[11px] text-slate-200 hover:border-rose-500/35 hover:bg-rose-500/10 hover:text-rose-100"
+                    className="mt-3 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-left text-[11px] text-slate-700 hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700"
                   >
                     退出登录
                   </button>
@@ -8494,7 +9837,7 @@ const handleNodeMouseDown = (e, nid) => {
                     <button
                       type="button"
                       onClick={() => navigateToMemberLogin(memberInfoLoginUrl)}
-                      className="mt-2 w-full rounded-lg border border-cyan-700/70 bg-cyan-950/40 px-3 py-2 text-left text-[11px] text-cyan-100 hover:border-cyan-500/60 hover:bg-cyan-900/40"
+                    className="mt-2 w-full rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-2 text-left text-[11px] text-cyan-700 hover:border-cyan-300 hover:bg-cyan-100"
                     >
                       前往会员登录
                     </button>
@@ -8502,19 +9845,19 @@ const handleNodeMouseDown = (e, nid) => {
                 </div>
               </details>
             ) : (
-              <div className="rounded-2xl border border-slate-800/90 bg-slate-950/75 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+              <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-[0_14px_32px_rgba(15,23,42,0.06)]">
                 <div className="flex items-center gap-3">
-                  <div className="h-12 w-12 overflow-hidden rounded-2xl border border-slate-700/90 bg-slate-800/90">
+                  <div className="h-12 w-12 overflow-hidden rounded-2xl border border-slate-200 bg-slate-100">
                     {memberAvatar ? (
                       <img src={memberAvatar} alt={memberLabel} className="h-full w-full object-cover" />
                     ) : (
-                      <div className="flex h-full w-full items-center justify-center text-sm font-semibold text-slate-200">
+                      <div className="flex h-full w-full items-center justify-center text-sm font-semibold text-slate-700">
                         {String(memberLabel || "G").slice(0, 1).toUpperCase()}
                       </div>
                     )}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-semibold text-slate-100">{memberLabel}</div>
+                    <div className="truncate text-sm font-semibold text-slate-800">{memberLabel}</div>
                     <div className="truncate text-[10px] text-slate-400">
                       {memberInfoLoginUrl ? "会员未登录" : user?.email || "会员信息"}
                     </div>
@@ -8522,10 +9865,10 @@ const handleNodeMouseDown = (e, nid) => {
                       <span
                         className={`inline-flex rounded-full border px-2 py-0.5 text-[9px] ${
                           userAuthsLoading
-                            ? "border-slate-700/80 bg-slate-900/70 text-slate-400"
+                            ? "border-slate-200 bg-slate-50 text-slate-500"
                             : isAdminUser
-                            ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-100"
-                            : "border-slate-700/80 bg-slate-900/70 text-slate-400"
+                            ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                            : "border-slate-200 bg-slate-50 text-slate-500"
                         }`}
                       >
                         {userAuthsLoading ? "权限加载中" : isAdminUser ? "管理员" : "普通成员"}
@@ -8534,19 +9877,19 @@ const handleNodeMouseDown = (e, nid) => {
                   </div>
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-2">
-                  <div className="rounded-xl border border-slate-800/90 bg-slate-900/75 px-2.5 py-2">
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-2">
                     <div className="text-[10px] text-slate-500">当前积分</div>
-                    <div className="mt-1 text-sm font-semibold text-yellow-200">{formatMemberPoints(memberPoint)}</div>
+                    <div className="mt-1 text-sm font-semibold text-yellow-700">{formatMemberPoints(memberPoint)}</div>
                   </div>
-                  <div className="rounded-xl border border-slate-800/90 bg-slate-900/75 px-2.5 py-2">
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-2">
                     <div className="text-[10px] text-slate-500">累计积分</div>
-                    <div className="mt-1 text-sm font-semibold text-emerald-200">{formatMemberPoints(memberTotalPoint)}</div>
+                    <div className="mt-1 text-sm font-semibold text-emerald-700">{formatMemberPoints(memberTotalPoint)}</div>
                   </div>
                 </div>
                 <button
                   type="button"
                   onClick={() => logout(true)}
-                  className="mt-3 w-full rounded-xl border border-slate-700/90 bg-slate-900/80 px-3 py-2 text-[11px] text-slate-200 hover:border-rose-500/35 hover:bg-rose-500/10 hover:text-rose-100 transition-colors"
+                  className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] text-slate-700 hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700 transition-colors"
                 >
                   退出登录
                 </button>
@@ -8554,7 +9897,7 @@ const handleNodeMouseDown = (e, nid) => {
                   <button
                     type="button"
                     onClick={() => navigateToMemberLogin(memberInfoLoginUrl)}
-                    className="mt-2 w-full rounded-xl border border-cyan-700/70 bg-cyan-950/40 px-3 py-2 text-[11px] text-cyan-100 hover:border-cyan-500/60 hover:bg-cyan-900/40 transition-colors"
+                    className="mt-2 w-full rounded-xl border border-cyan-200 bg-cyan-50 px-3 py-2 text-[11px] text-cyan-700 hover:border-cyan-300 hover:bg-cyan-100 transition-colors"
                   >
                     前往会员登录
                   </button>
@@ -8566,14 +9909,14 @@ const handleNodeMouseDown = (e, nid) => {
 
         {isLeftSidebarCollapsed && hoveredSidebarPreview ? (
           <div
-            className="pointer-events-none absolute z-[55] w-72 -translate-y-1/2 rounded-2xl border border-slate-800/90 bg-[linear-gradient(180deg,rgba(5,5,7,0.98),rgba(12,12,16,0.94))] px-3.5 py-3.5 text-left shadow-2xl"
+            className="pointer-events-none absolute z-[55] w-72 -translate-y-1/2 rounded-2xl border border-slate-200 bg-white px-3.5 py-3.5 text-left shadow-[0_20px_44px_rgba(15,23,42,0.1)]"
             style={{ left: leftSidebarWidth + 6, top: hoveredSidebarPreview.top }}
           >
-            <div className="absolute left-[-6px] top-1/2 h-3 w-3 -translate-y-1/2 rotate-45 border-l border-t border-slate-800/90 bg-[#070709]" />
+            <div className="absolute left-[-6px] top-1/2 h-3 w-3 -translate-y-1/2 rotate-45 border-l border-t border-slate-200 bg-white" />
             <div className="flex items-start gap-3">
               <div
                 className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${hoveredSidebarPreview.bg} ${hoveredSidebarPreview.color} ring-1 ${
-                  hoveredSidebarPreview.active ? "ring-cyan-400/35" : "ring-slate-700/70"
+                  hoveredSidebarPreview.active ? "ring-slate-400/35" : "ring-slate-200"
                 }`}
               >
                 {hoveredSidebarPreview.icon
@@ -8581,7 +9924,7 @@ const handleNodeMouseDown = (e, nid) => {
                   : null}
               </div>
               <div className="min-w-0 flex-1">
-                <div className={`text-[13px] font-medium leading-5 ${hoveredSidebarPreview.active ? "text-white" : "text-slate-100"}`}>
+                <div className="text-[13px] font-medium leading-5 text-slate-800">
                   {hoveredSidebarPreview.label}
                 </div>
                 <div className="mt-1.5 text-[11px] leading-5 text-slate-400 whitespace-normal break-words">
@@ -8596,7 +9939,7 @@ const handleNodeMouseDown = (e, nid) => {
         {/* Canvas */}
         <div
           ref={canvasRef}
-          className="flex-1 relative overflow-hidden bg-[#020203]"
+          className="flex-1 relative overflow-hidden bg-[#fafaf6]"
           style={{ cursor: getCursor() }}
           onMouseDown={handleCanvasMouseDown}
           onMouseMove={handleMouseMove}
@@ -8611,7 +9954,7 @@ const handleNodeMouseDown = (e, nid) => {
             className="absolute inset-0 pointer-events-none"
             style={{
               opacity: 0.05,
-              backgroundImage: "linear-gradient(rgba(148,163,184,0.95) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,0.95) 1px, transparent 1px)",
+              backgroundImage: "linear-gradient(rgba(203,213,225,0.9) 1px, transparent 1px), linear-gradient(90deg, rgba(203,213,225,0.9) 1px, transparent 1px)",
               backgroundSize: `${GRID_SIZE * viewport.zoom}px ${GRID_SIZE * viewport.zoom}px`,
               backgroundPosition: `${viewport.x}px ${viewport.y}px`,
             }}
@@ -8620,143 +9963,144 @@ const handleNodeMouseDown = (e, nid) => {
             className="absolute inset-0 pointer-events-none"
             style={{
               opacity: 0.08,
-              backgroundImage: "linear-gradient(rgba(100,116,139,0.95) 1px, transparent 1px), linear-gradient(90deg, rgba(100,116,139,0.95) 1px, transparent 1px)",
+              backgroundImage: "linear-gradient(rgba(226,232,240,0.96) 1px, transparent 1px), linear-gradient(90deg, rgba(226,232,240,0.96) 1px, transparent 1px)",
               backgroundSize: `${GRID_SIZE * 4 * viewport.zoom}px ${GRID_SIZE * 4 * viewport.zoom}px`,
               backgroundPosition: `${viewport.x}px ${viewport.y}px`,
             }}
           />
-          <div className="absolute inset-0 pointer-events-none" style={{ background: "radial-gradient(ellipse at center, rgba(2,6,23,0) 46%, rgba(2,6,23,0.34) 84%, rgba(2,6,23,0.56) 100%)" }} />
+          <div className="absolute inset-0 pointer-events-none" style={{ background: "radial-gradient(ellipse at center, rgba(255,255,255,0) 44%, rgba(241,245,249,0.22) 84%, rgba(226,232,240,0.42) 100%)" }} />
 
-          {canvasDropActive ? (
-            <div className="pointer-events-none absolute inset-6 z-20 rounded-[32px] border border-cyan-500/40 bg-cyan-500/8 shadow-[inset_0_0_0_1px_rgba(34,211,238,0.18)] backdrop-blur-[1px]">
-              <div className="absolute inset-x-8 top-28 rounded-[24px] border border-dashed border-cyan-400/35 bg-slate-950/55 px-6 py-4 text-center shadow-[0_18px_48px_rgba(8,145,178,0.12)]">
-                <div className="text-sm font-medium text-cyan-100">拖到这里创建图片/视频编辑区</div>
-                <div className="mt-1 text-xs text-slate-300">落下后会在当前位置生成一个小型编辑卡片，图片可继续三视图、图生图、去水印，视频可直接一键接入视频超清。</div>
-              </div>
-            </div>
-          ) : null}
+	          {canvasDropActive ? (
+	            <div className="pointer-events-none absolute inset-6 z-20 rounded-[32px] border border-cyan-500/40 bg-cyan-500/8 shadow-[inset_0_0_0_1px_rgba(34,211,238,0.18)] backdrop-blur-[1px]" />
+	          ) : null}
 
-          {nodes.length === 0 && !hasAgentResultCards ? (
-            <div className="absolute inset-x-0 top-6 z-20 flex justify-center px-6 pointer-events-none">
-              <div
-                className="pointer-events-auto flex w-full max-w-4xl items-center justify-center gap-3 px-2 py-2"
-                onMouseDown={(e) => e.stopPropagation()}
+	          {nodes.length === 0 && !hasAgentResultCards ? (
+	            <div className="absolute inset-x-0 top-6 z-20 flex justify-center px-6 pointer-events-none">
+	              <div
+	                className="pointer-events-auto flex w-full max-w-4xl items-center justify-center gap-3 px-2 py-2"
+	                onMouseDown={(e) => e.stopPropagation()}
               >
                 <button
                   onClick={() => safeInvoke(createText2ImgTemplate, "打开文生图模板")}
-                  className="group flex min-w-[170px] items-center gap-3 rounded-[20px] border border-slate-800/80 bg-[linear-gradient(180deg,rgba(12,12,16,0.82),rgba(5,5,7,0.72))] px-4 py-3 text-left shadow-[0_12px_28px_rgba(0,0,0,0.28)] backdrop-blur-md transition-all hover:-translate-y-0.5 hover:border-slate-700 hover:bg-black"
+                  className="group flex min-w-[170px] items-center gap-3 rounded-[20px] border border-slate-200 bg-white px-4 py-3 text-left shadow-[0_10px_24px_rgba(15,23,42,0.06)] transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:bg-slate-50"
                 >
-                  <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-white/[0.03] ring-1 ring-white/5 transition-colors group-hover:bg-white/[0.05]">
-                    <Wand2 className="h-5 w-5 text-slate-200" />
+                  <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-slate-100 ring-1 ring-slate-200 transition-colors group-hover:bg-slate-200">
+                    <Wand2 className="h-5 w-5 text-slate-700" />
                   </div>
                   <div>
-                    <div className="text-sm font-semibold text-slate-100">文生图</div>
+                    <div className="text-sm font-semibold text-slate-800">文生图</div>
                     <div className="mt-0.5 text-[11px] leading-5 text-slate-500">从文字快速起图</div>
                   </div>
                 </button>
 
                 <button
                   onClick={() => safeInvoke(createImg2ImgTemplate, "打开图生图模板")}
-                  className="group flex min-w-[170px] items-center gap-3 rounded-[20px] border border-slate-800/80 bg-[linear-gradient(180deg,rgba(12,12,16,0.82),rgba(5,5,7,0.72))] px-4 py-3 text-left shadow-[0_12px_28px_rgba(0,0,0,0.28)] backdrop-blur-md transition-all hover:-translate-y-0.5 hover:border-slate-700 hover:bg-black"
+                  className="group flex min-w-[170px] items-center gap-3 rounded-[20px] border border-slate-200 bg-white px-4 py-3 text-left shadow-[0_10px_24px_rgba(15,23,42,0.06)] transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:bg-slate-50"
                 >
-                  <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-white/[0.03] ring-1 ring-white/5 transition-colors group-hover:bg-white/[0.05]">
-                    <Images className="h-5 w-5 text-slate-200" />
+                  <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-slate-100 ring-1 ring-slate-200 transition-colors group-hover:bg-slate-200">
+                    <Images className="h-5 w-5 text-slate-700" />
                   </div>
                   <div>
-                    <div className="text-sm font-semibold text-slate-100">图生图</div>
+                    <div className="text-sm font-semibold text-slate-800">图生图</div>
                     <div className="mt-0.5 text-[11px] leading-5 text-slate-500">基于现有素材重绘</div>
                   </div>
                 </button>
 
                 <button
                   onClick={() => safeInvoke(createImg2VideoTemplate, "打开图生视频模板")}
-                  className="group flex min-w-[170px] items-center gap-3 rounded-[20px] border border-slate-800/80 bg-[linear-gradient(180deg,rgba(12,12,16,0.82),rgba(5,5,7,0.72))] px-4 py-3 text-left shadow-[0_12px_28px_rgba(0,0,0,0.28)] backdrop-blur-md transition-all hover:-translate-y-0.5 hover:border-slate-700 hover:bg-black"
+                  className="group flex min-w-[170px] items-center gap-3 rounded-[20px] border border-slate-200 bg-white px-4 py-3 text-left shadow-[0_10px_24px_rgba(15,23,42,0.06)] transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:bg-slate-50"
                 >
-                  <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-white/[0.03] ring-1 ring-white/5 transition-colors group-hover:bg-white/[0.05]">
-                    <Clapperboard className="h-5 w-5 text-slate-200" />
+                  <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-slate-100 ring-1 ring-slate-200 transition-colors group-hover:bg-slate-200">
+                    <Clapperboard className="h-5 w-5 text-slate-700" />
                   </div>
                   <div>
-                    <div className="text-sm font-semibold text-slate-100">图生视频</div>
+                    <div className="text-sm font-semibold text-slate-800">图生视频</div>
                     <div className="mt-0.5 text-[11px] leading-5 text-slate-500">从单图生成视频流程</div>
                   </div>
                 </button>
 
                 <button
                   onClick={() => safeInvoke(createVideoUpscaleTemplate, "打开视频超清模板")}
-                  className="group flex min-w-[170px] items-center gap-3 rounded-[20px] border border-slate-800/80 bg-[linear-gradient(180deg,rgba(12,12,16,0.82),rgba(5,5,7,0.72))] px-4 py-3 text-left shadow-[0_12px_28px_rgba(0,0,0,0.28)] backdrop-blur-md transition-all hover:-translate-y-0.5 hover:border-slate-700 hover:bg-black"
+                  className="group flex min-w-[170px] items-center gap-3 rounded-[20px] border border-slate-200 bg-white px-4 py-3 text-left shadow-[0_10px_24px_rgba(15,23,42,0.06)] transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:bg-slate-50"
                 >
-                  <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-white/[0.03] ring-1 ring-white/5 transition-colors group-hover:bg-white/[0.05]">
-                    <TrendingUp className="h-5 w-5 text-slate-200" />
+                  <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-slate-100 ring-1 ring-slate-200 transition-colors group-hover:bg-slate-200">
+                    <TrendingUp className="h-5 w-5 text-slate-700" />
                   </div>
                   <div>
-                    <div className="text-sm font-semibold text-slate-100">视频超清</div>
+                    <div className="text-sm font-semibold text-slate-800">视频超清</div>
                     <div className="mt-0.5 text-[11px] leading-5 text-slate-500">上传视频后直接做画质增强</div>
                   </div>
                 </button>
-              </div>
-            </div>
-          ) : null}
+	              </div>
+	            </div>
+	          ) : null}
 
-          {nodes.length === 0 && !hasAgentResultCards && (
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
-              <div
-                className="pointer-events-auto relative max-w-xl overflow-hidden rounded-[32px] border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))] px-8 py-8 text-center shadow-[0_24px_60px_rgba(0,0,0,0.48),inset_0_1px_0_rgba(255,255,255,0.05)]"
-                onMouseDown={(e) => e.stopPropagation()}
-              >
-                <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.03),transparent_24%),linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.008)_34%,transparent_100%)]" />
-                <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-white/18" />
-                <div className="relative">
-                  <div className="mx-auto mb-6 flex w-fit items-center gap-4 rounded-[28px] border border-slate-800/80 bg-[linear-gradient(180deg,rgba(10,16,28,0.94),rgba(5,8,16,0.88))] px-5 py-4 shadow-[0_18px_38px_rgba(2,6,23,0.34)]">
-                    <div className="flex h-16 w-16 items-center justify-center rounded-[20px] border border-cyan-500/20 bg-cyan-500/10">
-                      <MousePointer2 className="h-7 w-7 text-cyan-200" />
-                    </div>
-                    <div className="flex flex-col items-center gap-2">
-                      <ArrowRight className="h-4 w-4 text-slate-500" />
-                      <div className="h-1 w-12 rounded-full bg-[linear-gradient(90deg,rgba(34,211,238,0),rgba(34,211,238,0.75),rgba(34,211,238,0))]" />
-                    </div>
-                    <div className="relative flex h-20 w-28 items-center justify-center rounded-[22px] border border-dashed border-cyan-400/35 bg-[linear-gradient(180deg,rgba(8,15,28,0.84),rgba(4,8,18,0.72))]">
-                      <div className="absolute inset-2 rounded-[16px] border border-white/5" />
-                      <Upload className="h-7 w-7 text-cyan-200" />
-                      <div className="absolute bottom-2 text-[9px] tracking-[0.18em] text-cyan-100/75">CANVAS</div>
-                    </div>
-                  </div>
-                  <p className="mx-auto max-w-md text-sm leading-6 text-slate-300">
-                    将图片拖拽到画布中，即可开始快捷编辑。
-                  </p>
-                  <div className="mt-3 text-[11px] leading-6 text-slate-500">
-                    支持一键三视图、图生图、去水印、图生视频。
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
+	          {nodes.length === 0 && !hasAgentResultCards ? (
+	            <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
+	              <div className="flex items-center gap-4 text-[11px] tracking-[0.16em] text-slate-400/75">
+	                <div className="h-px w-14 bg-[linear-gradient(90deg,rgba(148,163,184,0),rgba(148,163,184,0.45),rgba(148,163,184,0))]" />
+	                <span>拖拽图片或视频到画布</span>
+	                <div className="h-px w-14 bg-[linear-gradient(90deg,rgba(148,163,184,0),rgba(148,163,184,0.45),rgba(148,163,184,0))]" />
+	              </div>
+	            </div>
+	          ) : null}
 
-          {/* Controls */}
+	          {/* Controls */}
           <div className="absolute bottom-6 left-6 z-50 flex gap-2 select-none">
-            <div className="relative flex items-center rounded-[16px] border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))] p-0.5 shadow-[0_18px_36px_rgba(0,0,0,0.36),inset_0_1px_0_rgba(255,255,255,0.05)] text-slate-400">
-              <div className="pointer-events-none absolute inset-0 rounded-[16px] bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.008)_34%,transparent_100%)]" />
-              <button onClick={() => zoomCanvas(-0.2)} className="relative rounded-[12px] p-1.5 transition-colors hover:bg-white/8 hover:text-slate-100"><Minus className="w-3 h-3" /></button>
-              <span className="relative w-9 text-center text-[10px] font-mono text-slate-300">{Math.round(viewport.zoom * 100)}%</span>
-              <button onClick={() => zoomCanvas(0.2)} className="relative rounded-[12px] p-1.5 transition-colors hover:bg-white/8 hover:text-slate-100"><Plus className="w-3 h-3" /></button>
+            <div className="relative flex items-center rounded-[16px] border border-slate-200 bg-white p-0.5 shadow-[0_18px_36px_rgba(15,23,42,0.08)] text-slate-500">
+              <button onClick={() => zoomCanvas(-0.2)} className="relative rounded-[12px] p-1.5 transition-colors hover:bg-slate-100 hover:text-slate-900"><Minus className="w-3 h-3" /></button>
+              <span className="relative w-9 text-center text-[10px] font-mono text-slate-700">{Math.round(viewport.zoom * 100)}%</span>
+              <button onClick={() => zoomCanvas(0.2)} className="relative rounded-[12px] p-1.5 transition-colors hover:bg-slate-100 hover:text-slate-900"><Plus className="w-3 h-3" /></button>
             </div>
-            <button onClick={() => setViewport({ x: 0, y: 0, zoom: 1 })} className="relative rounded-[16px] border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))] p-2 text-slate-400 shadow-[0_18px_36px_rgba(0,0,0,0.36),inset_0_1px_0_rgba(255,255,255,0.05)] transition-colors hover:bg-slate-950 hover:text-slate-100" title="Reset View">
+            <button onClick={() => setViewport({ x: 0, y: 0, zoom: 1 })} className="relative rounded-[16px] border border-slate-200 bg-white p-2 text-slate-500 shadow-[0_18px_36px_rgba(15,23,42,0.08)] transition-colors hover:bg-slate-50 hover:text-slate-900" title="Reset View">
               <Maximize className="w-3 h-3" />
             </button>
           </div>
 
-          <div className="absolute inset-0 origin-top-left" style={{ transform: `translate(${viewport.x}px,${viewport.y}px) scale(${viewport.zoom})` }}>
-            <svg className="absolute inset-0 overflow-visible pointer-events-none" style={{ width: 1, height: 1 }}>
-              {renderConnections()}
-              {renderTempConnection()}
-            </svg>
+	          <div className="absolute inset-0 origin-top-left" style={{ transform: `translate(${viewport.x}px,${viewport.y}px) scale(${viewport.zoom})` }}>
+	            <svg className="absolute inset-0 overflow-visible pointer-events-none" style={{ width: 1, height: 1 }}>
+	              {renderConnections()}
+	              {renderTempConnection()}
+	            </svg>
 
-            {nodes.map((n) => (
+	            {canvasDropUploading ? (
+	              <div
+	                className="pointer-events-none absolute z-40 w-[280px] overflow-visible border border-cyan-300 bg-white shadow-none"
+	                style={{ left: canvasDropUploading.x, top: canvasDropUploading.y }}
+	              >
+	                <div className="absolute -top-5 left-0 select-none text-[11px] font-medium tracking-[0.08em] text-slate-500">
+	                  图片/视频上传
+	                </div>
+	                <div
+	                  className="relative flex min-h-[132px] flex-col items-center justify-center overflow-hidden px-4 py-8 text-center"
+	                  style={{ minHeight: MEDIA_UPLOAD_NODE_EMPTY_HEIGHT }}
+	                >
+	                  <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.16),transparent_48%),linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.92))]" />
+	                  <div className="relative flex h-11 w-11 items-center justify-center border border-cyan-200 bg-cyan-50 text-cyan-700 shadow-[0_12px_26px_rgba(34,211,238,0.12)]">
+	                    <Loader2 className="h-5 w-5 animate-spin" />
+	                  </div>
+	                  <div className="relative mt-3 text-[13px] font-medium text-slate-800">文件上传中...</div>
+	                  <div className="relative mt-1 text-[11px] leading-5 text-slate-500">
+	                    正在导入 {canvasDropUploading.total} 个文件
+	                    {canvasDropUploading.images ? ` · ${canvasDropUploading.images} 张图片` : ""}
+	                    {canvasDropUploading.videos ? ` · ${canvasDropUploading.videos} 个视频` : ""}
+	                  </div>
+	                  <div className="relative mt-4 h-1.5 w-full overflow-hidden border border-slate-200 bg-slate-100">
+	                    <div className="h-full w-full animate-pulse bg-[linear-gradient(90deg,rgba(34,211,238,0.18),rgba(34,211,238,0.82),rgba(59,130,246,0.72),rgba(34,211,238,0.18))]" />
+	                  </div>
+	                </div>
+	              </div>
+	            ) : null}
+
+	            {nodes.map((n) => (
               <NodeComponent
                 key={n.id}
                 node={n}
                 selected={selectedNodeIds.has(n.id)}
                 onMouseDown={(e) => handleNodeMouseDown(e, n.id)}
                 updateData={updateNodeData}
+                apiFetch={apiFetch}
+                onOpenPromptPolishPicker={openPromptPolishPicker}
                 onDelete={() => deleteNode(n.id)}
                 onConnectStart={(e) => {
                   e.stopPropagation();
@@ -8778,6 +10122,8 @@ const handleNodeMouseDown = (e, nid) => {
                 onRunCompactRemoveWatermark={runCompactRemoveWatermark}
                 onRunCompactThreeView={runCompactThreeView}
                 onRunCompactVideoUpscale={runCompactVideoUpscale}
+                onRunVideoLineart={runVideoLineart}
+                onRunVideoSplit={runVideoSplit}
               />
             ))}
 
@@ -8796,27 +10142,19 @@ const handleNodeMouseDown = (e, nid) => {
             {agentResultCards.map((card) => {
               const turn = agentTurns.find((item) => item.id === card.turnId);
               if (!turn || card.minimized) return null;
-              const statusText =
-                turn.status === "done"
-                  ? "completed"
-                  : turn.status === "running"
-                  ? "running"
-                  : turn.status === "error"
-                  ? "error"
-                  : turn.status === "clarify"
-                  ? "clarify"
-                  : turn.status;
               return (
                 <div
                   key={card.id}
-                  className={`absolute rounded-xl border bg-slate-900/95 shadow-2xl overflow-hidden ${
+                  data-agent-card-root="true"
+                  className={`absolute overflow-hidden rounded-xl border bg-white shadow-[0_18px_48px_rgba(15,23,42,0.1)] ${
                     selectedAgentCardIds.has(card.id)
                       ? "border-cyan-400/70 ring-1 ring-cyan-400/45"
                       : activeAgentCardId === card.id
                       ? "border-violet-400/70 ring-1 ring-violet-400/50"
-                      : "border-slate-700"
+                      : "border-slate-200"
                   }`}
                   style={{ left: card.x, top: card.y, width: card.w, zIndex: activeAgentCardId === card.id ? 85 : 70 }}
+                  onWheelCapture={handleAgentCardWheelCapture}
                   onMouseDown={(e) => {
                     e.stopPropagation();
                     if (e.shiftKey || e.ctrlKey) {
@@ -8832,21 +10170,18 @@ const handleNodeMouseDown = (e, nid) => {
                     setActiveAgentCardId(card.id);
                   }}
                 >
-                  <div className="h-9 px-2.5 border-b border-slate-800 bg-slate-800/90 flex items-center gap-2">
+                  <div className="h-9 px-2.5 flex items-center gap-2 border-b border-slate-200 bg-slate-50">
                     <div
                       className="flex-1 min-w-0 flex items-center justify-between cursor-move"
                       onMouseDown={(e) => handleAgentCardMouseDown(e, card.id)}
                     >
-                      <div className="text-[11px] font-semibold text-slate-200 truncate">
-                        Agent Result · {turn?.extractedProduct || "unknown"}
+                      <div className="text-[11px] font-semibold text-slate-700 truncate">
+                        {turn?.intent === "DRAMA" ? "短剧" : "脚本"} · {turn?.extractedProduct || (turn?.intent === "DRAMA" ? "创作任务" : "未知")}
                       </div>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded border border-slate-600 text-slate-300 ml-2">
-                        {statusText}
-                      </span>
                     </div>
                     <button
                       type="button"
-                      className="p-1 rounded hover:bg-slate-700 text-slate-300"
+                      className="p-1 rounded hover:bg-slate-100 text-slate-500"
                       title={card.collapsed ? "展开" : "折叠"}
                       onMouseDown={(e) => e.stopPropagation()}
                       onClick={(e) => {
@@ -8858,7 +10193,7 @@ const handleNodeMouseDown = (e, nid) => {
                     </button>
                     <button
                       type="button"
-                      className="p-1 rounded hover:bg-slate-700 text-slate-300"
+                      className="p-1 rounded hover:bg-slate-100 text-slate-500"
                       title="最小化到对话流"
                       onMouseDown={(e) => e.stopPropagation()}
                       onClick={(e) => {
@@ -8870,16 +10205,22 @@ const handleNodeMouseDown = (e, nid) => {
                     </button>
                   </div>
                   {!card.collapsed && (
-                    <div className="p-2.5 max-h-[62vh] overflow-y-auto custom-scrollbar" onMouseDown={(e) => e.stopPropagation()}>
-                      <div className="mb-2 text-[11px] text-slate-400 whitespace-pre-wrap break-words">
-                        Mission: {turn?.userText || "-"}
+                    <div
+                      data-agent-card-scroll-body="true"
+                      className="p-2.5 max-h-[62vh] overflow-y-auto custom-scrollbar"
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      <div className="mb-2 text-[11px] text-slate-500 whitespace-pre-wrap break-words">
+                            任务：{turn?.userText || "-"}
                       </div>
                       <AgentResultCardContent
                         turn={turn}
                         onRetry={retryAgentTurn}
-                        onSelectPrimary={selectPrimaryAssetForShot}
-                        onExport={exportAgentPlan}
-                        onCopyPath={copyRenderScriptPath}
+                        onBriefChange={updateScriptBriefDraft}
+                        onBriefSubmit={(turnId) => submitScriptBriefTurn(turnId)}
+                        onBriefSubmitDefaults={(turnId) => submitScriptBriefTurn(turnId, { useDefaults: true })}
+                        onBriefCancel={cancelScriptBriefTurn}
+                        onSelectAngle={selectScriptAngleForTurn}
                       />
                     </div>
                   )}
@@ -8905,13 +10246,13 @@ const handleNodeMouseDown = (e, nid) => {
           >
             {showScriptExamples || showCanvasExamples ? (
               <div className="absolute bottom-[calc(100%+1rem)] left-1/2 z-30 w-[min(92vw,760px)] -translate-x-1/2">
-                <div className="relative overflow-hidden rounded-[28px] border border-cyan-500/20 bg-[linear-gradient(145deg,rgba(4,10,20,0.98),rgba(8,18,30,0.96)_58%,rgba(4,8,16,0.98))] shadow-[0_24px_64px_rgba(2,8,23,0.56)]">
-                  <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.08),transparent_28%),linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.01)_36%,transparent_100%)]" />
-                  <div className="relative border-b border-white/8 px-5 py-4">
+                <div className="relative overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_24px_64px_rgba(15,23,42,0.1)]">
+                  <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.84)_52%,rgba(255,255,255,0.72))]" />
+                  <div className="relative border-b border-slate-200 px-5 py-4">
                     <div className="flex items-start justify-between gap-3">
                       <div>
-                        <div className="text-[15px] font-semibold text-cyan-100">{showScriptExamples ? "生成脚本案例" : "画布编排案例"}</div>
-                        <div className="mt-1 text-[12px] leading-5 text-slate-400">
+                        <div className="text-[15px] font-semibold text-slate-800">{showScriptExamples ? "生成脚本案例" : "画布编排案例"}</div>
+                        <div className="mt-1 text-[12px] leading-5 text-slate-500">
                           {showScriptExamples
                             ? "选择一条常用脚本需求，直接填入 Agent 输入框继续生成脚本。"
                             : "选择一条常用案例，直接填入 Agent 输入框继续生成画布。"}
@@ -8923,7 +10264,7 @@ const handleNodeMouseDown = (e, nid) => {
                           setShowScriptExamples(false);
                           setShowCanvasExamples(false);
                         }}
-                        className="rounded-full p-1.5 text-slate-400 transition-colors hover:bg-white/[0.06] hover:text-white"
+                        className="rounded-full p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-900"
                         aria-label={showScriptExamples ? "关闭生成脚本案例" : "关闭画布编排案例"}
                       >
                         <X className="h-4 w-4" />
@@ -8936,12 +10277,12 @@ const handleNodeMouseDown = (e, nid) => {
                         key={example}
                         type="button"
                         onClick={() => (showScriptExamples ? handleScriptExamplePick(example) : handleCanvasExamplePick(example))}
-                        className="flex min-h-[84px] items-start gap-3 rounded-[22px] border border-slate-800/80 bg-white/[0.03] px-4 py-3 text-left transition-colors hover:border-cyan-500/35 hover:bg-cyan-500/8"
+                        className="flex min-h-[84px] items-start gap-3 rounded-[22px] border border-slate-200 bg-white px-4 py-3 text-left transition-colors hover:border-slate-300 hover:bg-slate-50"
                       >
-                        <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-cyan-500/12 text-[11px] font-semibold text-cyan-100">
+                        <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[11px] font-semibold text-slate-700">
                           {index + 1}
                         </span>
-                        <span className="text-[13px] leading-6 text-slate-200 whitespace-normal break-words">{example}</span>
+                        <span className="text-[13px] leading-6 text-slate-700 whitespace-normal break-words">{example}</span>
                       </button>
                     ))}
                   </div>
@@ -8949,7 +10290,7 @@ const handleNodeMouseDown = (e, nid) => {
               </div>
             ) : null}
             <div
-              className={`relative overflow-hidden border border-slate-800/90 bg-[linear-gradient(145deg,rgba(5,5,7,0.98),rgba(12,12,16,0.96)_55%,rgba(8,8,11,0.98))] shadow-[0_24px_60px_rgba(0,0,0,0.48),inset_0_1px_0_rgba(255,255,255,0.05)] transition-all duration-200 ${
+              className={`relative overflow-hidden border border-slate-200 bg-white shadow-[0_24px_60px_rgba(15,23,42,0.08)] transition-all duration-200 ${
                 agentInputFocused || agentInput.trim()
                   ? "rounded-[32px] px-5 py-5"
                   : "rounded-[40px] px-4 py-3"
@@ -8963,29 +10304,57 @@ const handleNodeMouseDown = (e, nid) => {
                 className="hidden"
                 onChange={handleAgentComposerUpload}
               />
-              <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.03),transparent_24%),linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.008)_34%,transparent_100%)]" />
-              <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-white/18" />
+              <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.72)_54%,rgba(255,255,255,0.84))]" />
+              {isCanvasPromptPending ? (
+                <div className="relative mb-4 rounded-[22px] border border-cyan-200 bg-cyan-50 px-4 py-3 text-[12px] text-cyan-700">
+                  <div className="font-medium">当前在等你补充画面提示词</div>
+                  <div className="mt-1 text-cyan-600">
+                    直接在下方输入框补一句你想生成的画面，再按回车发送即可。
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {CANVAS_PROMPT_EXAMPLES.map((example) => (
+                      <button
+                        key={example}
+                        type="button"
+                        onClick={() => insertCanvasPromptExample(example)}
+                        className="rounded-full border border-cyan-400/25 bg-cyan-400/10 px-3 py-1.5 text-[11px] text-cyan-50 hover:bg-cyan-400/15"
+                      >
+                        {example}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               <div className="relative flex gap-4">
                 <button
                   type="button"
                   title="上传参考图片"
                   onClick={() => agentUploadInputRef.current?.click()}
-                  className={`mt-1 flex shrink-0 items-center justify-center rounded-[20px] border border-slate-800/90 bg-[linear-gradient(180deg,rgba(26,26,30,0.96),rgba(10,10,12,0.98))] text-slate-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition-all disabled:cursor-not-allowed disabled:opacity-90 ${
+                  className={`mt-1 flex shrink-0 items-center justify-center rounded-[20px] border border-slate-200 bg-slate-50 text-slate-700 transition-all disabled:cursor-not-allowed disabled:opacity-90 ${
                     agentInputFocused || agentInput.trim() ? "h-[84px] w-[68px] -rotate-6" : "h-8 w-8 -rotate-[8deg] rounded-[12px]"
                   }`}
                 >
                   <Plus className={`${agentInputFocused || agentInput.trim() ? "h-5 w-5" : "h-4 w-4"}`} />
                 </button>
-                <div className="relative min-w-0 flex-1 pr-16">
+                <div className={`relative min-w-0 flex-1 ${isCanvasPromptPending ? "pr-28" : "pr-14"}`}>
                   <textarea
                     ref={agentInputRef}
                     value={agentInput}
-                    onChange={(e) => setAgentInput(e.target.value)}
+                    onChange={(e) => {
+                      setAgentPromptPolishError("");
+                      setAgentInput(e.target.value);
+                    }}
                     onFocus={() => setAgentInputFocused(true)}
                     onMouseDown={() => setAgentInputFocused(true)}
                     rows={1}
-                    placeholder="输入你的需求，让 Agent 帮你生成脚本、分镜、成片方案或渲染包。"
-                    className={`w-full resize-none overflow-y-auto bg-transparent text-[15px] leading-7 text-slate-100 outline-none placeholder:text-slate-500 ${
+                    placeholder={
+                      isCanvasPromptPending
+                        ? "请在这里补一句画面提示词，例如：一瓶极简风洗面奶产品图，白底，棚拍光，高清细节。"
+                        : activeComposerActionId === "drama"
+                        ? "请输入短剧需求，发送后会直接进入短剧创作流程。"
+                        : "输入你的需求，让 Agent 帮你生成脚本、创作短剧，或搭建画布工作流。"
+                    }
+                    className={`w-full resize-none overflow-y-auto bg-transparent text-[15px] leading-7 text-slate-800 outline-none placeholder:text-slate-400 ${
                       agentInputFocused || agentInput.trim() ? "min-h-[120px]" : "h-9 min-h-9 pt-[2px] text-[14px] leading-8"
                     }`}
                     onKeyDown={(e) => {
@@ -8995,6 +10364,27 @@ const handleNodeMouseDown = (e, nid) => {
                       }
                     }}
                   />
+                  {isCanvasPromptPending && (
+                    <button
+                      type="button"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={polishAgentPromptInput}
+                      disabled={agentPromptPolishLoading || !agentInput.trim()}
+                      className={`absolute bottom-0 right-14 flex h-9 items-center justify-center gap-1.5 rounded-full border px-3 text-[10px] font-medium transition-all ${
+                        agentPromptPolishLoading
+                          ? "border-cyan-300 bg-cyan-50 text-cyan-700"
+                          : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-40"
+                      } ${agentInputFocused || agentInput.trim() ? "" : "bottom-0.5 h-8"}`}
+                      title="提示词润色"
+                    >
+                      {agentPromptPolishLoading ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Sparkles className="h-3.5 w-3.5" />
+                      )}
+                      <span>AI润色</span>
+                    </button>
+                  )}
                   <button
                     type="button"
                     onMouseDown={(e) => e.preventDefault()}
@@ -9002,8 +10392,8 @@ const handleNodeMouseDown = (e, nid) => {
                     disabled={(!agentInput.trim() && agentComposerFiles.length === 0) || isAgentMissionRunning}
                     className={`absolute bottom-0 right-0 flex h-12 w-12 items-center justify-center rounded-full border transition-all ${
                       ((!agentInput.trim() && agentComposerFiles.length === 0) || isAgentMissionRunning)
-                        ? "cursor-not-allowed border-slate-800/90 bg-[linear-gradient(180deg,rgba(32,32,36,0.92),rgba(10,10,12,0.98))] text-slate-500"
-                        : "border-slate-700 bg-[linear-gradient(180deg,rgba(36,36,40,0.96),rgba(8,8,10,0.98))] text-white shadow-[0_10px_24px_rgba(0,0,0,0.34)] hover:translate-y-[-1px]"
+                        ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
+                        : "border-cyan-200 bg-cyan-50 text-cyan-700 shadow-[0_10px_24px_rgba(15,23,42,0.08)] hover:translate-y-[-1px] hover:bg-cyan-100"
                     } ${agentInputFocused || agentInput.trim() ? "" : "h-9 w-9 bottom-0.5"}`}
                   >
                     {isAgentMissionRunning ? (
@@ -9014,6 +10404,9 @@ const handleNodeMouseDown = (e, nid) => {
                   </button>
                 </div>
               </div>
+              {agentPromptPolishError && (
+                <div className="mt-2 text-[10px] text-amber-400">{agentPromptPolishError}</div>
+              )}
               <div
                 className={`relative flex flex-wrap gap-2 transition-all duration-200 ${
                   agentComposerFiles.length > 0 ? "mt-3 max-h-24 opacity-100" : "max-h-0 overflow-hidden opacity-0"
@@ -9022,18 +10415,18 @@ const handleNodeMouseDown = (e, nid) => {
                 {agentComposerFiles.map((file) => (
                   <div
                     key={file.id}
-                    className="group flex items-center gap-2 rounded-2xl border border-slate-800/90 bg-white/[0.03] px-2 py-1.5"
+                    className="group flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-2 py-1.5"
                   >
                     <img
                       src={file.previewUrl}
                       alt={file.name}
                       className="h-10 w-10 rounded-xl object-cover"
                     />
-                    <div className="max-w-32 truncate text-[11px] text-slate-300">{file.name}</div>
+                    <div className="max-w-32 truncate text-[11px] text-slate-600">{file.name}</div>
                     <button
                       type="button"
                       onClick={() => removeAgentComposerFile(file.id)}
-                      className="rounded-full p-1 text-slate-500 transition-colors hover:bg-white/[0.06] hover:text-white"
+                      className="rounded-full p-1 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900"
                       title="移除图片"
                     >
                       <X className="h-3.5 w-3.5" />
@@ -9058,12 +10451,26 @@ const handleNodeMouseDown = (e, nid) => {
                     }}
                     className={`inline-flex items-center gap-2 rounded-full border px-3.5 py-2 text-[12px] transition-all ${
                       activeComposerActionId === "script" || showScriptExamples
-                        ? "border-amber-500/55 bg-amber-500/10 text-amber-100 shadow-[0_8px_20px_rgba(245,158,11,0.12)]"
-                        : "border-slate-800/90 bg-white/[0.03] text-slate-300 hover:bg-white/[0.05]"
+                        ? "border-cyan-200 bg-cyan-50 text-cyan-700 shadow-[0_8px_20px_rgba(15,23,42,0.06)]"
+                        : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
                     }`}
                   >
                     <Sparkles className="h-3.5 w-3.5" />
                     生成脚本
+                  </button>
+                </div>
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => handleAgentQuickAction("drama")}
+                    className={`inline-flex items-center gap-2 rounded-full border px-3.5 py-2 text-[12px] transition-all ${
+                      activeComposerActionId === "drama"
+                        ? "border-cyan-200 bg-cyan-50 text-cyan-700 shadow-[0_8px_20px_rgba(15,23,42,0.06)]"
+                        : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                    }`}
+                  >
+                    <Clapperboard className="h-3.5 w-3.5" />
+                    短剧创作
                   </button>
                 </div>
                 <div className="relative">
@@ -9078,52 +10485,35 @@ const handleNodeMouseDown = (e, nid) => {
                     }}
                     className={`inline-flex items-center gap-2 rounded-full border px-3.5 py-2 text-[12px] transition-all ${
                       activeComposerActionId === "canvas" || showCanvasExamples
-                        ? "border-cyan-500/55 bg-cyan-500/10 text-cyan-100 shadow-[0_8px_20px_rgba(6,182,212,0.12)]"
-                        : "border-slate-800/90 bg-white/[0.03] text-slate-300 hover:bg-white/[0.05]"
+                        ? "border-cyan-200 bg-cyan-50 text-cyan-700 shadow-[0_8px_20px_rgba(15,23,42,0.06)]"
+                        : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
                     }`}
                   >
                     <Layout className="h-3.5 w-3.5" />
                     画布编排
                   </button>
                 </div>
-                {composerQuickActions.map((action) => {
-                  const Icon = action.icon;
-                  const isActive = activeComposerActionId === action.id;
-                  return (
-                    <button
-                      key={action.id}
-                      type="button"
-                      onClick={() => handleAgentQuickAction(action.id)}
-                      className={`inline-flex items-center gap-2 rounded-full border px-3.5 py-2 text-[12px] transition-all ${
-                        isActive
-                          ? "border-slate-700 bg-[linear-gradient(180deg,rgba(30,30,34,0.96),rgba(10,10,12,0.98))] text-white shadow-[0_8px_20px_rgba(0,0,0,0.28)]"
-                          : "border-slate-800/90 bg-white/[0.03] text-slate-300 hover:bg-white/[0.05]"
-                      }`}
-                    >
-                      <Icon className="h-3.5 w-3.5" />
-                      {action.label}
-                    </button>
-                  );
-                })}
-                <label className="ml-auto inline-flex cursor-pointer select-none items-center gap-2 rounded-full border border-slate-800/90 bg-white/[0.03] px-3 py-2 text-[12px] text-slate-300">
-                  <input
-                    type="checkbox"
-                    checked={agentDevMode}
-                    onChange={(e) => setAgentDevMode(e.target.checked)}
-                    className="h-3.5 w-3.5 accent-slate-300"
-                  />
-                  Dev Mode
-                </label>
+                {isAdminUser ? (
+                  <label className="ml-auto inline-flex cursor-pointer select-none items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-2 text-[12px] text-slate-600">
+                    <input
+                      type="checkbox"
+                      checked={agentDevMode}
+                      onChange={(e) => setAgentDevMode(e.target.checked)}
+                      className="h-3.5 w-3.5 accent-slate-300"
+                    />
+                    开发模式
+                  </label>
+                ) : null}
               </div>
               <div
                 className={`text-[11px] text-slate-500 transition-all duration-200 ${
                   agentInputFocused || agentInput.trim() ? "mt-3 max-h-8 opacity-100" : "max-h-0 overflow-hidden opacity-0"
                 }`}
               >
-                Enter 发送，Shift+Enter 换行
+                回车发送，Shift+回车换行
               </div>
               {preferenceNotice && (
-                <div className="mt-2 rounded border border-yellow-500/35 bg-yellow-500/10 p-2 text-[10px] text-yellow-100 flex items-center justify-between gap-2">
+                <div className="mt-2 rounded border border-yellow-200 bg-yellow-50 p-2 text-[10px] text-yellow-800 flex items-center justify-between gap-2">
                   <div className="truncate">
                     已更新偏好：{preferenceNotice.key}
                     {preferenceNotice.value
@@ -9141,14 +10531,14 @@ const handleNodeMouseDown = (e, nid) => {
                         openPreferencesPanelWithSuggestion(preferenceNotice);
                         setPreferenceNotice(null);
                       }}
-                      className="px-1.5 py-0.5 rounded border border-yellow-500/50 hover:bg-yellow-500/20"
+                      className="px-1.5 py-0.5 rounded border border-yellow-200 hover:bg-yellow-100"
                     >
                       快速查看
                     </button>
                     <button
                       type="button"
                       onClick={() => setPreferenceNotice(null)}
-                      className="text-yellow-200/80 hover:text-yellow-50"
+                      className="text-yellow-700 hover:text-yellow-900"
                       aria-label="关闭偏好通知"
                     >
                       <X className="w-3 h-3" />
@@ -9157,22 +10547,22 @@ const handleNodeMouseDown = (e, nid) => {
                 </div>
               )}
               {HITL_FEEDBACK_UI_ENABLED && (
-                <div className="mt-2 rounded border border-fuchsia-500/30 bg-fuchsia-900/10 p-2 text-[10px] space-y-1">
-                  <div className="text-fuchsia-100">反馈历史</div>
+                <div className="mt-2 rounded border border-fuchsia-200 bg-fuchsia-50 p-2 text-[10px] space-y-1">
+                  <div className="text-fuchsia-700">反馈历史</div>
                   {hitlFeedbackRows.length === 0 ? (
                     <div className="text-slate-500">暂无反馈记录</div>
                   ) : (
                     <div className="space-y-1 max-h-24 overflow-y-auto custom-scrollbar">
                       {hitlFeedbackRows.map((row) => (
-                        <div key={row.id} className="rounded border border-slate-700/80 bg-slate-950/60 px-1.5 py-1">
-                          <div className="text-slate-200">
+                        <div key={row.id} className="rounded border border-slate-200 bg-white px-1.5 py-1">
+                          <div className="text-slate-700">
                             {row.message}
                             {row.key ? ` · ${row.key}` : ""}
                             {row.reason ? ` · ${row.reason}` : ""}
                           </div>
                           <div className="text-slate-500">
                             {new Date(Number(row.updatedAt || Date.now())).toLocaleString()}
-                            {row.caseId ? ` · case_id=${row.caseId}` : ""}
+                            {row.caseId ? ` · 用例ID=${row.caseId}` : ""}
                           </div>
                           {row.kind === "suggestion" && row.status === "ignored" && (
                             <button
@@ -9183,7 +10573,7 @@ const handleNodeMouseDown = (e, nid) => {
                                   value: row.value,
                                 })
                               }
-                              className="mt-1 px-1.5 py-0.5 rounded border border-indigo-500/60 text-indigo-100 hover:bg-indigo-600/20"
+                              className="mt-1 px-1.5 py-0.5 rounded border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
                             >
                               快速编辑
                             </button>
@@ -9194,44 +10584,44 @@ const handleNodeMouseDown = (e, nid) => {
                   )}
                 </div>
               )}
-              {agentDevMode && (
-                <div className="mt-2 rounded border border-slate-700 bg-slate-950/70 p-2 text-[10px] text-slate-400 space-y-1.5">
-                  <div className="text-slate-300">Dev: memory_suggestions</div>
+              {isAdminUser && agentDevMode && (
+                <div className="mt-2 rounded border border-slate-200 bg-slate-50 p-2 text-[10px] text-slate-500 space-y-1.5">
+                  <div className="text-slate-700">开发：记忆建议</div>
                   <div>
-                    pendingTask:{" "}
+                    待处理任务：{" "}
                     {activePendingTask
-                      ? `${activePendingTask.intent} missing=${(activePendingTask.missing || []).join(",") || "-"}`
-                      : "none"}
+                      ? `${getRouteIntentLabel(activePendingTask.intent)} 缺失=${(activePendingTask.missing || []).join(",") || "-"}`
+                      : "无"}
                   </div>
                   {devSuggestionLog.length === 0 ? (
-                    <div className="text-slate-500">no suggestions</div>
+                    <div className="text-slate-400">暂无建议</div>
                   ) : (
                     <div className="space-y-1 max-h-24 overflow-y-auto custom-scrollbar">
                       {devSuggestionLog.map((row, idx) => (
-                        <div key={`${row.turnId}_${row.key}_${idx}`} className="border border-slate-800 rounded px-1.5 py-1">
+                        <div key={`${row.turnId}_${row.key}_${idx}`} className="border border-slate-200 rounded px-1.5 py-1">
                           <div>
-                            [{row.status}] {row.key}
+                            [{getFeedbackStatusLabel(row.status)}] {row.key}
                           </div>
-                          <div className="text-slate-500">{Array.isArray(row.value) ? row.value.join("/") : String(row.value || "")}</div>
+                          <div className="text-slate-400">{Array.isArray(row.value) ? row.value.join("/") : String(row.value || "")}</div>
                         </div>
                       ))}
                     </div>
                   )}
                   {HITL_FEEDBACK_UI_ENABLED && (
-                    <div className="pt-1 border-t border-slate-800 space-y-1">
-                      <div className="text-slate-300">Dev: 失败回归</div>
+                    <div className="pt-1 border-t border-slate-200 space-y-1">
+                      <div className="text-slate-700">开发：失败回归</div>
                       {devRegressionLog.length === 0 ? (
-                        <div className="text-slate-500">no regression feedback</div>
+                        <div className="text-slate-400">暂无回归反馈</div>
                       ) : (
                         <div className="space-y-1 max-h-24 overflow-y-auto custom-scrollbar">
                           {devRegressionLog.map((row, idx) => (
-                            <div key={`${row.turnId}_${idx}`} className="border border-slate-800 rounded px-1.5 py-1">
+                            <div key={`${row.turnId}_${idx}`} className="border border-slate-200 rounded px-1.5 py-1">
                               <div>
-                                [{row.status}] reason={row.reason || "-"}
+                                [{getFeedbackStatusLabel(row.status)}] 原因={row.reason || "-"}
                               </div>
-                              <div className="text-slate-500">
-                                case_id={row.caseId || "-"} {row.error ? `error=${row.error}` : ""}
-                              </div>
+                          <div className="text-slate-400">
+                                用例ID={row.caseId || "-"} {row.error ? `错误=${row.error}` : ""}
+                          </div>
                             </div>
                           ))}
                         </div>
@@ -9249,31 +10639,42 @@ const handleNodeMouseDown = (e, nid) => {
           node={activeNodeId ? nodes.find((n) => n.id === activeNodeId) : null}
           updateData={updateNodeData}
           onClose={() => setActiveNodeId(null)}
+          apiFetch={apiFetch}
+          onOpenPromptPolishPicker={openPromptPolishPicker}
           imageModelOptions={imageModelOptions}
           videoModelOptions={videoModelOptions}
           resolveModelParamsForId={resolveModelParamsForId}
         />
       </div>
 
+      <PromptPolishPickerModal
+        open={Boolean(promptPolishDialog)}
+        title={promptPolishDialog?.title || "AI 润色"}
+        sourcePrompt={promptPolishDialog?.sourcePrompt || ""}
+        variants={promptPolishDialog?.variants || EMPTY_LIST}
+        onClose={closePromptPolishPicker}
+        onUse={usePromptPolishVariant}
+      />
+
       {/* History Panel（保持你原逻辑） */}
       {showHistoryPanel && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => setShowHistoryPanel(false)}>
-          <div className="w-[600px] bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl flex flex-col max-h-[80vh] overflow-hidden" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between p-4 border-b border-slate-800">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-white/40 backdrop-blur-sm" onClick={() => setShowHistoryPanel(false)}>
+          <div className="w-[600px] bg-white border border-slate-200 rounded-2xl shadow-[0_28px_64px_rgba(15,23,42,0.14)] flex flex-col max-h-[80vh] overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-4 border-b border-slate-200">
               <div className="flex gap-4">
-                <button onClick={() => setActiveHistoryTab("recent")} className={`text-sm font-bold pb-1 border-b-2 transition-colors ${activeHistoryTab === "recent" ? "border-purple-500 text-white" : "border-transparent text-slate-500"}`}>
+                <button onClick={() => setActiveHistoryTab("recent")} className={`text-sm font-bold pb-1 border-b-2 transition-colors ${activeHistoryTab === "recent" ? "border-cyan-300 text-cyan-700" : "border-transparent text-slate-500"}`}>
                   最近任务
                 </button>
-                <button onClick={() => setActiveHistoryTab("stats")} className={`text-sm font-bold pb-1 border-b-2 transition-colors ${activeHistoryTab === "stats" ? "border-purple-500 text-white" : "border-transparent text-slate-500"}`}>
+                <button onClick={() => setActiveHistoryTab("stats")} className={`text-sm font-bold pb-1 border-b-2 transition-colors ${activeHistoryTab === "stats" ? "border-cyan-300 text-cyan-700" : "border-transparent text-slate-500"}`}>
                   数据趋势
                 </button>
               </div>
-              <button onClick={() => setShowHistoryPanel(false)} className="text-slate-500 hover:text-white">
+              <button onClick={() => setShowHistoryPanel(false)} className="text-slate-500 hover:text-slate-900">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-4 custom-scrollbar bg-slate-950/50">
+            <div className="flex-1 overflow-y-auto p-4 custom-scrollbar bg-[#fbfbf8]">
               {activeHistoryTab === "recent" ? (
                 <div className="space-y-3">
                   {apiHistory.length === 0 && <div className="text-center text-slate-500 py-8">暂无历史记录</div>}
@@ -9283,10 +10684,10 @@ const handleNodeMouseDown = (e, nid) => {
                     const paramRows = formatHistoryParams(item.inputs);
                     const isExpanded = expandedHistoryIds.has(item.id || String(i));
                     return (
-                      <div key={i} className="bg-slate-900 border border-slate-800 rounded-xl p-4 hover:border-purple-500/50 transition-colors space-y-3">
+                      <div key={i} className="bg-white border border-slate-200 rounded-xl p-4 hover:border-slate-300 transition-colors space-y-3">
                         <div className="flex items-center justify-between gap-4">
                           <div className="flex items-center gap-2">
-                            <span className="text-xs font-bold text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded uppercase">{TOOL_CARDS[item.mode]?.short || item.mode}</span>
+                            <span className="text-xs font-bold text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded uppercase">{TOOL_CARDS[item.mode]?.short || item.mode}</span>
                             <span className="text-[10px] text-slate-500">{new Date(item.time).toLocaleString()}</span>
                           </div>
                           <div className="flex items-center gap-2">
@@ -9300,11 +10701,11 @@ const handleNodeMouseDown = (e, nid) => {
                                   return next;
                                 });
                               }}
-                              className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white px-3 py-1.5 rounded transition-colors flex items-center gap-1"
+                              className="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded transition-colors flex items-center gap-1"
                             >
                               {isExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />} 详情
                             </button>
-                            <button onClick={() => applyHistoryConfig(item)} className="text-xs bg-slate-800 hover:bg-purple-600 text-slate-300 hover:text-white px-3 py-1.5 rounded transition-colors flex items-center gap-1">
+                            <button onClick={() => applyHistoryConfig(item)} className="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded transition-colors flex items-center gap-1">
                               <RefreshCw className="w-3 h-3" /> 复用
                             </button>
                           </div>
@@ -9326,17 +10727,17 @@ const handleNodeMouseDown = (e, nid) => {
                         </div>
 
                         {isExpanded && (
-                          <div className="border-t border-slate-800 pt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <div className="border-t border-slate-200 pt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div>
                               <div className="text-[11px] text-slate-500 mb-2">输入参数</div>
                               {paramRows.length === 0 ? (
                                 <div className="text-[11px] text-slate-600">无可显示参数</div>
                               ) : (
-                                <div className="grid grid-cols-1 gap-1 text-[11px] text-slate-300">
+                                <div className="grid grid-cols-1 gap-1 text-[11px] text-slate-600">
                                   {paramRows.map((row) => (
-                                    <div key={row.key} className="flex items-center justify-between gap-3 bg-slate-950/50 border border-slate-800 rounded px-2 py-1">
+                                    <div key={row.key} className="flex items-center justify-between gap-3 bg-slate-50 border border-slate-200 rounded px-2 py-1">
                                       <span className="text-slate-500">{row.key}</span>
-                                      <span className="text-slate-200 break-all">{String(row.value)}</span>
+                                      <span className="text-slate-700 break-all">{String(row.value)}</span>
                                     </div>
                                   ))}
                                 </div>
@@ -9344,7 +10745,7 @@ const handleNodeMouseDown = (e, nid) => {
                             </div>
                             <div>
                               <div className="text-[11px] text-slate-500 mb-2">输出信息</div>
-                              <div className="text-[11px] text-slate-300 bg-slate-950/50 border border-slate-800 rounded px-2 py-2">
+                              <div className="text-[11px] text-slate-700 bg-slate-50 border border-slate-200 rounded px-2 py-2">
                                 {outputMedia.length > 0 ? `输出数量：${outputMedia.length}` : "无输出"}
                               </div>
                             </div>
@@ -9362,7 +10763,7 @@ const handleNodeMouseDown = (e, nid) => {
                       {apiStats &&
                         Object.entries(apiStats.modes || {}).map(([mode, count]) => (
                           <div key={mode} className="flex items-center gap-3">
-                            <div className="w-24 text-xs text-slate-300 truncate text-right">{TOOL_CARDS[mode]?.short || mode}</div>
+                            <div className="w-24 text-xs text-slate-500 truncate text-right">{TOOL_CARDS[mode]?.short || mode}</div>
                             <div className="flex-1 h-2 bg-slate-800 rounded-full overflow-hidden">
                               <div className="h-full bg-blue-500" style={{ width: `${Math.min((count / 20) * 100, 100)}%` }} />
                             </div>
@@ -9375,7 +10776,7 @@ const handleNodeMouseDown = (e, nid) => {
                     <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">高频关键词 (灵感库)</h4>
                     <div className="flex flex-wrap gap-2">
                       {(apiStats?.keywords || []).map((word, i) => (
-                        <span key={i} className="text-xs bg-slate-800 border border-slate-700 px-2 py-1 rounded-full text-slate-300 hover:text-white hover:border-blue-500 cursor-pointer transition-colors">
+                        <span key={i} className="text-xs bg-white border border-slate-200 px-2 py-1 rounded-full text-slate-600 hover:text-slate-900 hover:border-slate-300 cursor-pointer transition-colors">
                           #{word}
                         </span>
                       ))}
@@ -9391,7 +10792,7 @@ const handleNodeMouseDown = (e, nid) => {
       {showPreferencesPanel && (
         <React.Suspense
           fallback={
-            <div className="fixed right-0 top-0 z-[120] h-full w-[min(94vw,560px)] border-l border-slate-700 bg-slate-900 text-slate-300 p-4">
+            <div className="fixed right-0 top-0 z-[120] h-full w-[min(94vw,560px)] border-l border-slate-200 bg-white text-slate-700 p-4">
               <div className="inline-flex items-center gap-2 text-xs">
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 正在加载偏好面板...
@@ -9414,29 +10815,29 @@ const handleNodeMouseDown = (e, nid) => {
       )}
 
       {HITL_FEEDBACK_UI_ENABLED && feedbackDialog && (
-        <div className="fixed inset-0 z-[130] bg-black/40 backdrop-blur-[1px] flex items-center justify-center px-4">
-          <div className="w-full max-w-md rounded-xl border border-slate-700 bg-slate-900 shadow-2xl">
-            <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+        <div className="fixed inset-0 z-[130] bg-white/40 backdrop-blur-[1px] flex items-center justify-center px-4">
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white shadow-[0_28px_64px_rgba(15,23,42,0.14)]">
+            <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
               <div>
-                <div className="text-sm font-semibold text-slate-100">标记为回归用例</div>
+                <div className="text-sm font-semibold text-slate-800">标记为回归用例</div>
                 <div className="text-[11px] text-slate-400 mt-0.5">可补充失败原因，便于后续回归修复</div>
               </div>
               <button
                 type="button"
                 onClick={closeRegressionFeedbackDialog}
-                className="p-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800"
+                className="p-1 rounded border border-slate-200 text-slate-500 hover:bg-slate-100"
                 aria-label="关闭回归反馈弹窗"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
             <div className="p-4 space-y-3">
-              <label className="block text-[11px] text-slate-300 space-y-1">
+              <label className="block text-[11px] text-slate-600 space-y-1">
                 <span>选择失败原因</span>
                 <select
                   value={feedbackReasonChoice}
                   onChange={(e) => setFeedbackReasonChoice(e.target.value)}
-                  className="w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-100 outline-none"
+                  className="w-full rounded border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700 outline-none"
                 >
                   {HITL_FEEDBACK_REASON_OPTIONS.map((item) => (
                     <option key={item} value={item}>
@@ -9445,29 +10846,29 @@ const handleNodeMouseDown = (e, nid) => {
                   ))}
                 </select>
               </label>
-              <label className="block text-[11px] text-slate-300 space-y-1">
+              <label className="block text-[11px] text-slate-600 space-y-1">
                 <span>补充说明（可选）</span>
                 <textarea
                   rows={3}
                   value={feedbackReasonNote}
                   onChange={(e) => setFeedbackReasonNote(e.target.value)}
                   placeholder="例如：素材主镜头经常命中错误资产"
-                  className="w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-100 outline-none resize-y"
+                  className="w-full rounded border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700 outline-none resize-y"
                 />
               </label>
             </div>
-            <div className="px-4 py-3 border-t border-slate-800 flex items-center justify-end gap-2">
+            <div className="px-4 py-3 border-t border-slate-200 flex items-center justify-end gap-2">
               <button
                 type="button"
                 onClick={closeRegressionFeedbackDialog}
-                className="px-3 py-1.5 rounded border border-slate-700 text-xs text-slate-200 hover:bg-slate-800"
+                className="px-3 py-1.5 rounded border border-slate-200 text-xs text-slate-700 hover:bg-slate-100"
               >
                 取消
               </button>
               <button
                 type="button"
                 onClick={confirmRegressionFeedbackDialog}
-                className="px-3 py-1.5 rounded border border-fuchsia-500/60 bg-fuchsia-600/20 text-xs text-fuchsia-100 hover:bg-fuchsia-600/30"
+                className="px-3 py-1.5 rounded border border-fuchsia-200 bg-fuchsia-50 text-xs text-fuchsia-700 hover:bg-fuchsia-100"
               >
                 确认标记
               </button>
@@ -9478,19 +10879,19 @@ const handleNodeMouseDown = (e, nid) => {
 
       {/* Preview Modal */}
       {previewImage && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-10" onClick={() => setPreviewImage(null)}>
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-white/60 backdrop-blur-sm p-10" onClick={() => setPreviewImage(null)}>
           <div className="relative max-w-full max-h-full flex items-center justify-center" onMouseDown={(e) => e.stopPropagation()}>
             {isVideoContent(previewImage) ? (
               <div className="relative" onClick={(e) => e.stopPropagation()}>
-                <VideoPlayer src={previewImage} className="max-w-full max-h-[90vh] rounded-lg shadow-2xl border border-slate-700 bg-black" controls autoPlay />
-                <button className="absolute -top-12 right-0 text-white/70 hover:text-white transition-colors bg-slate-800/50 p-2 rounded-full hover:bg-slate-700/80" onClick={() => setPreviewImage(null)}>
+                <VideoPlayer src={previewImage} className="max-w-full max-h-[90vh] rounded-lg shadow-2xl border border-slate-200 bg-white" controls autoPlay />
+                <button className="absolute -top-12 right-0 text-slate-500 hover:text-slate-900 transition-colors bg-white/90 border border-slate-200 p-2 rounded-full hover:bg-slate-50" onClick={() => setPreviewImage(null)}>
                   <X className="w-6 h-6" />
                 </button>
               </div>
             ) : (
               <>
-                <img src={previewImage} className="max-w-full max-h-[90vh] rounded-lg shadow-2xl border border-slate-700 object-contain" alt="Preview" onClick={(e) => e.stopPropagation()} />
-                <button className="absolute -top-12 right-0 text-white/70 hover:text-white transition-colors bg-slate-800/50 p-2 rounded-full hover:bg-slate-700/80" onClick={() => setPreviewImage(null)}>
+                <img src={previewImage} className="max-w-full max-h-[90vh] rounded-lg shadow-2xl border border-slate-200 object-contain" alt="Preview" onClick={(e) => e.stopPropagation()} />
+                <button className="absolute -top-12 right-0 text-slate-500 hover:text-slate-900 transition-colors bg-white/90 border border-slate-200 p-2 rounded-full hover:bg-slate-50" onClick={() => setPreviewImage(null)}>
                   <X className="w-6 h-6" />
                 </button>
               </>
@@ -9530,22 +10931,22 @@ class WorkbenchErrorBoundary extends React.Component {
   render() {
     if (!this.state.hasError) return this.props.children;
     return (
-      <div className="h-screen w-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6">
-        <div className="w-[min(92vw,640px)] rounded-xl border border-rose-700/70 bg-slate-900/95 p-5 shadow-2xl">
-          <div className="text-sm font-semibold text-rose-300">页面运行异常</div>
-          <div className="mt-2 text-xs text-slate-300 break-all">{this.state.message || "未知错误"}</div>
+      <div className="h-screen w-screen bg-[#f7f7f2] text-slate-800 flex items-center justify-center p-6">
+        <div className="w-[min(92vw,640px)] rounded-xl border border-rose-200 bg-white p-5 shadow-[0_24px_56px_rgba(15,23,42,0.12)]">
+          <div className="text-sm font-semibold text-rose-600">页面运行异常</div>
+          <div className="mt-2 text-xs text-slate-600 break-all">{this.state.message || "未知错误"}</div>
           <div className="mt-4 flex items-center gap-2">
             <button
               type="button"
               onClick={this.handleRecover}
-              className="rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-100 hover:bg-slate-700"
+              className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50"
             >
               尝试恢复
             </button>
             <button
               type="button"
               onClick={() => window.location.reload()}
-              className="rounded-md border border-cyan-700/70 bg-cyan-900/30 px-3 py-1.5 text-xs text-cyan-100 hover:bg-cyan-900/50"
+              className="rounded-md border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-xs text-cyan-700 hover:bg-cyan-100"
             >
               刷新页面
             </button>

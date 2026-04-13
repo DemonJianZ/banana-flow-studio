@@ -13,10 +13,11 @@ ARK_API_KEY = os.getenv("ARK_API_KEY") or "YOUR_ARK_API_KEY_HERE"
 PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT", "dayu-ai")
 LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
 
-MODEL_GEMINI = "gemini-3-pro-image-preview"
-MODEL_DOUBAO = "doubao-seedream-4.5"
-MODEL_AGENT  = "gemini-3-flash-preview"
-MODEL_AGENT_CHAT = "gemini-2.5-flash-lite"
+MODEL_GEMINI = os.getenv("MODEL_GEMINI", "gemini-3-pro-image-preview")
+MODEL_DOUBAO = os.getenv("MODEL_DOUBAO", "doubao-seedream-4.5")
+MODEL_AGENT = os.getenv("MODEL_AGENT", "ollama:gemma4:latest")
+MODEL_PROMPT_POLISH = os.getenv("MODEL_PROMPT_POLISH", "ollama:gemma4:latest")
+MODEL_AGENT_CHAT = os.getenv("MODEL_AGENT_CHAT", "gemini-2.5-flash-lite")
 AGENT_MODEL_HTTP_PROXY = os.getenv("AGENT_MODEL_HTTP_PROXY", "")
 AGENT_MODEL_HTTPS_PROXY = os.getenv("AGENT_MODEL_HTTPS_PROXY", "")
 AGENT_CHAT_HTTP_PROXY = os.getenv("AGENT_CHAT_HTTP_PROXY", "")
@@ -26,6 +27,7 @@ MODEL_COMFYUI_RMBG = "comfyui-rmbg"
 MODEL_COMFYUI_REMOVE_WATERMARK = "comfyui-remove-watermark"
 MODEL_COMFYUI_MULTI_ANGLESHOTS = "comfyui-multi-angleshots"
 MODEL_COMFYUI_VIDEO_UPSCALE = "comfyui-video-upscale"
+MODEL_COMFYUI_VIDEO_LINEART = "comfyui-video-lineart"
 MODEL_COMFYUI_CONTROLNET = "comfyui-controlnet"
 MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO = "comfyui-image-z-image-turbo"
 MODEL_COMFYUI_QWEN_I2V = "comfyui-qwen-i2v"
@@ -51,10 +53,36 @@ if not os.path.exists(_default_rmbg):
     _default_rmbg = os.path.join(BASE_DIR, "bananaflow", "workflows", "RMBG.json")
 COMFYUI_RMBG_PATH = os.getenv("COMFYUI_RMBG_PATH", _default_rmbg)
 
-_default_remove_watermark = os.path.join(BASE_DIR, "workflows", "remove_watermark.json")
+_default_remove_watermark = os.path.join(BASE_DIR, "workflows", "image_qwen_image_edit_2509.json")
 if not os.path.exists(_default_remove_watermark):
-    _default_remove_watermark = os.path.join(BASE_DIR, "bananaflow", "workflows", "remove_watermark.json")
-COMFYUI_REMOVE_WATERMARK_PATH = os.getenv("COMFYUI_REMOVE_WATERMARK_PATH", _default_remove_watermark)
+    _default_remove_watermark = os.path.join(BASE_DIR, "bananaflow", "workflows", "image_qwen_image_edit_2509.json")
+_env_remove_watermark = (os.getenv("COMFYUI_REMOVE_WATERMARK_PATH") or "").strip()
+if _env_remove_watermark:
+    _env_remove_watermark_abs = (
+        _env_remove_watermark
+        if os.path.isabs(_env_remove_watermark)
+        else os.path.abspath(os.path.join(BASE_DIR, _env_remove_watermark))
+    )
+    _env_remove_watermark_basename = os.path.basename(_env_remove_watermark).lower()
+    if _env_remove_watermark_basename == "remove_watermark.json":
+        _remove_watermark_dir = os.path.dirname(_env_remove_watermark_abs) or BASE_DIR
+        _preferred_remove_watermark = os.path.join(_remove_watermark_dir, "image_qwen_image_edit_2509.json")
+        if os.path.exists(_preferred_remove_watermark):
+            COMFYUI_REMOVE_WATERMARK_PATH = _preferred_remove_watermark
+        elif os.path.exists(_env_remove_watermark):
+            COMFYUI_REMOVE_WATERMARK_PATH = _env_remove_watermark
+        elif os.path.exists(_env_remove_watermark_abs):
+            COMFYUI_REMOVE_WATERMARK_PATH = _env_remove_watermark_abs
+        else:
+            COMFYUI_REMOVE_WATERMARK_PATH = _preferred_remove_watermark
+    elif os.path.exists(_env_remove_watermark):
+        COMFYUI_REMOVE_WATERMARK_PATH = _env_remove_watermark
+    elif os.path.exists(_env_remove_watermark_abs):
+        COMFYUI_REMOVE_WATERMARK_PATH = _env_remove_watermark_abs
+    else:
+        COMFYUI_REMOVE_WATERMARK_PATH = _env_remove_watermark
+else:
+    COMFYUI_REMOVE_WATERMARK_PATH = _default_remove_watermark
 
 _default_multi_angleshots = os.path.join(BASE_DIR, "workflows", "Multi-angleshots.json")
 if not os.path.exists(_default_multi_angleshots):
@@ -100,6 +128,11 @@ if _env_upscale:
 else:
     COMFYUI_UPSCALE_PATH = _default_upscale
 
+_default_lineart = os.path.join(BASE_DIR, "workflows", "lineart.json")
+if not os.path.exists(_default_lineart):
+    _default_lineart = os.path.join(BASE_DIR, "bananaflow", "workflows", "lineart.json")
+COMFYUI_LINEART_PATH = os.getenv("COMFYUI_LINEART_PATH", _default_lineart)
+
 _default_controlnet = os.path.join(BASE_DIR, "workflows", "Controlnet.json")
 if not os.path.exists(_default_controlnet):
     _default_controlnet = os.path.join(BASE_DIR, "bananaflow", "workflows", "Controlnet.json")
@@ -108,6 +141,7 @@ COMFYUI_CONTROLNET_PATH = os.getenv("COMFYUI_CONTROLNET_PATH", _default_controln
 COMFYUI_OUTPUT_NODE_ID = os.getenv("COMFYUI_OUTPUT_NODE_ID", "4")
 COMFYUI_TIMEOUT_SEC = int(os.getenv("COMFYUI_TIMEOUT_SEC", "120"))
 COMFYUI_VIDEO_UPSCALE_TIMEOUT_SEC = int(os.getenv("COMFYUI_VIDEO_UPSCALE_TIMEOUT_SEC", "900"))
+COMFYUI_VIDEO_LINEART_TIMEOUT_SEC = int(os.getenv("COMFYUI_VIDEO_LINEART_TIMEOUT_SEC", "900"))
 COMFYUI_POLL_INTERVAL_SEC = float(os.getenv("COMFYUI_POLL_INTERVAL_SEC", "1.0"))
 
 _default_image_z_image_turbo = os.path.join(BASE_DIR, "workflows", "image_z_image_turbo.json")
