@@ -244,7 +244,7 @@ _PREFERENCE_COMMAND_PATTERNS = [
     (re.compile(r"^\s*风控偏好\s*[:=：]\s*(.+?)\s*$"), "risk_posture"),
 ]
 
-_MEMBER_API_BASE = os.getenv("MEMBER_API_BASE", "http://192.168.20.217:16313").rstrip("/")
+_MEMBER_API_BASE = os.getenv("MEMBER_API_BASE", "http://192.168.20.12:16313").rstrip("/")
 _MEMBER_API_AUTHORIZATION = str(os.getenv("MEMBER_API_AUTHORIZATION") or "").strip()
 _IDEA_SCRIPT_HTTP_PROXY = str(os.getenv("IDEA_SCRIPT_HTTP_PROXY") or "").strip()
 _IDEA_SCRIPT_HTTPS_PROXY = str(os.getenv("IDEA_SCRIPT_HTTPS_PROXY") or "").strip()
@@ -295,7 +295,7 @@ class AIChatCurlProxyRequest(BaseModel):
     ai_video_param_ratio_id: Optional[str] = ""
     ai_video_param_resolution_id: Optional[str] = ""
     ai_video_param_duration_id: Optional[str] = ""
-    ai_video_param_imagetype_id: Optional[str] = ""
+    ai_video_param_image_type_id: Optional[str] = ""
     template_enum: Optional[str] = ""
     async_flag: Optional[str] = Field(default="", alias="async")
     tusd_file_remote_ids: Optional[List[str]] = Field(default_factory=list)
@@ -416,11 +416,11 @@ def _build_ai_chat_request_form(req: AIChatCurlProxyRequest) -> Dict[str, Any]:
         "ai_video_param_ratio_id": clean_form_value(clean_req.ai_video_param_ratio_id),
         "ai_video_param_resolution_id": clean_form_value(clean_req.ai_video_param_resolution_id),
         "ai_video_param_duration_id": clean_form_value(clean_req.ai_video_param_duration_id),
-        "ai_video_param_imagetype_id": clean_form_value(clean_req.ai_video_param_imagetype_id),
+        "ai_video_param_image_type_id": clean_form_value(clean_req.ai_video_param_image_type_id),
         "template_enum": clean_form_value(clean_req.template_enum),
         "async": clean_form_value(clean_req.async_flag),
         "tusd_file_remote_ids": [clean_form_value(item) for item in list(clean_req.tusd_file_remote_ids or []) if clean_form_value(item)],
-        "timeout_seconds": max(10, min(int(clean_req.timeout_seconds or AI_CHAT_TASK_TIMEOUT_SEC), 300)),
+        "timeout_seconds": max(10, min(int(clean_req.timeout_seconds or AI_CHAT_TASK_TIMEOUT_SEC), 600)),
     }
 
 
@@ -627,7 +627,8 @@ async def _parse_ai_chat_submission_request(request: Request, task_id: str) -> t
             ai_video_param_ratio_id=scalar_fields.get("ai_video_param_ratio_id", ""),
             ai_video_param_resolution_id=scalar_fields.get("ai_video_param_resolution_id", ""),
             ai_video_param_duration_id=scalar_fields.get("ai_video_param_duration_id", ""),
-            ai_video_param_imagetype_id=scalar_fields.get("ai_video_param_imagetype_id", ""),
+            ai_video_param_image_type_id=scalar_fields.get("ai_video_param_image_type_id", "")
+            or scalar_fields.get("ai_video_param_imagetype_id", ""),
             template_enum=scalar_fields.get("template_enum", ""),
             **{"async": scalar_fields.get("async", "")},
             tusd_file_remote_ids=remote_ids,
@@ -693,7 +694,7 @@ def _build_ai_chat_curl_command(req_id: str, req: AIChatCurlProxyRequest) -> tup
     build_started_at = time.perf_counter()
     endpoint = str(req.endpoint or "").strip() or AI_CHAT_DOWNSTREAM_URL or f"{_MEMBER_API_BASE}/ai/aiChat"
     authorization = clean_form_value(req.authorization)
-    timeout_seconds = max(10, min(int(req.timeout_seconds or 120), 300))
+    timeout_seconds = max(10, min(int(req.timeout_seconds or AI_CHAT_TASK_TIMEOUT_SEC), 600))
     if not authorization:
         raise HTTPException(status_code=400, detail="authorization 不能为空")
 
@@ -710,7 +711,7 @@ def _build_ai_chat_curl_command(req_id: str, req: AIChatCurlProxyRequest) -> tup
         ("ai_video_param_ratio_id", req.ai_video_param_ratio_id),
         ("ai_video_param_resolution_id", req.ai_video_param_resolution_id),
         ("ai_video_param_duration_id", req.ai_video_param_duration_id),
-        ("ai_video_param_imagetype_id", req.ai_video_param_imagetype_id),
+        ("ai_video_param_image_type_id", req.ai_video_param_image_type_id),
         ("template_enum", req.template_enum),
         ("async", req.async_flag),
     ]
@@ -1514,6 +1515,17 @@ def _normalize_video_split_segments(value: Any) -> List[Dict[str, float]]:
     return normalized[:24]
 
 
+def _normalize_video_split_resolution(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"480", "480p"}:
+        return "480p"
+    if text in {"720", "720p"}:
+        return "720p"
+    if text in {"1080", "1080p"}:
+        return "1080p"
+    return "720p"
+
+
 def _parse_size_to_dimensions(size: Optional[str], aspect_ratio: Optional[str], *, default: tuple[int, int] = (1024, 1024)) -> tuple[int, int]:
     target = str(calculate_target_resolution(size or "1024x1024", aspect_ratio or "1:1") or "").strip()
     matched = re.match(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$", target)
@@ -1928,7 +1940,7 @@ def _call_ai_chat_image_via_curl_from_task(
     build_started_at = time.perf_counter()
     endpoint = str(request_form.get("endpoint") or AI_CHAT_DOWNSTREAM_URL).strip() or AI_CHAT_DOWNSTREAM_URL
     authorization = clean_form_value(request_form.get("authorization"))
-    timeout_seconds = max(10, min(int(request_form.get("timeout_seconds") or AI_CHAT_TASK_TIMEOUT_SEC), 300))
+    timeout_seconds = max(10, min(int(request_form.get("timeout_seconds") or AI_CHAT_TASK_TIMEOUT_SEC), 600))
     if not authorization:
         raise HTTPException(status_code=400, detail="authorization 不能为空")
 
@@ -2176,7 +2188,7 @@ async def _call_ai_chat_image_via_httpx_once(
     if not authorization:
         raise _AIChatNonRetryableError("authorization 不能为空", status_code=400)
 
-    timeout_seconds = max(10, min(int(request_form.get("timeout_seconds") or AI_CHAT_TASK_TIMEOUT_SEC), 300))
+    timeout_seconds = max(10, min(int(request_form.get("timeout_seconds") or AI_CHAT_TASK_TIMEOUT_SEC), 600))
     timeout = httpx.Timeout(timeout_seconds, connect=30.0, read=float(timeout_seconds), write=60.0, pool=30.0)
     headers = {
         "authorization": authorization,
@@ -2423,7 +2435,11 @@ async def _run_ai_chat_image_task(task_id: str) -> None:
                     ai_video_param_ratio_id=str(request_form.get("ai_video_param_ratio_id") or ""),
                     ai_video_param_resolution_id=str(request_form.get("ai_video_param_resolution_id") or ""),
                     ai_video_param_duration_id=str(request_form.get("ai_video_param_duration_id") or ""),
-                    ai_video_param_imagetype_id=str(request_form.get("ai_video_param_imagetype_id") or ""),
+                    ai_video_param_image_type_id=str(
+                        request_form.get("ai_video_param_image_type_id")
+                        or request_form.get("ai_video_param_imagetype_id")
+                        or ""
+                    ),
                     template_enum=str(request_form.get("template_enum") or ""),
                     **{"async": str(request_form.get("async") or "")},
                     tusd_file_remote_ids=list(request_form.get("tusd_file_remote_ids") or []),
@@ -3471,6 +3487,7 @@ def _run_video_lineart_task(task_id: str, req_id: str, user_id: Optional[str], p
 def _run_video_split_task(task_id: str, req_id: str, user_id: Optional[str], payload: Dict[str, Any]) -> None:
     t0 = time.time()
     segments = _normalize_video_split_segments(payload.get("segments"))
+    output_resolution = _normalize_video_split_resolution(payload.get("output_resolution"))
 
     try:
         if not segments:
@@ -3487,6 +3504,7 @@ def _run_video_split_task(task_id: str, req_id: str, user_id: Optional[str], pay
             req_id=req_id,
             video_input=str(payload.get("video") or ""),
             segments=segments,
+            output_resolution=output_resolution,
         )
         if not video_bytes_list:
             raise RuntimeError("No split videos returned")
@@ -3510,6 +3528,7 @@ def _run_video_split_task(task_id: str, req_id: str, user_id: Optional[str], pay
             {
                 "model": VIDEO_SPLIT_MODEL_NAME,
                 "segment_count": len(output_videos),
+                "output_resolution": output_resolution,
             },
             {"file": "mem"},
             time.time() - t0,
@@ -3533,6 +3552,7 @@ def _run_video_split_task(task_id: str, req_id: str, user_id: Optional[str], pay
             {
                 "model": VIDEO_SPLIT_MODEL_NAME,
                 "segment_count": len(segments),
+                "output_resolution": output_resolution,
             },
             {"file": "mem"},
             time.time() - t0,
@@ -3548,9 +3568,11 @@ def video_split_start(req: VideoSplitRequest, request: Request, current_user=Dep
     payload = req.model_dump()
     task_id = uuid.uuid4().hex
     segments = _normalize_video_split_segments(payload.get("segments"))
+    output_resolution = _normalize_video_split_resolution(payload.get("output_resolution"))
     if not segments:
         raise HTTPException(status_code=400, detail="至少需要一个有效分段")
     payload["segments"] = segments
+    payload["output_resolution"] = output_resolution
 
     user_id = str((current_user or {}).get("id") or "").strip()
     _set_video_split_task(

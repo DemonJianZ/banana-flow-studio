@@ -197,14 +197,35 @@ const findAIChatParamItem = (paramList, aliases = []) => {
   return null;
 };
 
+const getAIChatParamDisplayValue = (paramValue) => {
+  const remark = String(paramValue?.remark || "").trim();
+  const value = String(paramValue?.param_value || "").trim();
+  return remark || value;
+};
+
 const findAIChatParamValueId = (paramList, aliases = [], selectedValue = "") => {
   const target = normalizeText(selectedValue);
   if (!target) return "";
   const item = findAIChatParamItem(paramList, aliases);
   if (!item) return "";
+  const normalizeMatchText = (value) =>
+    String(value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/秒|second|seconds|sec|fps/gi, "")
+      .replace(/[（(].*?[）)]/g, "")
+      .replace(/\s+/g, "")
+      .replace(/_/g, "")
+      .replace(/：/g, ":");
+  const normalizedTarget = normalizeMatchText(target);
+  const useStrictNormalizedMatch =
+    /^[0-9]+$/.test(normalizedTarget) ||
+    /^[0-9]+:[0-9]+$/.test(normalizedTarget) ||
+    /^[0-9]+p$/.test(normalizedTarget);
   const values = sortParamValues(item?.param_values || []);
   for (const paramValue of values) {
     const candidates = [
+      String(paramValue?.param_value_id || "").trim().toLowerCase(),
       String(paramValue?.param_value || "").trim().toLowerCase(),
       String(paramValue?.remark || "").trim().toLowerCase(),
     ].filter(Boolean);
@@ -213,8 +234,35 @@ const findAIChatParamValueId = (paramList, aliases = [], selectedValue = "") => 
       if (id === undefined || id === null || id === "") return "";
       return String(id);
     }
+    const matched = candidates.some((candidate) => {
+      const normalizedCandidate = normalizeMatchText(candidate);
+      if (!normalizedCandidate || !normalizedTarget) return false;
+      if (normalizedCandidate === normalizedTarget) return true;
+      if (useStrictNormalizedMatch) return false;
+      return (
+        normalizedCandidate.includes(normalizedTarget) ||
+        normalizedTarget.includes(normalizedCandidate)
+      );
+    });
+    if (matched) {
+      const id = paramValue?.param_value_id;
+      if (id === undefined || id === null || id === "") return "";
+      return String(id);
+    }
   }
   return "";
+};
+
+const listAIChatParamChoiceOptions = (paramList, aliases = []) => {
+  const item = findAIChatParamItem(paramList, aliases);
+  if (!item) return [];
+  return sortParamValues(item?.param_values || [])
+    .map((paramValue) => {
+      const label = getAIChatParamDisplayValue(paramValue);
+      if (!label) return null;
+      return { value: label, label };
+    })
+    .filter(Boolean);
 };
 
 const pickFirstImageUrl = (payload) => {
@@ -329,6 +377,8 @@ const PipelineSwapTrio = () => {
   const [size, setSize] = useState("1024x1024");
   const [aspectRatio, setAspectRatio] = useState("1:1");
   const [videoResolution, setVideoResolution] = useState(DEFAULT_VIDEO_RESOLUTION);
+  const [videoImageType, setVideoImageType] = useState("");
+  const [videoImageTypeOptions, setVideoImageTypeOptions] = useState([]);
   const [results, setResults] = useState([]);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState("");
@@ -373,6 +423,47 @@ const PipelineSwapTrio = () => {
     return () => {
       cancelled = true;
       controller.abort();
+    };
+  }, [apiFetch]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadVideoImageTypeOptions = async () => {
+      try {
+        let paramList = aiChatModelParamsCacheRef.current.get(AI_CHAT_I2V_MODEL_ID);
+        if (!Array.isArray(paramList)) {
+          const paramsData = await viewAIChatModelParams(
+            apiFetch,
+            { ai_chat_model_id: Number(AI_CHAT_I2V_MODEL_ID) || AI_CHAT_I2V_MODEL_ID },
+            { preferApiFetchFirst: true },
+          );
+          paramList = Array.isArray(paramsData?.list)
+            ? paramsData.list
+            : Array.isArray(paramsData?.data?.list)
+              ? paramsData.data.list
+              : [];
+          aiChatModelParamsCacheRef.current.set(AI_CHAT_I2V_MODEL_ID, paramList);
+        }
+        if (cancelled) return;
+        const nextOptions = listAIChatParamChoiceOptions(paramList, ["imagetype", "image_type", "模式", "参考模式", "参考类型"]);
+        setVideoImageTypeOptions(nextOptions);
+        setVideoImageType((prev) => {
+          const current = String(prev || "").trim();
+          if (current && nextOptions.some((option) => option.value === current)) return current;
+          return String(nextOptions[0]?.value || "").trim();
+        });
+      } catch {
+        if (!cancelled) {
+          setVideoImageTypeOptions([]);
+          setVideoImageType("");
+        }
+      }
+    };
+
+    void loadVideoImageTypeOptions();
+    return () => {
+      cancelled = true;
     };
   }, [apiFetch]);
 
@@ -654,6 +745,10 @@ const PipelineSwapTrio = () => {
             selectedRatio,
           );
           const matchedDurationId = findAIChatParamValueId(paramList, ["duration", "时长"], String(DEFAULT_VIDEO_DURATION));
+          const selectedImageType = String(videoImageType || "").trim();
+          const matchedImageTypeId = selectedImageType
+            ? findAIChatParamValueId(paramList, ["imagetype", "image_type", "模式", "参考模式", "参考类型"], selectedImageType)
+            : "";
 
           if (!matchedResolutionId) {
             throw new Error(`未从模型参数中匹配到分辨率: ${videoResolution}`);
@@ -664,6 +759,9 @@ const PipelineSwapTrio = () => {
           if (!matchedRatioId) {
             throw new Error(`未从模型参数中匹配到比例: ${selectedRatio}`);
           }
+          if (selectedImageType && !matchedImageTypeId) {
+            throw new Error(`未从模型参数中匹配到参考模式: ${selectedImageType}`);
+          }
 
           const proxyPayload = {
             authorization: memberAuth,
@@ -673,9 +771,12 @@ const PipelineSwapTrio = () => {
             message: DEFAULT_VIDEO_PROMPT,
             ai_chat_session_id: aiChatSessionIdRef.current || "",
             ai_chat_model_id: AI_CHAT_I2V_MODEL_ID,
+            async: "0",
+            timeout_seconds: 600,
             ai_video_param_resolution_id: matchedResolutionId,
             ai_video_param_duration_id: matchedDurationId,
             ai_video_param_ratio_id: matchedRatioId,
+            ...(matchedImageTypeId ? { ai_video_param_image_type_id: matchedImageTypeId } : {}),
             images: [item.outputUrl],
           };
 
@@ -738,7 +839,7 @@ const PipelineSwapTrio = () => {
     } catch (err) {
       updateResult(item.id, { videoStatus: "error", videoError: MOTION_FAILURE_MESSAGE });
     }
-  }, [apiFetch, aspectRatio, updateResult, videoResolution]);
+  }, [apiFetch, aspectRatio, updateResult, videoImageType, videoResolution]);
 
   const handleUpscaleVideo = useCallback(async (item) => {
     if (!item?.videoUrl) return;
@@ -1033,7 +1134,7 @@ const PipelineSwapTrio = () => {
             </div>
             <div className="text-xs text-slate-500">已完成 {totalSuccess}/{results.length || 0}</div>
           </div>
-          <div className="mt-4 grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div className="mt-4 grid grid-cols-1 md:grid-cols-5 gap-4">
             <label className="text-xs text-slate-400 space-y-2">
               <span className="block">功能类型</span>
               <select
@@ -1096,6 +1197,22 @@ const PipelineSwapTrio = () => {
                 ))}
               </select>
             </label>
+            {videoImageTypeOptions.length > 0 && (
+              <label className="text-xs text-slate-400 space-y-2">
+                <span className="block">参考模式</span>
+                <select
+                  value={videoImageType}
+                  onChange={(e) => setVideoImageType(e.target.value)}
+                  className="w-full rounded-lg bg-slate-950 border border-slate-800 text-sm text-slate-200 px-3 py-2 focus:outline-none focus:border-purple-500"
+                >
+                  {videoImageTypeOptions.map((opt) => (
+                    <option key={opt.value} value={opt.value} className="bg-slate-900">
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
           </div>
           <textarea
             value={prompt}

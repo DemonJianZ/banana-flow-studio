@@ -664,6 +664,34 @@ def _concat_video_segments(segment_paths: List[str], temp_dir: str, req_id: str)
         return output_path
 
 
+def _read_video_dimensions(input_path: str) -> tuple[int, int]:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-of",
+        "json",
+        input_path,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise ComfyUiError(f"ffprobe failed: {proc.stderr.strip() or proc.stdout.strip() or 'unknown error'}")
+    try:
+        payload = json.loads(proc.stdout or "{}")
+        stream = (payload.get("streams") or [])[0] or {}
+        width = max(1, int(stream.get("width") or 0))
+        height = max(1, int(stream.get("height") or 0))
+    except Exception as exc:
+        raise ComfyUiError(f"failed to parse ffprobe output: {exc}") from exc
+    if width <= 0 or height <= 0:
+        raise ComfyUiError("ffprobe did not return valid video dimensions")
+    return width, height
+
+
 def _trim_video_segment(
     input_path: str,
     output_path: str,
@@ -671,6 +699,7 @@ def _trim_video_segment(
     end_sec: float,
     req_id: str,
     segment_index: int,
+    output_resolution: str = "720p",
 ) -> None:
     start_sec = max(0.0, float(start_sec or 0.0))
     end_sec = max(start_sec, float(end_sec or 0.0))
@@ -694,12 +723,22 @@ def _trim_video_segment(
         "veryfast",
         "-crf",
         "18",
+    ]
+    resolution_text = str(output_resolution or "").strip().lower()
+    if resolution_text in {"480p", "720p", "1080p"}:
+        target = int(resolution_text[:-1])
+        width, height = _read_video_dimensions(input_path)
+        if width >= height:
+            trim_cmd.extend(["-vf", f"scale=-2:{target}"])
+        else:
+            trim_cmd.extend(["-vf", f"scale={target}:-2"])
+    trim_cmd.extend([
         "-c:a",
         "aac",
         "-movflags",
         "+faststart",
         output_path,
-    ]
+    ])
     _run_ffmpeg(trim_cmd, req_id, f"trim(segment_{segment_index:02d})")
 
 
@@ -708,6 +747,7 @@ def run_video_split_workflow(
     req_id: str,
     video_input: str,
     segments: List[Dict[str, Any]],
+    output_resolution: str = "720p",
 ) -> tuple[List[bytes], str]:
     if not segments:
         raise ComfyUiError("No video segments provided")
@@ -725,7 +765,15 @@ def run_video_split_workflow(
                 raise ComfyUiError(f"Invalid segment range at index {index}: end_sec must be greater than start_sec")
 
             output_path = os.path.join(output_dir, f"segment_{index:03d}.mp4")
-            _trim_video_segment(source_path, output_path, start_sec, end_sec, req_id, index)
+            _trim_video_segment(
+                source_path,
+                output_path,
+                start_sec,
+                end_sec,
+                req_id,
+                index,
+                output_resolution=output_resolution,
+            )
             with open(output_path, "rb") as f:
                 payload = f.read()
             if not payload:

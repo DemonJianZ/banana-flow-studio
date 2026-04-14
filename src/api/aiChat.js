@@ -440,7 +440,7 @@ export async function submitAIChatImageTask(apiFetch, payload = {}, options = {}
   });
 
   const pollIntervalMs = Math.max(400, Number(options.pollIntervalMs || 1200));
-  const timeoutMs = Math.max(pollIntervalMs, Number(options.timeoutMs || 300000));
+  const timeoutMs = Math.max(pollIntervalMs, Number(options.timeoutMs || 600000));
   const startedAt = Date.now();
   const pollPath = `/api/ai_chat_image_via_curl/${encodeURIComponent(taskId)}`;
 

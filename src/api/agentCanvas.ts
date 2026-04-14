@@ -315,6 +315,7 @@ export async function runVideoLineartTask(payload, apiFetch) {
 export async function runVideoSplitTask(payload, apiFetch) {
   const call = createCaller(apiFetch);
   const rawSegments = Array.isArray(payload?.segments) ? payload.segments : [];
+  const outputResolution = String(payload?.outputResolution || payload?.output_resolution || "720p").trim().toLowerCase() || "720p";
   const segments = rawSegments
     .map((item) => ({
       start_sec: Number(item?.startSec),
@@ -331,6 +332,7 @@ export async function runVideoSplitTask(payload, apiFetch) {
     body: JSON.stringify({
       video: String(payload?.video || "").trim(),
       segments,
+      output_resolution: outputResolution,
     }),
   });
   const startData = await startResp.json().catch(() => ({}));

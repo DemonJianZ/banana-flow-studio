@@ -66,6 +66,7 @@ import ScriptPlanSummary from "../components/agent-canvas/ScriptPlanSummary";
 import PreferenceSuggestionCard from "../components/agent-canvas/PreferenceSuggestionCard";
 import {
   buildCanvasNodePrompt,
+  buildCanvasNodePreviewPrompt,
   extractCanvasSupplementalPrompt,
 } from "../components/agent-canvas/promptUtils";
 import {
@@ -575,6 +576,8 @@ const readFilesAsDataUrls = (files) =>
 
 const IMAGE_FILE_EXT_PATTERN = /\.(?:png|jpe?g|webp|gif|bmp|svg|avif|heic|heif)$/i;
 const VIDEO_FILE_EXT_PATTERN = /\.(?:mp4|webm|mov|m4v|avi|mkv|m3u8)$/i;
+const DEFAULT_VIDEO_SPLIT_OUTPUT_RESOLUTION = "720p";
+const VIDEO_SPLIT_OUTPUT_RESOLUTION_OPTIONS = ["720p"];
 
 const isImageFileLike = (file) => {
   const mime = String(file?.type || "").trim().toLowerCase();
@@ -1334,8 +1337,8 @@ const buildAIChatParamPayload = (paramList) => {
       payload.ai_video_param_duration_id = valueId;
       continue;
     }
-    if (name.includes("imagetype") || name.includes("模式")) {
-      payload.ai_video_param_imagetype_id = valueId;
+    if (name.includes("imagetype") || name.includes("image_type") || name.includes("模式")) {
+      payload.ai_video_param_image_type_id = valueId;
     }
   }
   return payload;
@@ -1352,23 +1355,39 @@ const findAIChatParamItem = (paramList, keywords = []) => {
   return null;
 };
 
+const normalizeAIChatParamMatchText = (text) =>
+  String(text || "")
+    .trim()
+    .toLowerCase()
+    .replace(/秒|second|seconds|sec|fps/gi, "")
+    .replace(/[（(].*?[）)]/g, "")
+    .replace(/\s+/g, "")
+    .replace(/_/g, "")
+    .replace(/：/g, ":");
+
+const getAIChatParamDisplayValue = (paramValue) => {
+  const remark = String(paramValue?.remark || "").trim();
+  const value = String(paramValue?.param_value || "").trim();
+  return remark || value;
+};
+
 const findAIChatParamValueId = (paramList, keywords = [], preferredValue = "") => {
   const valueText = String(preferredValue || "").trim().toLowerCase();
   if (!valueText) return "";
   const item = findAIChatParamItem(paramList, keywords);
   if (!item) return "";
-  const normalizeText = (text) =>
-    String(text || "")
-      .trim()
-      .toLowerCase()
-      .replace(/秒|second|seconds|sec|s/gi, "")
-      .replace(/\s+/g, "");
-  const normalizedPreferred = normalizeText(valueText);
+  const normalizedPreferred = normalizeAIChatParamMatchText(valueText);
+  const useStrictNormalizedMatch =
+    /^[0-9]+$/.test(normalizedPreferred) ||
+    /^[0-9]+:[0-9]+$/.test(normalizedPreferred) ||
+    /^[0-9]+p$/.test(normalizedPreferred);
   const values = sortParamValues(item?.param_values || EMPTY_LIST);
   for (const val of values) {
     const candidates = [
+      String(val?.param_value_id || "").trim().toLowerCase(),
       String(val?.param_value || "").trim().toLowerCase(),
       String(val?.remark || "").trim().toLowerCase(),
+      getAIChatParamDisplayValue(val).toLowerCase(),
     ].filter(Boolean);
     if (candidates.includes(valueText)) {
       const id = val?.param_value_id;
@@ -1376,10 +1395,11 @@ const findAIChatParamValueId = (paramList, keywords = [], preferredValue = "") =
     }
     if (normalizedPreferred) {
       const matched = candidates.some((candidate) => {
-        const normalizedCandidate = normalizeText(candidate);
+        const normalizedCandidate = normalizeAIChatParamMatchText(candidate);
         if (!normalizedCandidate) return false;
+        if (normalizedCandidate === normalizedPreferred) return true;
+        if (useStrictNormalizedMatch) return false;
         return (
-          normalizedCandidate === normalizedPreferred ||
           normalizedCandidate.includes(normalizedPreferred) ||
           normalizedPreferred.includes(normalizedCandidate)
         );
@@ -1397,7 +1417,7 @@ const listAIChatParamValues = (paramList, keywords = []) => {
   const item = findAIChatParamItem(paramList, keywords);
   if (!item) return EMPTY_LIST;
   return sortParamValues(item?.param_values || EMPTY_LIST)
-    .map((val) => String(val?.param_value || "").trim())
+    .map((val) => getAIChatParamDisplayValue(val))
     .filter(Boolean);
 };
 
@@ -1406,12 +1426,42 @@ const listAIChatParamChoiceOptions = (paramList, keywords = []) => {
   if (!item) return EMPTY_LIST;
   return sortParamValues(item?.param_values || EMPTY_LIST)
     .map((val) => {
-      const value = String(val?.param_value || "").trim();
-      const label = String(val?.remark || val?.param_value || "").trim();
+      const label = getAIChatParamDisplayValue(val);
+      const value = label;
       if (!value || !label) return null;
       return { value, label };
     })
     .filter(Boolean);
+};
+
+const normalizeImageTypeOptionText = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "");
+
+const isFirstLastFrameReferenceSelection = (selectedValue, options = EMPTY_LIST) => {
+  const normalizedSelected = normalizeImageTypeOptionText(selectedValue);
+  if (!normalizedSelected) return false;
+
+  if (normalizedSelected === "2" || normalizedSelected.includes("首尾帧")) return true;
+
+  const matchedOption = (Array.isArray(options) ? options : []).find((item) => {
+    const optionValue = normalizeImageTypeOptionText(item?.value);
+    const optionLabel = normalizeImageTypeOptionText(item?.label);
+    return optionValue === normalizedSelected || optionLabel === normalizedSelected;
+  });
+  const descriptors = [selectedValue, matchedOption?.label, matchedOption?.value]
+    .map(normalizeImageTypeOptionText)
+    .filter(Boolean);
+  return descriptors.some(
+    (text) =>
+      text.includes("首尾帧") ||
+      text.includes("首帧尾帧") ||
+      (text.includes("first") && text.includes("last")) ||
+      (text.includes("last") && text.includes("frame")) ||
+      (text.includes("end") && text.includes("frame"))
+  );
 };
 
 const TOOL_CARDS = {
@@ -1964,6 +2014,7 @@ const PropertyPanel = ({
   imageModelOptions = EMPTY_LIST,
   videoModelOptions = EMPTY_LIST,
   resolveModelParamsForId,
+  embedded = false,
 }) => {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [promptPolishLoading, setPromptPolishLoading] = useState(false);
@@ -1988,6 +2039,7 @@ const PropertyPanel = ({
   const isProcessor = node?.type === NODE_TYPES.PROCESSOR;
   const isPostProcessor = node?.type === NODE_TYPES.POST_PROCESSOR;
   const isVideoGen = node?.type === NODE_TYPES.VIDEO_GEN;
+  const isEmbeddedVideoConfig = embedded && isVideoGen;
 
   const currentMode = TOOL_CARDS[node?.data?.mode] || TOOL_CARDS.bg_replace;
   const activeTemplates = PROMPT_TEMPLATES[node?.data?.mode];
@@ -2006,7 +2058,7 @@ const PropertyPanel = ({
         && !HIDDEN_IMAGE_CONFIG_MODES.has(key);
     }
     if (isPostProcessor) return tool.category === "enhance";
-    if (isVideoGen) return tool.category === "video";
+    if (isVideoGen) return tool.category === "video" && key !== "local_img2video";
     return false;
   });
 
@@ -2064,14 +2116,14 @@ const PropertyPanel = ({
           const item = findAIChatParamItem(paramList, keywords);
           if (!item) return EMPTY_LIST;
           return sortParamValues(item?.param_values || EMPTY_LIST)
-            .map((val) => String(val?.param_value || "").trim())
+            .map((val) => getAIChatParamDisplayValue(val))
             .filter(Boolean);
         };
         setVideoParamOptions({
-          resolution: readOptions(["resolution", "分辨率"]),
-          ratio: readOptions(["ratio", "比例", "宽高比"]),
-          duration: readOptions(["duration", "时长"]),
-          imageType: listAIChatParamChoiceOptions(paramList, ["imagetype", "模式"]),
+          resolution: readOptions(["resolution", "分辨率", "清晰度"]),
+          ratio: readOptions(["ratio", "比例", "宽高比", "画幅", "aspect"]),
+          duration: readOptions(["duration", "时长", "秒数"]),
+          imageType: listAIChatParamChoiceOptions(paramList, ["imagetype", "image_type", "模式", "参考模式", "参考类型"]),
         });
       })
       .catch((error) => {
@@ -2146,6 +2198,11 @@ const PropertyPanel = ({
     }
     return EMPTY_LIST;
   }, [videoParamOptions.imageType, supportsReferenceMode]);
+  const selectedRemoteImageType = String(node?.data?.templates?.imageType || remoteImageTypeOptions[0]?.value || "").trim();
+  const shouldShowRemoteLastFrameUpload = useMemo(
+    () => isRemoteImg2Video && isFirstLastFrameReferenceSelection(selectedRemoteImageType, remoteImageTypeOptions),
+    [isRemoteImg2Video, selectedRemoteImageType, remoteImageTypeOptions]
+  );
 
   const remoteImageSizeOptions = useMemo(() => {
     if (imageParamOptions.size.length) return imageParamOptions.size;
@@ -2161,6 +2218,8 @@ const PropertyPanel = ({
     if (imageParamOptions.taskType.length) return imageParamOptions.taskType;
     return EMPTY_LIST;
   }, [imageParamOptions.taskType]);
+  const embeddedFieldClass =
+    "mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-xs text-slate-700 outline-none transition focus:border-rose-300";
 
   useEffect(() => {
     if (!isRemoteImg2Video) return;
@@ -2278,7 +2337,7 @@ const PropertyPanel = ({
   const promptValue = promptModes.includes(node?.data?.mode)
     ? (node?.data?.prompt || "")
     : (node?.data?.templates?.note || node?.data?.prompt || "");
-  const previewPrompt = buildCanvasNodePrompt(node);
+  const previewPrompt = buildCanvasNodePreviewPrompt(node);
   const showPromptPolishButton = Boolean(
     promptModes.includes(node?.data?.mode) ||
     node?.data?.mode === "img2video" ||
@@ -2326,23 +2385,29 @@ const PropertyPanel = ({
   if (!hasConfigNode) return null;
 
   return (
-  <div className="w-80 bg-white border-l border-slate-200 z-40 flex flex-col shadow-[0_24px_48px_rgba(15,23,42,0.08)] shrink-0 h-full min-h-0 overflow-hidden animate-in slide-in-from-right duration-200">
-    {/* Header（固定） */}
-    <div className="flex items-center justify-between border-b border-slate-200 p-4">
-      <div className="flex items-center gap-2">
-        <Sliders className="w-4 h-4 text-slate-500" />
-        <span className="font-bold text-sm text-slate-800">配置面板</span>
+  <div
+    className={
+      embedded
+        ? "border-b border-slate-200 bg-[linear-gradient(180deg,rgba(248,250,252,0.98),rgba(255,255,255,0.96))] px-4 py-3"
+        : "w-80 bg-white border-l border-slate-200 z-40 flex flex-col shadow-[0_24px_48px_rgba(15,23,42,0.08)] shrink-0 h-full min-h-0 overflow-hidden animate-in slide-in-from-right duration-200"
+    }
+  >
+    {!embedded && (
+      <div className="flex items-center justify-between border-b border-slate-200 p-4">
+        <div className="flex items-center gap-2">
+          <Sliders className="w-4 h-4 text-slate-500" />
+          <span className="font-bold text-sm text-slate-800">配置面板</span>
+        </div>
+        <button onClick={onClose} className="text-slate-500 hover:text-slate-900 p-1 rounded hover:bg-slate-100">
+          <X className="w-4 h-4" />
+        </button>
       </div>
-      <button onClick={onClose} className="text-slate-500 hover:text-slate-900 p-1 rounded hover:bg-slate-100">
-        <X className="w-4 h-4" />
-      </button>
-    </div>
+    )}
 
-    {/* 内容区（可滚动） */}
-    <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4 custom-scrollbar">
+    <div className={embedded ? "space-y-3" : "flex-1 min-h-0 overflow-y-auto p-4 space-y-4 custom-scrollbar"}>
       {/* 基础设置 */}
       <div className="space-y-3">
-        {!isSkillProcessor && (
+        {!isSkillProcessor && !isEmbeddedVideoConfig && (
           <div className="space-y-2">
             <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">模式选择</div>
 
@@ -2402,7 +2467,147 @@ const PropertyPanel = ({
           </div>
         )}
 
-{isVideoGen && !isLocalImg2Video && (
+        {isEmbeddedVideoConfig && (
+          <div className="grid grid-cols-2 gap-2.5">
+            <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+              视频模型
+              <select
+                className={embeddedFieldClass}
+                value={String(node.data.model || videoModelOptions[0]?.id || "")}
+                onChange={(e) => {
+                  const nextModel = String(e.target.value || "").trim();
+                  const prevT = node.data.templates || {};
+                  updateData(node.id, {
+                    model: nextModel,
+                    templates: {
+                      ...prevT,
+                      generate_audio_new: prevT.generate_audio_new ?? true,
+                    },
+                  });
+                }}
+              >
+                {videoModelOptions.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+              视频时长
+              <select
+                className={embeddedFieldClass}
+                value={String(node.data.templates?.duration ?? remoteDurationOptions[0] ?? "")}
+                onChange={(e) =>
+                  updateData(node.id, {
+                    templates: { ...(node.data.templates || {}), duration: String(e.target.value || "").trim() },
+                  })
+                }
+              >
+                {remoteDurationOptions.map((sec) => {
+                  const secText = String(sec).trim();
+                  return (
+                    <option key={secText} value={secText}>
+                      {secText}秒
+                    </option>
+                  );
+                })}
+              </select>
+            </label>
+
+            <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+              分辨率
+              <select
+                className={embeddedFieldClass}
+                value={String(node.data.templates?.resolution || remoteResolutionOptions[0] || "")}
+                onChange={(e) =>
+                  updateData(node.id, {
+                    templates: { ...(node.data.templates || {}), resolution: String(e.target.value || "").trim() },
+                  })
+                }
+              >
+                {remoteResolutionOptions.map((value) => {
+                  const text = String(value).trim();
+                  return (
+                    <option key={text} value={text}>
+                      {text.toUpperCase()}
+                    </option>
+                  );
+                })}
+              </select>
+            </label>
+
+            <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+              比例
+              <select
+                className={embeddedFieldClass}
+                value={String(node.data.templates?.ratio || remoteRatioOptions[0] || "")}
+                onChange={(e) =>
+                  updateData(node.id, {
+                    templates: { ...(node.data.templates || {}), ratio: String(e.target.value || "").trim() },
+                  })
+                }
+              >
+                {remoteRatioOptions.map((value) => {
+                  const text = String(value).trim();
+                  return (
+                    <option key={text} value={text}>
+                      {text}
+                    </option>
+                  );
+                })}
+              </select>
+            </label>
+
+            {remoteImageTypeOptions.length > 0 ? (
+              <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                参考模式
+                <select
+                  className={embeddedFieldClass}
+                  value={String(node.data.templates?.imageType || remoteImageTypeOptions[0]?.value || "")}
+                  onChange={(e) =>
+                    updateData(node.id, {
+                      templates: { ...(node.data.templates || {}), imageType: String(e.target.value || "").trim() },
+                    })
+                  }
+                >
+                  {remoteImageTypeOptions.map((item) => {
+                    const value = String(item?.value || "").trim();
+                    const label = String(item?.label || value).trim();
+                    return (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    );
+                  })}
+                </select>
+              </label>
+            ) : (
+              <div />
+            )}
+
+            <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+              生成数量
+              <select
+                className={embeddedFieldClass}
+                value={String(node.data.batchSize || 1)}
+                onChange={(e) => updateData(node.id, { batchSize: parseInt(String(e.target.value || "1"), 10) || 1 })}
+              >
+                {[1, 2, 3, 4].map((count) => (
+                  <option key={count} value={count}>
+                    {count} 次
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {videoParamLoading ? <div className="col-span-2 text-[10px] text-slate-500">参数加载中...</div> : null}
+            {videoParamError ? <div className="col-span-2 text-[10px] text-amber-400">{videoParamError}</div> : null}
+          </div>
+        )}
+
+{shouldShowRemoteLastFrameUpload && (
   <div className="space-y-1">
     <div className="flex justify-between items-center">
       <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">尾帧参考图</div>
@@ -2451,10 +2656,10 @@ const PropertyPanel = ({
 )}
         
 
-        {!isSkillProcessor && (
+        {!isSkillProcessor && promptModes.includes(node.data.mode) && (
           <div className="space-y-1">
             <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
-              {promptModes.includes(node.data.mode) ? "提示词" : "补充描述 / Note"}
+              提示词
             </div>
             <div className="relative">
               <textarea
@@ -2470,8 +2675,7 @@ const PropertyPanel = ({
                 value={promptValue}
                 onChange={(e) => {
                   setPromptPolishError("");
-                  if (promptModes.includes(node.data.mode)) updateData(node.id, { prompt: e.target.value });
-                  else updateTemplateData("note", e.target.value);
+                  updateData(node.id, { prompt: e.target.value });
                 }}
               />
 
@@ -2499,16 +2703,18 @@ const PropertyPanel = ({
       {/* 高级设置 */}
       {!isMultiAnglesSkill && (
         <>
-          <button
-            onClick={() => setShowAdvanced(!showAdvanced)}
-            className="flex items-center justify-between text-xs text-slate-500 bg-slate-50 p-2 rounded hover:bg-slate-100 mt-2"
-            type="button"
-          >
-            <span>{isVideoUpscaleSkill ? "高级设置 (输出规格)" : (isSkillProcessor ? "高级设置 (尺寸/比例/数量)" : "高级设置 (模型/尺寸/风格)")}</span>
-            {showAdvanced ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-          </button>
+          {!embedded && (
+            <button
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              className="flex items-center justify-between text-xs text-slate-500 bg-slate-50 p-2 rounded hover:bg-slate-100 mt-2"
+              type="button"
+            >
+              <span>{isVideoUpscaleSkill ? "高级设置 (输出规格)" : (isSkillProcessor ? "高级设置 (尺寸/比例/数量)" : "高级设置 (模型/尺寸/风格)")}</span>
+              {showAdvanced ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+            </button>
+          )}
 
-          {showAdvanced && (
+          {(embedded || showAdvanced) && (
             <div className="space-y-4 animate-in slide-in-from-top-2 duration-200">
               {isProcessor && isVideoUpscaleSkill && (
                 <div className="space-y-2">
@@ -2572,7 +2778,7 @@ const PropertyPanel = ({
             </div>
           )}
 
-          {isVideoGen && !isLocalImg2Video && (
+          {!embedded && isVideoGen && !isLocalImg2Video && (
             <div className="space-y-2">
               <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center justify-between">
                 <span className="flex items-center gap-1">
@@ -2612,7 +2818,7 @@ const PropertyPanel = ({
               </div>
             </div>
           )}
-          {isVideoGen && (
+          {!embedded && isVideoGen && (
   <div className="space-y-2">
     <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">视频时长 (秒)</div>
 
@@ -2655,7 +2861,7 @@ const PropertyPanel = ({
     {!isLocalImg2Video && videoParamError ? <div className="text-[10px] text-amber-400">{videoParamError}</div> : null}
   </div>
 )}
-          {isVideoGen && (
+          {!embedded && isVideoGen && (
   <div className="space-y-2">
     <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">分辨率</div>
 
@@ -2681,7 +2887,7 @@ const PropertyPanel = ({
 	  </div>
 	)}
 
-		          {isVideoGen && !isLocalImg2Video && remoteImageTypeOptions.length > 0 && (
+			          {!embedded && isVideoGen && !isLocalImg2Video && remoteImageTypeOptions.length > 0 && (
 	  <div className="space-y-2">
 	    <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">参考模式</div>
 
@@ -2855,7 +3061,7 @@ const PropertyPanel = ({
           )}
 
           {/* Style Templates */}
-          {effectiveTemplates?.categories?.map((cat, idx) => (
+          {!embedded && effectiveTemplates?.categories?.map((cat, idx) => (
             <div key={idx} className="space-y-1.5">
               <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{cat.name}</div>
               <div className="flex flex-wrap gap-1.5">
@@ -2883,7 +3089,7 @@ const PropertyPanel = ({
           ))}
 
           {/* Batch Size */}
-              {node.data.mode !== "multi_angleshots" && (
+              {!embedded && node.data.mode !== "multi_angleshots" && (
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">生成数量</span>
@@ -2906,13 +3112,14 @@ const PropertyPanel = ({
       )}
     </div>
 
-    {/* Preview（固定在底部） */}
-    <div className="p-4 border-t border-slate-200">
-      <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">提示词预览</div>
-      <div className="text-[10px] text-slate-500 font-mono bg-slate-50 p-2 rounded border border-slate-200 break-words">
-        {previewPrompt || "(暂无内容)"}
+    {!embedded && (
+      <div className="p-4 border-t border-slate-200">
+        <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">提示词预览</div>
+        <div className="text-[10px] text-slate-500 font-mono bg-slate-50 p-2 rounded border border-slate-200 break-words">
+          {previewPrompt || "(暂无内容)"}
+        </div>
       </div>
-    </div>
+    )}
   </div>
 );};
 
@@ -2923,6 +3130,9 @@ const NodeComponent = ({
   updateData,
   apiFetch,
   onOpenPromptPolishPicker,
+  imageModelOptions = EMPTY_LIST,
+  videoModelOptions = EMPTY_LIST,
+  resolveModelParamsForId,
   onDelete,
   onConnectStart,
   onConnectEnd,
@@ -2953,6 +3163,7 @@ const NodeComponent = ({
   const [videoSplitDuration, setVideoSplitDuration] = useState(0);
   const [videoSplitSegments, setVideoSplitSegments] = useState(() => normalizeVideoSplitSegments([]));
   const [videoSplitDrafts, setVideoSplitDrafts] = useState(() => buildVideoSplitDrafts(normalizeVideoSplitSegments([])));
+  const [videoSplitOutputResolution, setVideoSplitOutputResolution] = useState(DEFAULT_VIDEO_SPLIT_OUTPUT_RESOLUTION);
   const [promptPolishLoading, setPromptPolishLoading] = useState(false);
   const [promptPolishError, setPromptPolishError] = useState("");
   const nodeRootRef = useRef(null);
@@ -3046,14 +3257,17 @@ const NodeComponent = ({
   const isTextInputNode = node.type === NODE_TYPES.TEXT_INPUT;
   const isCompactInput = isInput && !!node.data.compact;
   const isSimpleMediaInputNode = isInput && !isCompactInput;
+  const hideInlineAiResults = isVideoGen && node.data.mode === "img2video";
   const compactImages = isCompactInput ? (node.data.images || []) : EMPTY_LIST;
   const compactActiveImage = compactImages[compactActiveIndex] || compactImages[0] || "";
   const compactActiveIsVideo = isVideoContent(compactActiveImage);
   const hasCompactThreeViewResult = isCompactInput && !!String(node.data.compactThreeViewSourceImage || "").trim();
   const compactActionBusy = compactRemovePending || compactThreeViewPending || compactVideoUpscalePending || videoLineartPending;
   const simpleMediaImages = isSimpleMediaInputNode ? (node.data.images || []) : EMPTY_LIST;
-  const simpleMediaActiveVideo = simpleMediaActionIndex >= 0 ? simpleMediaImages[simpleMediaActionIndex] || "" : "";
-  const hasSimpleMediaVideoSelection = isSimpleMediaInputNode && simpleMediaActionIndex >= 0 && isVideoContent(simpleMediaActiveVideo);
+  const simpleMediaActiveItem = simpleMediaActionIndex >= 0 ? simpleMediaImages[simpleMediaActionIndex] || "" : "";
+  const simpleMediaActiveIsVideo = isVideoContent(simpleMediaActiveItem);
+  const hasSimpleMediaSelection = isSimpleMediaInputNode && simpleMediaActionIndex >= 0 && !!simpleMediaActiveItem;
+  const hasSimpleMediaVideoSelection = hasSimpleMediaSelection && simpleMediaActiveIsVideo;
 
   useEffect(() => {
     setCompactActiveIndex((prev) => {
@@ -3083,6 +3297,7 @@ const NodeComponent = ({
     setCompactActiveIndex(0);
     setSimpleMediaActionIndex(-1);
     setVideoSplitDuration(0);
+    setVideoSplitOutputResolution(DEFAULT_VIDEO_SPLIT_OUTPUT_RESOLUTION);
     const nextSegments = normalizeVideoSplitSegments([]);
     setVideoSplitSegments(nextSegments);
     setVideoSplitDrafts(buildVideoSplitDrafts(nextSegments));
@@ -3114,10 +3329,11 @@ const NodeComponent = ({
   useEffect(() => {
     if (!showSimpleVideoEditor) return;
     setVideoSplitDuration(0);
+    setVideoSplitOutputResolution(DEFAULT_VIDEO_SPLIT_OUTPUT_RESOLUTION);
     const nextSegments = normalizeVideoSplitSegments([]);
     setVideoSplitSegments(nextSegments);
     setVideoSplitDrafts(buildVideoSplitDrafts(nextSegments));
-  }, [showSimpleVideoEditor, simpleMediaActiveVideo]);
+  }, [showSimpleVideoEditor, simpleMediaActiveItem]);
 
   const handleCompactThreeViewClick = async () => {
     if (compactActionBusy) return;
@@ -3191,6 +3407,32 @@ const NodeComponent = ({
     if (videoLineartPending) return;
     setShowSimpleVideoEditor(false);
     await handleVideoLineartRun(simpleMediaActionIndex);
+  };
+
+  const handleSimpleImageThreeViewClick = async () => {
+    if (compactActionBusy || simpleMediaActionIndex < 0) return;
+    try {
+      setCompactThreeViewPending(true);
+      await onRunCompactThreeView?.(node.id, simpleMediaActionIndex);
+      setSimpleMediaActionIndex(-1);
+    } catch (error) {
+      console.error("[Workbench] simple_three_view_direct:error", error);
+    } finally {
+      setCompactThreeViewPending(false);
+    }
+  };
+
+  const handleSimpleImageRemoveClick = async () => {
+    if (compactActionBusy || simpleMediaActionIndex < 0) return;
+    try {
+      setCompactRemovePending(true);
+      await onRunCompactRemoveWatermark?.(node.id, simpleMediaActionIndex);
+      setSimpleMediaActionIndex(-1);
+    } catch (error) {
+      console.error("[Workbench] simple_remove_watermark_direct:error", error);
+    } finally {
+      setCompactRemovePending(false);
+    }
   };
 
   const handleSimpleVideoEditorClick = () => {
@@ -3287,7 +3529,9 @@ const NodeComponent = ({
     try {
       setVideoSplitPending(true);
       const normalized = commitVideoSplitDrafts();
-      await onRunVideoSplit?.(node.id, simpleMediaActionIndex, normalized);
+      await onRunVideoSplit?.(node.id, simpleMediaActionIndex, normalized, {
+        outputResolution: videoSplitOutputResolution,
+      });
       setShowSimpleVideoEditor(false);
     } catch (error) {
       console.error("[Workbench] video_split_direct:error", error);
@@ -3471,6 +3715,20 @@ const NodeComponent = ({
         </div>
       )}
 
+      {selected && isVideoGen && node.data.mode === "img2video" && (
+        <PropertyPanel
+          embedded
+          node={node}
+          updateData={updateData}
+          onClose={() => {}}
+          apiFetch={apiFetch}
+          onOpenPromptPolishPicker={onOpenPromptPolishPicker}
+          imageModelOptions={imageModelOptions}
+          videoModelOptions={videoModelOptions}
+          resolveModelParamsForId={resolveModelParamsForId}
+        />
+      )}
+
       {isTextInputNode && (
         <div className="absolute -top-5 left-0 cursor-grab select-none text-[11px] font-medium tracking-[0.08em] text-slate-500 active:cursor-grabbing">
           {title}
@@ -3488,7 +3746,7 @@ const NodeComponent = ({
 	                <button
 	                  type="button"
 	                  className="inline-flex h-8 w-8 items-center justify-center border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700"
-	                  onClick={() => onPreview?.(simpleMediaActiveVideo)}
+	                  onClick={() => onPreview?.(simpleMediaActiveItem)}
 	                  title="预览视频"
 	                  aria-label="预览视频"
 	                >
@@ -3558,7 +3816,7 @@ const NodeComponent = ({
 	                  <div className="border-b border-slate-200 bg-slate-50 p-4 md:border-b-0 md:border-r">
 	                    <div className="overflow-hidden border border-slate-200 bg-black">
 	                      <video
-	                        src={simpleMediaActiveVideo}
+	                        src={simpleMediaActiveItem}
 	                        controls
 	                        playsInline
 	                        className="block aspect-video w-full bg-black object-contain"
@@ -3631,14 +3889,28 @@ const NodeComponent = ({
 	                        </div>
 	                      ))}
 	                    </div>
-		                    <div className="mt-4 flex items-center justify-between gap-3 border-t border-slate-200 pt-4">
-		                      <div className="text-[10px] leading-5 text-slate-500">
-		                        支持多段导出。每段都会生成一个独立上传组件并排布到画布中。
-		                      </div>
+	                    <div className="mt-4 border border-slate-200 bg-slate-50 p-3">
+	                      <label className="text-[10px] text-slate-500">
+	                        <div className="mb-1">导出分辨率</div>
+	                        <select
+	                          value={videoSplitOutputResolution}
+	                          disabled={videoSplitPending}
+	                          className="h-8 w-full border border-slate-200 bg-white px-2 text-[11px] text-slate-700 outline-none disabled:cursor-wait disabled:opacity-60"
+	                          onChange={(e) => setVideoSplitOutputResolution(String(e.target.value || DEFAULT_VIDEO_SPLIT_OUTPUT_RESOLUTION).trim().toLowerCase())}
+	                        >
+	                          {VIDEO_SPLIT_OUTPUT_RESOLUTION_OPTIONS.map((option) => (
+	                            <option key={option} value={option}>
+	                              {option.toUpperCase()}
+	                            </option>
+	                          ))}
+	                        </select>
+	                      </label>
+	                    </div>
+		                    <div className="mt-4 flex justify-end border-t border-slate-200 pt-4">
 	                      <button
 	                        type="button"
 	                        disabled={videoSplitPending}
-	                        className="inline-flex h-9 items-center justify-center gap-1.5 border border-slate-200 bg-white px-4 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-65"
+	                        className="inline-flex h-9 min-w-[124px] items-center justify-center gap-1.5 border border-slate-200 bg-white px-5 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-65"
 	                        onClick={handleVideoSplitRun}
 	                      >
 	                        {videoSplitPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Scissors className="h-3.5 w-3.5" />}
@@ -3728,17 +4000,20 @@ const NodeComponent = ({
             )}
 
             {/* Results */}
-            {node.data.status === "success" && node.data.images && node.data.images.length > 0 ? (
+            {!hideInlineAiResults && node.data.status === "success" && node.data.images && node.data.images.length > 0 ? (
               <div className="grid grid-cols-2 gap-1.5">
                 {node.data.images.map((img, i) =>
                   renderArtifactThumb(img, i, { mode: node.data.mode, prompt: node.data.prompt, model: node.data.model })
                 )}
               </div>
             ) : (
+              !hideInlineAiResults &&
               !["loading", "error"].includes(node.data.status) && (
                 <div className="flex flex-col items-center justify-center rounded-[24px] border border-dashed border-slate-200 bg-slate-50 py-7 text-slate-500">
                   {isReady ? <Play className="mb-2 h-6 w-6 text-emerald-300/70" /> : <Icon className="mb-2 h-6 w-6 opacity-25" />}
-                  <span className="text-[10px] tracking-[0.03em]">{isReady ? "准备就绪" : "等待连接..."}</span>
+                  <span className="text-[10px] tracking-[0.03em]">
+                    {isReady ? "准备就绪" : "等待连接..."}
+                  </span>
                 </div>
               )
             )}
@@ -4002,14 +4277,17 @@ const NodeComponent = ({
 	                  const isActive = activeArtifact?.url === img;
 	                  const isVideoItem = isVideoContent(img);
 	                  const showVideoActions = isVideoItem && simpleMediaActionIndex === i;
+	                  const showImageActions = !isVideoItem && simpleMediaActionIndex === i;
 	                  const showVideoLineartOverlay = isVideoItem && videoLineartPending && simpleMediaActionIndex === i;
+	                  const showImageRemoveOverlay = !isVideoItem && compactRemovePending && simpleMediaActionIndex === i;
+	                  const showImageThreeViewOverlay = !isVideoItem && compactThreeViewPending && simpleMediaActionIndex === i;
 	                  return (
 	                    <div
 	                      key={i}
 	                      className={`group/img relative bg-white ${i > 0 ? "border-t border-slate-200" : ""} ${
                         isActive
                           ? "outline outline-1 outline-amber-300 outline-offset-[-1px]"
-                          : showVideoActions
+                          : showVideoActions || showImageActions
                           ? "outline outline-1 outline-slate-300 outline-offset-[-1px]"
                           : ""
 	                      }`}
@@ -4047,20 +4325,100 @@ const NodeComponent = ({
 	                          ) : null}
 	                        </>
 	                      ) : (
-                        <img
-                          src={img}
-                          className="block h-auto max-h-[420px] w-full cursor-pointer object-contain"
-                          onMouseDown={(e) => e.stopPropagation()}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onPreview?.(img);
-                          }}
-                          title="点击预览"
-                          alt=""
-                        />
+	                        <>
+                          <img
+                            src={img}
+                            className="block h-auto max-h-[420px] w-full cursor-pointer object-contain"
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSimpleMediaActionIndex((prev) => (prev === i ? -1 : i));
+                            }}
+                            title="点击显示操作"
+                            alt=""
+                          />
+                          {showImageRemoveOverlay ? (
+                            <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
+                              <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(2,6,23,0.18),rgba(2,6,23,0.56))] backdrop-blur-[2px]" />
+                              <div className="absolute inset-y-0 left-1/2 w-[44%] -translate-x-1/2 bg-[linear-gradient(90deg,rgba(255,255,255,0),rgba(255,255,255,0.18),rgba(125,211,252,0.14),rgba(255,255,255,0))] opacity-80 blur-xl animate-pulse" />
+                              <div className="absolute inset-x-0 top-[18%] h-px bg-[linear-gradient(90deg,rgba(34,211,238,0),rgba(34,211,238,0.7),rgba(34,211,238,0))] shadow-[0_0_18px_rgba(34,211,238,0.35)] animate-pulse" />
+                              <div className="absolute inset-0 flex items-center justify-center px-4">
+                                <div className="border border-slate-200 bg-white px-4 py-3 text-center text-slate-700 shadow-[0_16px_40px_rgba(15,23,42,0.12)]">
+                                  <div className="flex items-center justify-center gap-2">
+                                    <Loader2 className="h-4 w-4 animate-spin text-cyan-700" />
+                                    <span className="text-[12px] font-medium tracking-[0.04em] text-slate-800">正在去除水印</span>
+                                  </div>
+                                  <div className="mt-1 text-[10px] text-slate-600">请稍候，图片正在轻量修复中</div>
+                                </div>
+                              </div>
+                            </div>
+                          ) : null}
+                          {showImageThreeViewOverlay ? (
+                            <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
+                              <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(8,15,34,0.2),rgba(8,15,34,0.58))] backdrop-blur-[2px]" />
+                              <div className="absolute inset-y-0 left-1/2 w-[48%] -translate-x-1/2 bg-[linear-gradient(90deg,rgba(255,255,255,0),rgba(103,232,249,0.18),rgba(34,211,238,0.18),rgba(255,255,255,0))] opacity-85 blur-xl animate-pulse" />
+                              <div className="absolute inset-x-0 top-[20%] h-px bg-[linear-gradient(90deg,rgba(34,211,238,0),rgba(34,211,238,0.8),rgba(34,211,238,0))] shadow-[0_0_18px_rgba(34,211,238,0.32)] animate-pulse" />
+                              <div className="absolute inset-0 flex items-center justify-center px-4">
+                                <div className="border border-slate-200 bg-white px-4 py-3 text-center text-slate-700 shadow-[0_16px_40px_rgba(15,23,42,0.12)]">
+                                  <div className="flex items-center justify-center gap-2">
+                                    <Loader2 className="h-4 w-4 animate-spin text-cyan-700" />
+                                    <span className="text-[12px] font-medium tracking-[0.04em] text-slate-800">正在生成三视图</span>
+                                  </div>
+                                  <div className="mt-1 text-[10px] text-slate-600">请稍候，正在生成多视角结果</div>
+                                </div>
+                              </div>
+                            </div>
+                          ) : null}
+                          {showImageActions ? (
+                            <div
+                              className="absolute inset-x-0 bottom-0 z-[3] border-t border-slate-200 bg-white/96 p-2 backdrop-blur-sm"
+                              onMouseDown={(e) => e.stopPropagation()}
+                            >
+                              <div className="grid grid-cols-2 gap-2">
+                                <button
+                                  type="button"
+                                  disabled={compactActionBusy}
+                                  className="flex items-center justify-center gap-1.5 border border-cyan-200 bg-cyan-50 px-3 py-2 text-[11px] font-medium text-cyan-700 transition hover:border-cyan-300 hover:bg-cyan-100 disabled:cursor-wait disabled:opacity-65"
+                                  onClick={handleSimpleImageThreeViewClick}
+                                >
+                                  {compactThreeViewPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Layout className="h-3.5 w-3.5" />}
+                                  <span>三视图</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={compactActionBusy}
+                                  className="flex items-center justify-center gap-1.5 border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-700 disabled:cursor-wait disabled:opacity-65"
+                                  onClick={handleSimpleImageRemoveClick}
+                                >
+                                  {compactRemovePending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                                  <span>去水印</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  className="flex items-center justify-center gap-1.5 border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+                                  onClick={() => onPreview?.(img)}
+                                >
+                                  <Maximize className="h-3.5 w-3.5" />
+                                  <span>预览</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  className="flex items-center justify-center gap-1.5 border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
+                                  onClick={() => {
+                                    removeImage(i);
+                                    setSimpleMediaActionIndex(-1);
+                                  }}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                  <span>删除</span>
+                                </button>
+                              </div>
+                            </div>
+                          ) : null}
+	                        </>
                       )}
 
-                      {!isVideoItem && (
+                      {!isVideoItem && !showImageActions && (
                         <div className="absolute bottom-2 right-2 flex gap-1 opacity-0 transition-opacity group-hover/img:opacity-100">
                           <button
                             onMouseDown={(e) => e.stopPropagation()}
@@ -6007,7 +6365,7 @@ const handleNodeMouseDown = (e, nid) => {
   );
 
   const runVideoSplit = useCallback(
-    async (sourceNodeId, mediaIndex = 0, segments = []) => {
+    async (sourceNodeId, mediaIndex = 0, segments = [], options = {}) => {
       try {
         const sourceNode = nodesRef.current.find((node) => node.id === sourceNodeId);
         const sourceImages = Array.isArray(sourceNode?.data?.images) ? sourceNode.data.images : [];
@@ -6022,6 +6380,7 @@ const handleNodeMouseDown = (e, nid) => {
           {
             video: sourceVideo,
             segments: safeSegments,
+            outputResolution: String(options?.outputResolution || DEFAULT_VIDEO_SPLIT_OUTPUT_RESOLUTION).trim().toLowerCase(),
           },
           apiFetch,
         );
@@ -8092,20 +8451,25 @@ const handleNodeMouseDown = (e, nid) => {
 
         let inputImages = [];
         let sourceText = "";
+        const sourceNodeMediaGroups = [];
 
         sourceNodes.forEach((sn) => {
           const snImages = sn.data.images || [];
           const snUploads = sn.data.uploadedImages || [];
+          const mediaGroup = [...snImages, ...snUploads].filter(Boolean);
+          if (mediaGroup.length) sourceNodeMediaGroups.push(mediaGroup);
           inputImages.push(...snImages, ...snUploads);
           if (sn.data.text) sourceText += sn.data.text + " ";
         });
         sourceText = sourceText.trim();
 
+        const shouldAggregateMultiSourceImg2Video =
+          procNode.data.mode === "img2video" && sourceNodeMediaGroups.length > 1;
         const needsSingle =
           procNode.data.mode === "multi_image_generate" ||
           procNode.data.mode === "text2img" ||
           procNode.data.mode === "local_text2img";
-        const effectiveInputCount = needsSingle ? 1 : inputImages.length;
+        const effectiveInputCount = needsSingle || shouldAggregateMultiSourceImg2Video ? 1 : inputImages.length;
 
         if (effectiveInputCount === 0 && !needsSingle) {
           applyNodeUpdate(procNode.id, { status: "error", error: "溯源失败：未检测到输入图片（请确认上游节点已先产出 images，并且连线正确）" });
@@ -8163,7 +8527,7 @@ const handleNodeMouseDown = (e, nid) => {
                     const selectedRatio = String(procNode.data.templates?.aspect_ratio || "").trim();
                     const matchedTaskTypeId = findAIChatParamValueId(paramList, ["task", "任务", "类型"], selectedTaskType);
                     const matchedSizeId = findAIChatParamValueId(paramList, ["size", "尺寸"], selectedSize);
-                    const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比"], selectedRatio);
+                    const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比", "画幅", "aspect"], selectedRatio);
                     if (selectedTaskType) {
                       if (!matchedTaskTypeId) throw new Error(`未匹配到task参数ID: ${selectedTaskType}`);
                       resolvedParamPayload.ai_image_param_task_type_id = matchedTaskTypeId;
@@ -8317,11 +8681,16 @@ const handleNodeMouseDown = (e, nid) => {
                 const rawDuration = procNode.data.templates?.duration || "5";
                 const durationInt = parseInt(String(rawDuration).replace(/[^0-9]/g, "")) || 5;
                 const isCameraFixed = procNode.data.templates?.camera?.includes("固定") || false;
+                const aggregatedPrimaryImage = shouldAggregateMultiSourceImg2Video
+                  ? sourceNodeMediaGroups[0]?.[0] || ""
+                  : "";
+                const aggregatedReferenceImages = shouldAggregateMultiSourceImg2Video
+                  ? sourceNodeMediaGroups.slice(1).flat().filter(Boolean)
+                  : [];
 
                 const payload = {
                   model: procNode.data.model || defaultVideoModelId,
-                  image: inputImages[i],
-                  last_frame_image: procNode.data.refImage || null,
+                  image: shouldAggregateMultiSourceImg2Video ? aggregatedPrimaryImage : inputImages[i],
                   prompt: buildCanvasNodePrompt(procNode, sourceText) || "natural motion",
                   duration: durationInt,
                   fps: 24,
@@ -8347,6 +8716,7 @@ const handleNodeMouseDown = (e, nid) => {
                     status: "loading",
                     message: `POST /api/ai_chat_image_via_curl part=${resolveWorkbenchAIChatPartEnum({ mode: "img2video" })}`,
                   });
+                  let effectiveLastFrameImage = null;
                   try {
                     const modelId = String(payload.model || "").trim();
                     if (!modelId) throw new Error("缺少图生视频模型ID");
@@ -8356,10 +8726,17 @@ const handleNodeMouseDown = (e, nid) => {
                     const selectedRatio = String(procNode.data.templates?.ratio || "").trim();
                     const selectedDuration = String(durationInt || "").trim();
                     const selectedImageType = String(procNode.data.templates?.imageType || "").trim();
-                    const matchedResolutionId = findAIChatParamValueId(paramList, ["resolution", "分辨率"], selectedResolution);
-                    const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比"], selectedRatio);
-                    const matchedDurationId = findAIChatParamValueId(paramList, ["duration", "时长"], selectedDuration);
-                    const matchedImageTypeId = findAIChatParamValueId(paramList, ["imagetype", "模式"], selectedImageType);
+                    const imageTypeOptions = listAIChatParamChoiceOptions(
+                      paramList,
+                      ["imagetype", "image_type", "模式", "参考模式", "参考类型"]
+                    );
+                    effectiveLastFrameImage = isFirstLastFrameReferenceSelection(selectedImageType, imageTypeOptions)
+                      ? procNode.data.refImage || null
+                      : null;
+                    const matchedResolutionId = findAIChatParamValueId(paramList, ["resolution", "分辨率", "清晰度"], selectedResolution);
+                    const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比", "画幅", "aspect"], selectedRatio);
+                    const matchedDurationId = findAIChatParamValueId(paramList, ["duration", "时长", "秒数"], selectedDuration);
+                    const matchedImageTypeId = findAIChatParamValueId(paramList, ["imagetype", "image_type", "模式", "参考模式", "参考类型"], selectedImageType);
                     if (selectedResolution && !matchedResolutionId) {
                       throw new Error(`未匹配到resolution参数ID: ${selectedResolution}`);
                     }
@@ -8384,11 +8761,12 @@ const handleNodeMouseDown = (e, nid) => {
                       resolvedParamPayload.ai_video_param_duration_id = matchedDurationId;
                     }
                     if (matchedImageTypeId) {
-                      resolvedParamPayload.ai_video_param_imagetype_id = matchedImageTypeId;
+                      resolvedParamPayload.ai_video_param_image_type_id = matchedImageTypeId;
                     }
                     const authorizationInfo = resolveMemberAuthorizationInfo();
-                    const imagesPayload = [payload.image, payload.last_frame_image].filter(Boolean);
+                    const imagesPayload = [payload.image, ...aggregatedReferenceImages, effectiveLastFrameImage].filter(Boolean);
                     const proxyPayload = {
+                      ...(agentDevMode ? { endpoint: "http://192.168.20.12:16313/ai/aiChat" } : {}),
                       authorization: authorizationInfo?.value || "",
                       history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
                       module_enum: WORKBENCH_AI_CHAT_MODULE_ENUM,
@@ -8396,6 +8774,8 @@ const handleNodeMouseDown = (e, nid) => {
                       ai_chat_session_id: aiChatSessionIdRef.current || "",
                       ai_chat_model_id: modelId,
                       message: payload.prompt || "natural motion",
+                      async: "0",
+                      timeout_seconds: 600,
                       images: imagesPayload,
                       ...resolvedParamPayload,
                     };
@@ -8416,8 +8796,8 @@ const handleNodeMouseDown = (e, nid) => {
                           ratio_id: resolvedParamPayload.ai_video_param_ratio_id || "",
                           duration: selectedDuration || "-",
                           duration_id: resolvedParamPayload.ai_video_param_duration_id || "",
-                          imagetype: selectedImageType || "-",
-                          imagetype_id: resolvedParamPayload.ai_video_param_imagetype_id || "",
+                          image_type: selectedImageType || "-",
+                          image_type_id: resolvedParamPayload.ai_video_param_image_type_id || "",
                         },
                       },
                       authorizationSource: authorizationInfo?.source || "none",
@@ -8470,11 +8850,17 @@ const handleNodeMouseDown = (e, nid) => {
                       status: "loading",
                       message: "img2video 代理失败，回退 /api/img2video",
                     });
+                    if (shouldAggregateMultiSourceImg2Video && aggregatedReferenceImages.length) {
+                      throw new Error(`img2video 代理失败: ${proxyErrorMsg}; 多输入节点聚合模式不支持回退 /api/img2video`);
+                    }
                     try {
                       const resp = await apiFetch(`/api/img2video`, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(payload),
+                        body: JSON.stringify({
+                          ...payload,
+                          last_frame_image: effectiveLastFrameImage,
+                        }),
                       });
                       const data = await resp.json();
                       if (!resp.ok) throw new Error(extractApiError(data));
@@ -8503,7 +8889,7 @@ const handleNodeMouseDown = (e, nid) => {
                   const selectedRatio = String(procNode.data.templates?.aspect_ratio || "").trim();
                   const matchedTaskTypeId = findAIChatParamValueId(paramList, ["task", "任务", "类型"], selectedTaskType);
                   const matchedSizeId = findAIChatParamValueId(paramList, ["size", "尺寸"], selectedSize);
-                  const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比"], selectedRatio);
+                  const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比", "画幅", "aspect"], selectedRatio);
                   if (selectedTaskType) {
                     if (!matchedTaskTypeId) throw new Error(`未匹配到task参数ID: ${selectedTaskType}`);
                     resolvedParamPayload.ai_image_param_task_type_id = matchedTaskTypeId;
@@ -8628,7 +9014,7 @@ const handleNodeMouseDown = (e, nid) => {
                 try {
                   const authorizationInfo = resolveMemberAuthorizationInfo();
                   const proxyPayload = {
-                    ...(agentDevMode ? { endpoint: "http://172.16.20.19:16313/ai/aiChat" } : {}),
+                    ...(agentDevMode ? { endpoint: "http://192.168.20.12:16313/ai/aiChat" } : {}),
                     authorization: authorizationInfo?.value || "",
                     module_enum: WORKBENCH_AI_CHAT_MODULE_ENUM,
                     part_enum: String(resolveWorkbenchAIChatPartEnum({ mode: "video_upscale" })),
@@ -8779,7 +9165,7 @@ const handleNodeMouseDown = (e, nid) => {
       const matchedSizeId =
         findAIChatParamValueId(paramList, ["size", "尺寸"], THREE_VIEW_DEFAULT_TEMPLATES.size) ||
         findAIChatParamValueId(paramList, ["size", "尺寸"], "1024x1024");
-      const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比"], THREE_VIEW_DEFAULT_TEMPLATES.aspect_ratio);
+      const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比", "画幅", "aspect"], THREE_VIEW_DEFAULT_TEMPLATES.aspect_ratio);
 
       if (!matchedSizeId) {
         throw new Error(`未匹配到size参数ID: ${THREE_VIEW_DEFAULT_TEMPLATES.size}`);
@@ -10093,15 +10479,18 @@ const handleNodeMouseDown = (e, nid) => {
 	            ) : null}
 
 	            {nodes.map((n) => (
-              <NodeComponent
+	              <NodeComponent
                 key={n.id}
                 node={n}
                 selected={selectedNodeIds.has(n.id)}
                 onMouseDown={(e) => handleNodeMouseDown(e, n.id)}
                 updateData={updateNodeData}
-                apiFetch={apiFetch}
-                onOpenPromptPolishPicker={openPromptPolishPicker}
-                onDelete={() => deleteNode(n.id)}
+	                apiFetch={apiFetch}
+	                onOpenPromptPolishPicker={openPromptPolishPicker}
+	                imageModelOptions={imageModelOptions}
+	                videoModelOptions={videoModelOptions}
+	                resolveModelParamsForId={resolveModelParamsForId}
+	                onDelete={() => deleteNode(n.id)}
                 onConnectStart={(e) => {
                   e.stopPropagation();
                   pushHistory();
@@ -10635,10 +11024,13 @@ const handleNodeMouseDown = (e, nid) => {
         </div>
 
         {/* ✅ 属性栏（保留并确保存在） */}
-        <PropertyPanel
-          node={activeNodeId ? nodes.find((n) => n.id === activeNodeId) : null}
-          updateData={updateNodeData}
-          onClose={() => setActiveNodeId(null)}
+	        <PropertyPanel
+	          node={(() => {
+	            const activeNode = activeNodeId ? nodes.find((n) => n.id === activeNodeId) : null;
+	            return activeNode?.type === NODE_TYPES.VIDEO_GEN && activeNode?.data?.mode === "img2video" ? null : activeNode;
+	          })()}
+	          updateData={updateNodeData}
+	          onClose={() => setActiveNodeId(null)}
           apiFetch={apiFetch}
           onOpenPromptPolishPicker={openPromptPolishPicker}
           imageModelOptions={imageModelOptions}
