@@ -595,6 +595,14 @@ const isVideoFileLike = (file) => {
 
 const isMediaFileLike = (file) => isImageFileLike(file) || isVideoFileLike(file);
 
+const isEditableElement = (element) => {
+  if (!(element instanceof HTMLElement)) return false;
+  if (element.isContentEditable) return true;
+  const tagName = String(element.tagName || "").toLowerCase();
+  if (["input", "textarea", "select"].includes(tagName)) return true;
+  return Boolean(element.closest("input, textarea, select, [contenteditable='true'], [contenteditable=''], [role='textbox']"));
+};
+
 const getMediaUploadNodePosition = (point) => ({
   x: point.x - MEDIA_UPLOAD_NODE_WIDTH / 2,
   y: point.y - MEDIA_UPLOAD_NODE_DROP_OFFSET_Y,
@@ -1530,8 +1538,8 @@ const TOOL_CARDS = {
   },
   rmbg: {
     id: "rmbg",
-    name: "背景移除 (RMBG)",
-    short: "背景移除",
+    name: "抠图 (RMBG)",
+    short: "抠图",
     icon: Scissors,
     desc: "自动去除背景，输出透明图",
     scenario: "电商抠图/素材准备",
@@ -2669,7 +2677,7 @@ const PropertyPanel = ({
                   node.data.mode === "relight"
                     ? "例如: 增加暖色调氛围..."
                     : node.data.mode === "rmbg"
-                    ? "背景移除无需提示词"
+                    ? "抠图无需提示词"
                     : "输入额外指令..."
                 }
                 value={promptValue}
@@ -3143,6 +3151,7 @@ const NodeComponent = ({
   onSelectArtifact,
   activeArtifact,
   onIterateImg2Img,
+  onRunCompactRmbg,
   onRunCompactRemoveWatermark,
   onRunCompactThreeView,
   onRunCompactVideoUpscale,
@@ -3155,6 +3164,7 @@ const NodeComponent = ({
   const [showCompactInputActions, setShowCompactInputActions] = useState(false);
   const [showCompactVideoUpscaleOptions, setShowCompactVideoUpscaleOptions] = useState(false);
   const [showSimpleVideoEditor, setShowSimpleVideoEditor] = useState(false);
+  const [compactRmbgPending, setCompactRmbgPending] = useState(false);
   const [compactRemovePending, setCompactRemovePending] = useState(false);
   const [compactThreeViewPending, setCompactThreeViewPending] = useState(false);
   const [compactVideoUpscalePending, setCompactVideoUpscalePending] = useState(false);
@@ -3262,7 +3272,7 @@ const NodeComponent = ({
   const compactActiveImage = compactImages[compactActiveIndex] || compactImages[0] || "";
   const compactActiveIsVideo = isVideoContent(compactActiveImage);
   const hasCompactThreeViewResult = isCompactInput && !!String(node.data.compactThreeViewSourceImage || "").trim();
-  const compactActionBusy = compactRemovePending || compactThreeViewPending || compactVideoUpscalePending || videoLineartPending;
+  const compactActionBusy = compactRmbgPending || compactRemovePending || compactThreeViewPending || compactVideoUpscalePending || videoLineartPending;
   const simpleMediaImages = isSimpleMediaInputNode ? (node.data.images || []) : EMPTY_LIST;
   const simpleMediaActiveItem = simpleMediaActionIndex >= 0 ? simpleMediaImages[simpleMediaActionIndex] || "" : "";
   const simpleMediaActiveIsVideo = isVideoContent(simpleMediaActiveItem);
@@ -3348,6 +3358,19 @@ const NodeComponent = ({
     }
   };
 
+  const handleCompactRmbgClick = async () => {
+    if (compactActionBusy) return;
+    try {
+      setCompactRmbgPending(true);
+      await onRunCompactRmbg?.(node.id, compactActiveIndex);
+      setShowCompactInputActions(false);
+    } catch (error) {
+      console.error("[Workbench] rmbg_direct:error", error);
+    } finally {
+      setCompactRmbgPending(false);
+    }
+  };
+
   const handleCompactRemoveClick = async () => {
     if (compactActionBusy) return;
     try {
@@ -3419,6 +3442,19 @@ const NodeComponent = ({
       console.error("[Workbench] simple_three_view_direct:error", error);
     } finally {
       setCompactThreeViewPending(false);
+    }
+  };
+
+  const handleSimpleImageRmbgClick = async () => {
+    if (compactActionBusy || simpleMediaActionIndex < 0) return;
+    try {
+      setCompactRmbgPending(true);
+      await onRunCompactRmbg?.(node.id, simpleMediaActionIndex);
+      setSimpleMediaActionIndex(-1);
+    } catch (error) {
+      console.error("[Workbench] simple_rmbg_direct:error", error);
+    } finally {
+      setCompactRmbgPending(false);
     }
   };
 
@@ -3737,52 +3773,103 @@ const NodeComponent = ({
 
 	      {isSimpleMediaInputNode && (
 	        <>
-	          {hasSimpleMediaVideoSelection ? (
+	          {hasSimpleMediaSelection ? (
 	            <div
 	              className="absolute bottom-full left-0 z-30 mb-3 w-max min-w-[252px] max-w-[calc(100vw-48px)] border border-slate-200 bg-white p-2 shadow-[0_22px_54px_rgba(15,23,42,0.12)]"
 	              onMouseDown={(e) => e.stopPropagation()}
 	            >
-	              <div className="flex gap-2">
-	                <button
-	                  type="button"
-	                  className="inline-flex h-8 w-8 items-center justify-center border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700"
-	                  onClick={() => onPreview?.(simpleMediaActiveItem)}
-	                  title="预览视频"
-	                  aria-label="预览视频"
-	                >
-	                  <Play className="h-3.5 w-3.5" />
-	                </button>
-	                <button
-	                  type="button"
-	                  disabled={videoSplitPending}
-	                  className="flex min-w-[108px] items-center justify-center gap-1.5 border border-slate-200 bg-white px-4 py-2 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-65"
-	                  onClick={handleSimpleVideoEditorClick}
-	                >
-	                  <Scissors className="h-3.5 w-3.5" />
-	                  <span>视频编辑</span>
-	                </button>
-	                <button
-	                  type="button"
-	                  disabled={videoLineartPending || videoSplitPending}
-	                  className="flex min-w-[108px] items-center justify-center gap-1.5 border border-slate-200 bg-white px-4 py-2 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-65"
-	                  onClick={handleSimpleVideoLineartClick}
-	                >
-	                  <Scan className="h-3.5 w-3.5" />
-	                  <span>转线稿</span>
-	                </button>
-	                <button
-	                  type="button"
-	                  className="inline-flex h-8 w-8 items-center justify-center border border-slate-200 bg-white text-slate-500 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
-	                  onClick={() => {
-	                    removeImage(simpleMediaActionIndex);
-	                    setSimpleMediaActionIndex(-1);
-	                  }}
-	                  title="删除素材"
-	                  aria-label="删除素材"
-	                >
-	                  <Trash2 className="h-3.5 w-3.5" />
-	                </button>
-	              </div>
+	              {hasSimpleMediaVideoSelection ? (
+	                <div className="flex gap-2">
+	                  <button
+	                    type="button"
+	                    className="inline-flex h-8 w-8 items-center justify-center border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700"
+	                    onClick={() => onPreview?.(simpleMediaActiveItem)}
+	                    title="预览视频"
+	                    aria-label="预览视频"
+	                  >
+	                    <Play className="h-3.5 w-3.5" />
+	                  </button>
+	                  <button
+	                    type="button"
+	                    disabled={videoSplitPending}
+	                    className="flex min-w-[108px] items-center justify-center gap-1.5 border border-slate-200 bg-white px-4 py-2 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-65"
+	                    onClick={handleSimpleVideoEditorClick}
+	                  >
+	                    <Scissors className="h-3.5 w-3.5" />
+	                    <span>视频编辑</span>
+	                  </button>
+	                  <button
+	                    type="button"
+	                    disabled={videoLineartPending || videoSplitPending}
+	                    className="flex min-w-[108px] items-center justify-center gap-1.5 border border-slate-200 bg-white px-4 py-2 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-65"
+	                    onClick={handleSimpleVideoLineartClick}
+	                  >
+	                    <Scan className="h-3.5 w-3.5" />
+	                    <span>转线稿</span>
+	                  </button>
+	                  <button
+	                    type="button"
+	                    className="inline-flex h-8 w-8 items-center justify-center border border-slate-200 bg-white text-slate-500 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
+	                    onClick={() => {
+	                      removeImage(simpleMediaActionIndex);
+	                      setSimpleMediaActionIndex(-1);
+	                    }}
+	                    title="删除素材"
+	                    aria-label="删除素材"
+	                  >
+	                    <Trash2 className="h-3.5 w-3.5" />
+	                  </button>
+	                </div>
+	              ) : (
+	                <div className="grid grid-cols-2 gap-2">
+	                  <button
+	                    type="button"
+	                    disabled={compactActionBusy}
+	                    className="flex items-center justify-center gap-1.5 border border-cyan-200 bg-cyan-50 px-3 py-2 text-[11px] font-medium text-cyan-700 transition hover:border-cyan-300 hover:bg-cyan-100 disabled:cursor-wait disabled:opacity-65"
+	                    onClick={handleSimpleImageThreeViewClick}
+	                  >
+	                    {compactThreeViewPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Layout className="h-3.5 w-3.5" />}
+	                    <span>三视图</span>
+	                  </button>
+	                  <button
+	                    type="button"
+	                    disabled={compactActionBusy}
+	                    className="flex items-center justify-center gap-1.5 border border-emerald-200 bg-emerald-50 px-3 py-2 text-[11px] font-medium text-emerald-700 transition hover:border-emerald-300 hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-65"
+	                    onClick={handleSimpleImageRmbgClick}
+	                  >
+	                    {compactRmbgPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Scissors className="h-3.5 w-3.5" />}
+	                    <span>抠图</span>
+	                  </button>
+	                  <button
+	                    type="button"
+	                    disabled={compactActionBusy}
+	                    className="flex items-center justify-center gap-1.5 border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-700 disabled:cursor-wait disabled:opacity-65"
+	                    onClick={handleSimpleImageRemoveClick}
+	                  >
+	                    {compactRemovePending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+	                    <span>去水印</span>
+	                  </button>
+	                  <button
+	                    type="button"
+	                    className="flex items-center justify-center gap-1.5 border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+	                    onClick={() => onPreview?.(simpleMediaActiveItem)}
+	                  >
+	                    <Maximize className="h-3.5 w-3.5" />
+	                    <span>预览</span>
+	                  </button>
+	                  <button
+	                    type="button"
+	                    className="flex items-center justify-center gap-1.5 border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
+	                    onClick={() => {
+	                      removeImage(simpleMediaActionIndex);
+	                      setSimpleMediaActionIndex(-1);
+	                    }}
+	                  >
+	                    <Trash2 className="h-3.5 w-3.5" />
+	                    <span>删除</span>
+	                  </button>
+	                </div>
+	              )}
 	            </div>
 	          ) : null}
 	          {showSimpleVideoEditor && hasSimpleMediaVideoSelection ? (
@@ -4090,6 +4177,22 @@ const NodeComponent = ({
                       />
                     )
                   ) : null}
+                  {compactRmbgPending ? (
+                    <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
+                      <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(8,15,34,0.2),rgba(8,15,34,0.6))] backdrop-blur-[2px]" />
+                      <div className="absolute inset-y-0 left-1/2 w-[46%] -translate-x-1/2 bg-[linear-gradient(90deg,rgba(255,255,255,0),rgba(34,197,94,0.16),rgba(16,185,129,0.2),rgba(255,255,255,0))] opacity-85 blur-xl animate-pulse" />
+                      <div className="absolute inset-x-0 top-[20%] h-px bg-[linear-gradient(90deg,rgba(16,185,129,0),rgba(16,185,129,0.8),rgba(16,185,129,0))] shadow-[0_0_18px_rgba(16,185,129,0.28)] animate-pulse" />
+                      <div className="absolute inset-0 flex items-center justify-center">
+                        <div className="rounded-[20px] border border-slate-200 bg-white px-4 py-3 text-center text-slate-700 shadow-[0_16px_40px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+                          <div className="flex items-center justify-center gap-2">
+                            <Loader2 className="h-4 w-4 animate-spin text-emerald-600" />
+                            <span className="text-[12px] font-medium tracking-[0.04em] text-slate-800">正在抠图</span>
+                          </div>
+                          <div className="mt-1 text-[10px] text-slate-600">请稍候，正在移除背景并保留主体</div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
                   {compactRemovePending ? (
                     <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
                       <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(2,6,23,0.18),rgba(2,6,23,0.56))] backdrop-blur-[2px]" />
@@ -4157,7 +4260,7 @@ const NodeComponent = ({
                 ) : null}
               </div>
 
-              {compactActiveImage && compactActiveIsVideo ? (
+              {compactActiveImage ? (
 	                <div
 	                  className={`nodrag absolute bottom-full left-0 z-30 mb-3 w-max min-w-[252px] max-w-[calc(100vw-48px)] border border-slate-200 bg-white p-2 shadow-[0_22px_54px_rgba(15,23,42,0.12)] transition-all duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${
 	                    showCompactInputActions
@@ -4166,72 +4269,74 @@ const NodeComponent = ({
                   }`}
                   onMouseDown={(e) => e.stopPropagation()}
                 >
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      disabled={compactActionBusy}
-                      className="flex flex-1 items-center justify-center gap-1.5 border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-65"
-                      onClick={handleCompactVideoLineartClick}
-                    >
-                      <Scan className="h-3.5 w-3.5" />
-                      <span>转线稿</span>
-                    </button>
-                    <button
-                      type="button"
-                      disabled={compactActionBusy}
-                      className="flex flex-1 items-center justify-center gap-1.5 border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] font-medium text-rose-700 transition hover:border-rose-300 hover:bg-rose-100 disabled:cursor-wait disabled:opacity-65"
-                      onClick={handleCompactVideoUpscaleClick}
-                    >
-                      <TrendingUp className="h-3.5 w-3.5" />
-                      <span>视频超清</span>
-                    </button>
-                  </div>
-	                  {showCompactVideoUpscaleOptions ? (
-                    <div className="mt-2 grid grid-cols-2 gap-2 border border-rose-100 bg-rose-50/60 p-2">
-                      {VIDEO_HD_TEMPLATE_OPTIONS.map((item) => (
+                  {compactActiveIsVideo ? (
+                    <>
+                      <div className="flex gap-2">
                         <button
-                          key={item.value}
                           type="button"
                           disabled={compactActionBusy}
-                          className="border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-wait disabled:opacity-65"
-                          onClick={() => handleCompactVideoUpscaleOptionClick(item.value)}
+                          className="flex flex-1 items-center justify-center gap-1.5 border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-65"
+                          onClick={handleCompactVideoLineartClick}
                         >
-                          {item.label}
+                          <Scan className="h-3.5 w-3.5" />
+                          <span>转线稿</span>
                         </button>
-                      ))}
+                        <button
+                          type="button"
+                          disabled={compactActionBusy}
+                          className="flex flex-1 items-center justify-center gap-1.5 border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] font-medium text-rose-700 transition hover:border-rose-300 hover:bg-rose-100 disabled:cursor-wait disabled:opacity-65"
+                          onClick={handleCompactVideoUpscaleClick}
+                        >
+                          <TrendingUp className="h-3.5 w-3.5" />
+                          <span>视频超清</span>
+                        </button>
+                      </div>
+	                    {showCompactVideoUpscaleOptions ? (
+                        <div className="mt-2 grid grid-cols-2 gap-2 border border-rose-100 bg-rose-50/60 p-2">
+                          {VIDEO_HD_TEMPLATE_OPTIONS.map((item) => (
+                            <button
+                              key={item.value}
+                              type="button"
+                              disabled={compactActionBusy}
+                              className="border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-wait disabled:opacity-65"
+                              onClick={() => handleCompactVideoUpscaleOptionClick(item.value)}
+                            >
+                              {item.label}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </>
+                  ) : (
+                    <div className="grid grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        disabled={compactActionBusy}
+                        className="flex items-center justify-center gap-1.5 rounded-full border border-cyan-200 bg-cyan-50 px-4 py-2 text-[11px] font-medium text-cyan-700 shadow-[0_14px_28px_rgba(34,211,238,0.08)] backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-100 disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65 disabled:brightness-100"
+                        onClick={handleCompactThreeViewClick}
+                      >
+                        {compactThreeViewPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Layout className="h-3.5 w-3.5" />}
+                        {compactThreeViewPending ? "生成中..." : hasCompactThreeViewResult ? "重试三视图" : "三视图"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={compactActionBusy}
+                        className="flex items-center justify-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-4 py-2 text-[11px] font-medium text-emerald-700 shadow-[0_14px_28px_rgba(16,185,129,0.08)] backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-emerald-300 hover:bg-emerald-100 disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65 disabled:brightness-100"
+                        onClick={handleCompactRmbgClick}
+                      >
+                        {compactRmbgPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Scissors className="h-3.5 w-3.5" />}
+                        抠图
+                      </button>
+                      <button
+                        type="button"
+                        disabled={compactActionBusy}
+                        className="flex items-center justify-center gap-1.5 rounded-full border border-slate-200 bg-white px-4 py-2 text-[11px] font-medium text-slate-700 shadow-[0_14px_28px_rgba(15,23,42,0.08)] backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-700 disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65 disabled:brightness-100"
+                        onClick={handleCompactRemoveClick}
+                      >
+                        {compactRemovePending ? "处理中..." : "去水印"}
+                      </button>
                     </div>
-                  ) : null}
-                </div>
-              ) : null}
-
-              {compactActiveImage && !compactActiveIsVideo ? (
-                <div
-                  className={`nodrag absolute left-full top-1/2 z-30 ml-3 -translate-y-1/2 rounded-[22px] border border-slate-200 bg-white p-2 shadow-[0_22px_54px_rgba(15,23,42,0.12)] backdrop-blur-xl transition-all duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${
-                    showCompactInputActions
-                      ? "pointer-events-auto translate-x-0 scale-100 opacity-100"
-                      : "pointer-events-none -translate-x-3 scale-95 opacity-0"
-                  }`}
-                  onMouseDown={(e) => e.stopPropagation()}
-                >
-                  <>
-                    <button
-                      type="button"
-                      disabled={compactRemovePending || compactThreeViewPending || compactVideoUpscalePending}
-                      className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-full border border-cyan-200 bg-cyan-50 px-4 py-2 text-[11px] font-medium text-cyan-700 shadow-[0_14px_28px_rgba(34,211,238,0.08)] backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-100 disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65 disabled:brightness-100"
-                      onClick={handleCompactThreeViewClick}
-                    >
-                      {compactThreeViewPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Layout className="h-3.5 w-3.5" />}
-                      {compactThreeViewPending ? "生成中..." : hasCompactThreeViewResult ? "重试三视图" : "三视图"}
-                    </button>
-                    <button
-                      type="button"
-                      disabled={compactRemovePending || compactThreeViewPending || compactVideoUpscalePending}
-                      className="rounded-full border border-slate-200 bg-white px-4 py-2 text-[11px] font-medium text-slate-700 shadow-[0_14px_28px_rgba(15,23,42,0.08)] backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-700 disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65 disabled:brightness-100"
-                      onClick={handleCompactRemoveClick}
-                    >
-                      {compactRemovePending ? "处理中..." : "去水印"}
-                    </button>
-                  </>
+                  )}
                 </div>
               ) : null}
             </div>
@@ -4279,6 +4384,7 @@ const NodeComponent = ({
 	                  const showVideoActions = isVideoItem && simpleMediaActionIndex === i;
 	                  const showImageActions = !isVideoItem && simpleMediaActionIndex === i;
 	                  const showVideoLineartOverlay = isVideoItem && videoLineartPending && simpleMediaActionIndex === i;
+	                  const showImageRmbgOverlay = !isVideoItem && compactRmbgPending && simpleMediaActionIndex === i;
 	                  const showImageRemoveOverlay = !isVideoItem && compactRemovePending && simpleMediaActionIndex === i;
 	                  const showImageThreeViewOverlay = !isVideoItem && compactThreeViewPending && simpleMediaActionIndex === i;
 	                  return (
@@ -4337,6 +4443,22 @@ const NodeComponent = ({
                             title="点击显示操作"
                             alt=""
                           />
+                          {showImageRmbgOverlay ? (
+                            <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
+                              <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(8,15,34,0.2),rgba(8,15,34,0.6))] backdrop-blur-[2px]" />
+                              <div className="absolute inset-y-0 left-1/2 w-[46%] -translate-x-1/2 bg-[linear-gradient(90deg,rgba(255,255,255,0),rgba(34,197,94,0.16),rgba(16,185,129,0.2),rgba(255,255,255,0))] opacity-85 blur-xl animate-pulse" />
+                              <div className="absolute inset-x-0 top-[20%] h-px bg-[linear-gradient(90deg,rgba(16,185,129,0),rgba(16,185,129,0.8),rgba(16,185,129,0))] shadow-[0_0_18px_rgba(16,185,129,0.28)] animate-pulse" />
+                              <div className="absolute inset-0 flex items-center justify-center px-4">
+                                <div className="border border-slate-200 bg-white px-4 py-3 text-center text-slate-700 shadow-[0_16px_40px_rgba(15,23,42,0.12)]">
+                                  <div className="flex items-center justify-center gap-2">
+                                    <Loader2 className="h-4 w-4 animate-spin text-emerald-600" />
+                                    <span className="text-[12px] font-medium tracking-[0.04em] text-slate-800">正在抠图</span>
+                                  </div>
+                                  <div className="mt-1 text-[10px] text-slate-600">请稍候，正在移除背景并保留主体</div>
+                                </div>
+                              </div>
+                            </div>
+                          ) : null}
                           {showImageRemoveOverlay ? (
                             <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
                               <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(2,6,23,0.18),rgba(2,6,23,0.56))] backdrop-blur-[2px]" />
@@ -4366,52 +4488,6 @@ const NodeComponent = ({
                                   </div>
                                   <div className="mt-1 text-[10px] text-slate-600">请稍候，正在生成多视角结果</div>
                                 </div>
-                              </div>
-                            </div>
-                          ) : null}
-                          {showImageActions ? (
-                            <div
-                              className="absolute inset-x-0 bottom-0 z-[3] border-t border-slate-200 bg-white/96 p-2 backdrop-blur-sm"
-                              onMouseDown={(e) => e.stopPropagation()}
-                            >
-                              <div className="grid grid-cols-2 gap-2">
-                                <button
-                                  type="button"
-                                  disabled={compactActionBusy}
-                                  className="flex items-center justify-center gap-1.5 border border-cyan-200 bg-cyan-50 px-3 py-2 text-[11px] font-medium text-cyan-700 transition hover:border-cyan-300 hover:bg-cyan-100 disabled:cursor-wait disabled:opacity-65"
-                                  onClick={handleSimpleImageThreeViewClick}
-                                >
-                                  {compactThreeViewPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Layout className="h-3.5 w-3.5" />}
-                                  <span>三视图</span>
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={compactActionBusy}
-                                  className="flex items-center justify-center gap-1.5 border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-700 disabled:cursor-wait disabled:opacity-65"
-                                  onClick={handleSimpleImageRemoveClick}
-                                >
-                                  {compactRemovePending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-                                  <span>去水印</span>
-                                </button>
-                                <button
-                                  type="button"
-                                  className="flex items-center justify-center gap-1.5 border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
-                                  onClick={() => onPreview?.(img)}
-                                >
-                                  <Maximize className="h-3.5 w-3.5" />
-                                  <span>预览</span>
-                                </button>
-                                <button
-                                  type="button"
-                                  className="flex items-center justify-center gap-1.5 border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
-                                  onClick={() => {
-                                    removeImage(i);
-                                    setSimpleMediaActionIndex(-1);
-                                  }}
-                                >
-                                  <Trash2 className="h-3.5 w-3.5" />
-                                  <span>删除</span>
-                                </button>
                               </div>
                             </div>
                           ) : null}
@@ -5226,6 +5302,7 @@ const Workbench = () => {
 
   const canvasRef = useRef(null);
   const canvasDragDepthRef = useRef(0);
+  const canvasHoverClientRef = useRef(null);
   const nodesRef = useRef(nodes);
   const connectionsRef = useRef(connections);
 
@@ -5719,6 +5796,9 @@ const handleNodeMouseDown = (e, nid) => {
   const handleMouseMove = useCallback(
     (e) => {
       setMousePos({ x: e.clientX, y: e.clientY });
+      if (canvasRef.current?.contains(e.target)) {
+        canvasHoverClientRef.current = { x: e.clientX, y: e.clientY };
+      }
       if (interactionMode === "panning") setViewport({ ...viewport, x: e.clientX - dragStart.x, y: e.clientY - dragStart.y });
       else if (interactionMode === "dragging_node") {
         const dx = (e.clientX - dragStart.x) / viewport.zoom;
@@ -5812,6 +5892,21 @@ const handleNodeMouseDown = (e, nid) => {
     setActiveNodeId(nodeId);
   }, [pushHistory]);
 
+  const getCanvasViewportCenterPoint = useCallback(() => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    const centerX = rect ? rect.left + rect.width / 2 : window.innerWidth / 2;
+    const centerY = rect ? rect.top + rect.height / 2 : window.innerHeight / 2;
+    return screenToCanvas(centerX, centerY);
+  }, [screenToCanvas]);
+
+  const getCanvasPastePoint = useCallback(() => {
+    const hoverPoint = canvasHoverClientRef.current;
+    if (hoverPoint) {
+      return screenToCanvas(hoverPoint.x, hoverPoint.y);
+    }
+    return getCanvasViewportCenterPoint();
+  }, [getCanvasViewportCenterPoint, screenToCanvas]);
+
   const handleCanvasDragEnter = useCallback((e) => {
     const hasMediaFiles = Array.from(e.dataTransfer?.items || []).some(
       (item) =>
@@ -5871,6 +5966,48 @@ const handleNodeMouseDown = (e, nid) => {
       setCanvasDropUploading(null);
     }
   }, [createMediaUploadNodeAt, screenToCanvas]);
+
+  useEffect(() => {
+    const handleWindowPaste = async (event) => {
+      if (isEditableElement(event.target) || isEditableElement(document.activeElement)) return;
+
+      const clipboardItems = Array.from(event.clipboardData?.items || []);
+      const imageFiles = clipboardItems
+        .filter((item) => item.kind === "file" && String(item.type || "").startsWith("image/"))
+        .map((item) => item.getAsFile())
+        .filter((file) => file && isImageFileLike(file));
+
+      if (!imageFiles.length) return;
+
+      event.preventDefault();
+      const point = getCanvasPastePoint();
+      const position = getMediaUploadNodePosition(point);
+      setCanvasDropUploading({
+        x: position.x,
+        y: position.y,
+        total: imageFiles.length,
+        images: imageFiles.length,
+        videos: 0,
+      });
+
+      try {
+        const pastedMediaItems = await readFilesAsDataUrls(imageFiles);
+        createMediaUploadNodeAt(point, pastedMediaItems);
+        setRunToast({
+          message: `已粘贴到画布：${imageFiles.length} 张图片`,
+          type: "info",
+        });
+        setTimeout(() => setRunToast(null), 2200);
+      } finally {
+        setCanvasDropUploading(null);
+      }
+    };
+
+    window.addEventListener("paste", handleWindowPaste);
+    return () => {
+      window.removeEventListener("paste", handleWindowPaste);
+    };
+  }, [createMediaUploadNodeAt, getCanvasPastePoint]);
 
   const addNode = (t, modePreset = null) => {
     if (t === NODE_TYPES.POST_PROCESSOR) return;
@@ -6129,6 +6266,57 @@ const handleNodeMouseDown = (e, nid) => {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error || "去水印失败");
         setRunToast({ message: `去水印失败：${message}`, type: "error" });
+        setTimeout(() => setRunToast(null), 2600);
+        throw error;
+      }
+    },
+    [apiFetch, pushHistory],
+  );
+
+  const runCompactRmbg = useCallback(
+    async (sourceNodeId, imageIndex = 0) => {
+      try {
+        const sourceNode = nodesRef.current.find((n) => n.id === sourceNodeId);
+        const images = Array.isArray(sourceNode?.data?.images) ? sourceNode.data.images : [];
+        const safeIndex = Math.max(0, Math.min(imageIndex, images.length - 1));
+        const sourceImage = images[safeIndex] || images[0] || "";
+        if (!sourceImage) {
+          throw new Error("缺少抠图输入图片");
+        }
+
+        const resp = await apiFetch(`/api/rmbg`, {
+          method: "POST",
+          skipAuth: true,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            image: sourceImage,
+            size: "1024x1024",
+            aspect_ratio: "1:1",
+          }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          throw new Error(extractApiError(data));
+        }
+
+        const nextImage = data.image || data.images?.[0] || "";
+        if (!nextImage) {
+          throw new Error("抠图未返回结果");
+        }
+
+        const nextImages = [...images];
+        nextImages[safeIndex] = nextImage;
+        pushHistory();
+        updateNodeData(sourceNodeId, {
+          images: nextImages,
+          status: "idle",
+          error: "",
+        });
+        setRunToast({ message: "抠图完成", type: "info" });
+        setTimeout(() => setRunToast(null), 2200);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error || "抠图失败");
+        setRunToast({ message: `抠图失败：${message}`, type: "error" });
         setTimeout(() => setRunToast(null), 2600);
         throw error;
       }
@@ -9375,15 +9563,6 @@ const handleNodeMouseDown = (e, nid) => {
         title: "技能",
         items: [
           {
-            id: "skill_rmbg",
-            icon: Scissors,
-            label: "背景移除",
-            desc: "抠图去背景（可串联）",
-            color: "text-cyan-300",
-            bg: "bg-cyan-500/10",
-            onClick: () => addNode(NODE_TYPES.PROCESSOR, "rmbg"),
-          },
-          {
             id: "skill_feature_extract",
             icon: Scan,
             label: "特征提取",
@@ -10329,6 +10508,9 @@ const handleNodeMouseDown = (e, nid) => {
           style={{ cursor: getCursor() }}
           onMouseDown={handleCanvasMouseDown}
           onMouseMove={handleMouseMove}
+          onMouseLeave={() => {
+            canvasHoverClientRef.current = null;
+          }}
           onMouseUp={handleMouseUp}
           onWheel={handleWheel}
           onDragEnter={handleCanvasDragEnter}
@@ -10508,6 +10690,7 @@ const handleNodeMouseDown = (e, nid) => {
                 onSelectArtifact={setActiveArtifact} // ✅ 修复：现在生效
                 activeArtifact={activeArtifact}
                 onIterateImg2Img={createConnectedImg2ImgBranch}
+                onRunCompactRmbg={runCompactRmbg}
                 onRunCompactRemoveWatermark={runCompactRemoveWatermark}
                 onRunCompactThreeView={runCompactThreeView}
                 onRunCompactVideoUpscale={runCompactVideoUpscale}
