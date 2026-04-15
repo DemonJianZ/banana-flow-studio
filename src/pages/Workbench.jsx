@@ -92,7 +92,7 @@ import {
   setPreference as setMemoryPreference,
 } from "../api/memoryPreferences";
 import { harvestEvalCase } from "../api/qualityFeedback";
-import { saveAssetLibraryDbStore, migrateAssetLibraryLocalStorage } from "../lib/assetLibraryDb";
+import { createEmptyAssetLibraryStore, saveAssetLibraryDbStore, migrateAssetLibraryLocalStorage } from "../lib/assetLibraryDb";
 import {
   aiChatAnchor,
   aiChatStream,
