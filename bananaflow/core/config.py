@@ -28,6 +28,7 @@ MODEL_COMFYUI_REMOVE_WATERMARK = "comfyui-remove-watermark"
 MODEL_COMFYUI_MULTI_ANGLESHOTS = "comfyui-multi-angleshots"
 MODEL_COMFYUI_VIDEO_UPSCALE = "comfyui-video-upscale"
 MODEL_COMFYUI_VIDEO_LINEART = "comfyui-video-lineart"
+MODEL_COMFYUI_VIDEO_RMBG = "comfyui-video-rmbg"
 MODEL_COMFYUI_CONTROLNET = "comfyui-controlnet"
 MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO = "comfyui-image-z-image-turbo"
 MODEL_COMFYUI_QWEN_I2V = "comfyui-qwen-i2v"
@@ -133,6 +134,11 @@ if not os.path.exists(_default_lineart):
     _default_lineart = os.path.join(BASE_DIR, "bananaflow", "workflows", "lineart.json")
 COMFYUI_LINEART_PATH = os.getenv("COMFYUI_LINEART_PATH", _default_lineart)
 
+_default_video_rmbg = os.path.join(BASE_DIR, "workflows", "RMBG_video.json")
+if not os.path.exists(_default_video_rmbg):
+    _default_video_rmbg = os.path.join(BASE_DIR, "bananaflow", "workflows", "RMBG_video.json")
+COMFYUI_VIDEO_RMBG_PATH = os.getenv("COMFYUI_VIDEO_RMBG_PATH", _default_video_rmbg)
+
 _default_controlnet = os.path.join(BASE_DIR, "workflows", "Controlnet.json")
 if not os.path.exists(_default_controlnet):
     _default_controlnet = os.path.join(BASE_DIR, "bananaflow", "workflows", "Controlnet.json")
@@ -142,6 +148,7 @@ COMFYUI_OUTPUT_NODE_ID = os.getenv("COMFYUI_OUTPUT_NODE_ID", "4")
 COMFYUI_TIMEOUT_SEC = int(os.getenv("COMFYUI_TIMEOUT_SEC", "120"))
 COMFYUI_VIDEO_UPSCALE_TIMEOUT_SEC = int(os.getenv("COMFYUI_VIDEO_UPSCALE_TIMEOUT_SEC", "900"))
 COMFYUI_VIDEO_LINEART_TIMEOUT_SEC = int(os.getenv("COMFYUI_VIDEO_LINEART_TIMEOUT_SEC", "900"))
+COMFYUI_VIDEO_RMBG_TIMEOUT_SEC = int(os.getenv("COMFYUI_VIDEO_RMBG_TIMEOUT_SEC", "900"))
 COMFYUI_POLL_INTERVAL_SEC = float(os.getenv("COMFYUI_POLL_INTERVAL_SEC", "1.0"))
 
 _default_image_z_image_turbo = os.path.join(BASE_DIR, "workflows", "image_z_image_turbo.json")

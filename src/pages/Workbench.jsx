@@ -83,6 +83,7 @@ import {
   polishCanvasPrompt,
   runVideoSplitTask,
   runVideoLineartTask,
+  runVideoRmbgTask,
   planAgentCanvas,
 } from "../api/agentCanvas";
 import {
@@ -3155,12 +3156,14 @@ const NodeComponent = ({
   onRunCompactRemoveWatermark,
   onRunCompactThreeView,
   onRunCompactVideoUpscale,
+  onRunVideoRmbg,
   onRunVideoLineart,
   onRunVideoSplit,
 }) => {
   const [showCopied, setShowCopied] = useState(false);
   const [compactActiveIndex, setCompactActiveIndex] = useState(0);
   const [simpleMediaActionIndex, setSimpleMediaActionIndex] = useState(-1);
+  const [showSimpleMediaToolbar, setShowSimpleMediaToolbar] = useState(false);
   const [showCompactInputActions, setShowCompactInputActions] = useState(false);
   const [showCompactVideoUpscaleOptions, setShowCompactVideoUpscaleOptions] = useState(false);
   const [showSimpleVideoEditor, setShowSimpleVideoEditor] = useState(false);
@@ -3168,6 +3171,7 @@ const NodeComponent = ({
   const [compactRemovePending, setCompactRemovePending] = useState(false);
   const [compactThreeViewPending, setCompactThreeViewPending] = useState(false);
   const [compactVideoUpscalePending, setCompactVideoUpscalePending] = useState(false);
+  const [videoRmbgPending, setVideoRmbgPending] = useState(false);
   const [videoLineartPending, setVideoLineartPending] = useState(false);
   const [videoSplitPending, setVideoSplitPending] = useState(false);
   const [videoSplitDuration, setVideoSplitDuration] = useState(0);
@@ -3177,6 +3181,7 @@ const NodeComponent = ({
   const [promptPolishLoading, setPromptPolishLoading] = useState(false);
   const [promptPolishError, setPromptPolishError] = useState("");
   const nodeRootRef = useRef(null);
+  const simpleMediaUploadInputRef = useRef(null);
 
   const handleFileUpload = (e) => {
     const files = Array.from(e.target.files || []).filter((file) => isMediaFileLike(file));
@@ -3271,8 +3276,20 @@ const NodeComponent = ({
   const compactImages = isCompactInput ? (node.data.images || []) : EMPTY_LIST;
   const compactActiveImage = compactImages[compactActiveIndex] || compactImages[0] || "";
   const compactActiveIsVideo = isVideoContent(compactActiveImage);
-  const hasCompactThreeViewResult = isCompactInput && !!String(node.data.compactThreeViewSourceImage || "").trim();
-  const compactActionBusy = compactRmbgPending || compactRemovePending || compactThreeViewPending || compactVideoUpscalePending || videoLineartPending;
+  const compactThreeViewSources =
+    isCompactInput && node.data.compactThreeViewSourceImages && typeof node.data.compactThreeViewSourceImages === "object"
+      ? node.data.compactThreeViewSourceImages
+      : {};
+  const hasCompactThreeViewResult =
+    isCompactInput &&
+    !!String(compactThreeViewSources?.[compactActiveIndex] || node.data.compactThreeViewSourceImage || "").trim();
+  const compactActionBusy =
+    compactRmbgPending ||
+    compactRemovePending ||
+    compactThreeViewPending ||
+    compactVideoUpscalePending ||
+    videoRmbgPending ||
+    videoLineartPending;
   const simpleMediaImages = isSimpleMediaInputNode ? (node.data.images || []) : EMPTY_LIST;
   const simpleMediaActiveItem = simpleMediaActionIndex >= 0 ? simpleMediaImages[simpleMediaActionIndex] || "" : "";
   const simpleMediaActiveIsVideo = isVideoContent(simpleMediaActiveItem);
@@ -3304,6 +3321,7 @@ const NodeComponent = ({
     setShowCompactInputActions(false);
     setShowCompactVideoUpscaleOptions(false);
     setShowSimpleVideoEditor(false);
+    setShowSimpleMediaToolbar(false);
     setCompactActiveIndex(0);
     setSimpleMediaActionIndex(-1);
     setVideoSplitDuration(0);
@@ -3320,12 +3338,13 @@ const NodeComponent = ({
   }, [showCompactInputActions]);
 
   useEffect(() => {
-    if (!showCompactInputActions && simpleMediaActionIndex < 0) return undefined;
+    if (!showCompactInputActions && simpleMediaActionIndex < 0 && !showSimpleMediaToolbar) return undefined;
 
     const handleOutsideMouseDown = (event) => {
       if (nodeRootRef.current?.contains(event.target)) return;
       setShowCompactInputActions(false);
       setShowCompactVideoUpscaleOptions(false);
+      setShowSimpleMediaToolbar(false);
       setSimpleMediaActionIndex(-1);
       setShowSimpleVideoEditor(false);
     };
@@ -3334,7 +3353,7 @@ const NodeComponent = ({
     return () => {
       document.removeEventListener("mousedown", handleOutsideMouseDown, true);
     };
-  }, [showCompactInputActions, simpleMediaActionIndex]);
+  }, [showCompactInputActions, showSimpleMediaToolbar, simpleMediaActionIndex]);
 
   useEffect(() => {
     if (!showSimpleVideoEditor) return;
@@ -3420,10 +3439,36 @@ const NodeComponent = ({
     }
   };
 
+  const handleVideoRmbgRun = async (mediaIndex = 0) => {
+    if (compactActionBusy) return;
+    try {
+      setVideoRmbgPending(true);
+      await onRunVideoRmbg?.(node.id, mediaIndex);
+      setShowCompactInputActions(false);
+      setShowCompactVideoUpscaleOptions(false);
+    } catch (error) {
+      console.error("[Workbench] video_rmbg_direct:error", error);
+    } finally {
+      setVideoRmbgPending(false);
+    }
+  };
+
+  const handleCompactVideoRmbgClick = async () => {
+    if (compactActionBusy) return;
+    setShowCompactVideoUpscaleOptions(false);
+    await handleVideoRmbgRun(compactActiveIndex);
+  };
+
   const handleCompactVideoLineartClick = async () => {
     if (compactActionBusy) return;
     setShowCompactVideoUpscaleOptions(false);
     await handleVideoLineartRun(compactActiveIndex);
+  };
+
+  const handleSimpleVideoRmbgClick = async () => {
+    if (videoRmbgPending) return;
+    setShowSimpleVideoEditor(false);
+    await handleVideoRmbgRun(simpleMediaActionIndex);
   };
 
   const handleSimpleVideoLineartClick = async () => {
@@ -3621,6 +3666,43 @@ const NodeComponent = ({
     return `${Math.min(100, (prog / total) * 100)}%`;
   })();
 
+  const mediaToolbarClass = "rounded-[12px] bg-[#F3F4F6] px-3 py-2 shadow-[0_2px_8px_rgba(0,0,0,0.05)]";
+  const mediaToolbarRowClass = "flex items-center gap-4 overflow-x-auto whitespace-nowrap pr-1 custom-scrollbar";
+  const mediaToolbarOptionRowClass = "mt-2 flex items-center gap-4 overflow-x-auto whitespace-nowrap rounded-[10px] bg-[#EAECF0] px-2 py-1.5 pr-1 custom-scrollbar";
+  const mediaToolbarIconClass = "h-[17px] w-[17px] shrink-0";
+  const getMediaToolbarButtonClass = ({ active = false, tone = "default" } = {}) => {
+    const base =
+      "inline-flex h-9 items-center gap-2 rounded-[8px] bg-transparent px-3 text-[13px] font-medium text-[#374151] transition-colors disabled:cursor-wait disabled:opacity-60";
+    if (tone === "danger") {
+      return `${base} hover:bg-rose-100/80 hover:text-rose-700 active:bg-rose-200/80`;
+    }
+    if (active) {
+      return `${base} bg-[#DBEAFE] text-[#2563EB] hover:bg-[#DBEAFE] active:bg-[#BFDBFE]`;
+    }
+    return `${base} hover:bg-[#E5E7EB] active:bg-[#D1D5DB]`;
+  };
+  const renderBackgroundProcessingOverlay = ({
+    title: overlayTitle = "正在抠图",
+    description = "请稍候，正在智能识别主体与背景",
+  } = {}) => (
+    <div className="pointer-events-none absolute inset-0 z-[3] flex items-center justify-center bg-[rgba(15,23,42,0.22)] px-4 backdrop-blur-[4px]">
+      <div className="w-full max-w-[280px] rounded-[16px] border border-white/70 bg-white/88 px-6 py-6 text-left shadow-[0_8px_30px_rgba(0,0,0,0.12)] backdrop-blur-xl">
+        <div className="flex items-center gap-3">
+          <div className="relative h-11 w-11 shrink-0">
+            <div className="absolute -inset-1 rounded-full bg-[radial-gradient(circle,rgba(96,165,250,0.18),rgba(16,185,129,0.08),transparent_70%)] blur-md" />
+            <div className="absolute inset-0 animate-[spin_1.15s_linear_infinite] rounded-full bg-[conic-gradient(from_220deg,rgba(59,130,246,0.08),rgba(59,130,246,0.92),rgba(16,185,129,0.82),rgba(59,130,246,0.08))]" />
+            <div className="absolute inset-[4px] rounded-full bg-white/92" />
+            <div className="absolute inset-[11px] rounded-full bg-[radial-gradient(circle_at_30%_30%,rgba(191,219,254,0.95),rgba(219,234,254,0.35))]" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-[15px] font-semibold text-slate-900">{overlayTitle}</div>
+            <div className="mt-1 text-[12px] leading-5 text-slate-500">{description}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
   const renderArtifactThumb = (img, i, meta = {}) => {
     const isActive = activeArtifact?.url === img;
 
@@ -3771,107 +3853,117 @@ const NodeComponent = ({
         </div>
       )}
 
-	      {isSimpleMediaInputNode && (
+	      {isSimpleMediaInputNode && (showSimpleMediaToolbar || hasSimpleMediaSelection) && (
 	        <>
-	          {hasSimpleMediaSelection ? (
-	            <div
-	              className="absolute bottom-full left-0 z-30 mb-3 w-max min-w-[252px] max-w-[calc(100vw-48px)] border border-slate-200 bg-white p-2 shadow-[0_22px_54px_rgba(15,23,42,0.12)]"
-	              onMouseDown={(e) => e.stopPropagation()}
-	            >
+	          <input
+	            ref={simpleMediaUploadInputRef}
+	            type="file"
+	            multiple
+	            accept="image/*,video/*"
+	            className="hidden"
+	            onChange={handleFileUpload}
+	          />
+	          <div
+	            className={`absolute bottom-full left-1/2 z-30 mb-8 w-max min-w-[252px] max-w-[calc(100vw-48px)] -translate-x-1/2 ${mediaToolbarClass}`}
+	            onMouseDown={(e) => e.stopPropagation()}
+	          >
+	            <div className={mediaToolbarRowClass}>
+	              <button
+	                type="button"
+	                className={getMediaToolbarButtonClass({ active: !hasSimpleMediaSelection })}
+	                  onClick={(e) => {
+	                    e.stopPropagation();
+	                    setShowSimpleMediaToolbar(true);
+	                    simpleMediaUploadInputRef.current?.click();
+	                  }}
+	                title="上传图片/视频"
+	                aria-label="上传图片/视频"
+	              >
+	                <Upload className={mediaToolbarIconClass} />
+	                <span>上传</span>
+	              </button>
 	              {hasSimpleMediaVideoSelection ? (
-	                <div className="flex gap-2">
+	                <>
 	                  <button
 	                    type="button"
-	                    className="inline-flex h-8 w-8 items-center justify-center border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700"
+	                    className={getMediaToolbarButtonClass()}
 	                    onClick={() => onPreview?.(simpleMediaActiveItem)}
 	                    title="预览视频"
 	                    aria-label="预览视频"
 	                  >
-	                    <Play className="h-3.5 w-3.5" />
+	                    <Play className={mediaToolbarIconClass} />
+	                    <span>预览</span>
 	                  </button>
 	                  <button
 	                    type="button"
 	                    disabled={videoSplitPending}
-	                    className="flex min-w-[108px] items-center justify-center gap-1.5 border border-slate-200 bg-white px-4 py-2 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-65"
+	                    className={getMediaToolbarButtonClass()}
 	                    onClick={handleSimpleVideoEditorClick}
 	                  >
-	                    <Scissors className="h-3.5 w-3.5" />
+	                    <Scissors className={mediaToolbarIconClass} />
 	                    <span>视频编辑</span>
 	                  </button>
 	                  <button
 	                    type="button"
-	                    disabled={videoLineartPending || videoSplitPending}
-	                    className="flex min-w-[108px] items-center justify-center gap-1.5 border border-slate-200 bg-white px-4 py-2 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-65"
-	                    onClick={handleSimpleVideoLineartClick}
+	                    disabled={videoRmbgPending || videoLineartPending || videoSplitPending}
+	                    className={getMediaToolbarButtonClass()}
+	                    onClick={handleSimpleVideoRmbgClick}
 	                  >
-	                    <Scan className="h-3.5 w-3.5" />
-	                    <span>转线稿</span>
+	                    {videoRmbgPending ? <Loader2 className={`${mediaToolbarIconClass} animate-spin`} /> : <Wand2 className={mediaToolbarIconClass} />}
+	                    <span>去背景</span>
 	                  </button>
 	                  <button
 	                    type="button"
-	                    className="inline-flex h-8 w-8 items-center justify-center border border-slate-200 bg-white text-slate-500 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
-	                    onClick={() => {
-	                      removeImage(simpleMediaActionIndex);
-	                      setSimpleMediaActionIndex(-1);
-	                    }}
-	                    title="删除素材"
-	                    aria-label="删除素材"
+	                    disabled={videoRmbgPending || videoLineartPending || videoSplitPending}
+	                    className={getMediaToolbarButtonClass()}
+	                    onClick={handleSimpleVideoLineartClick}
 	                  >
-	                    <Trash2 className="h-3.5 w-3.5" />
+	                    <Scan className={mediaToolbarIconClass} />
+	                    <span>转线稿</span>
 	                  </button>
-	                </div>
-	              ) : (
-	                <div className="grid grid-cols-2 gap-2">
+	                </>
+	              ) : null}
+	              {hasSimpleMediaSelection && !hasSimpleMediaVideoSelection ? (
+	                <>
 	                  <button
 	                    type="button"
 	                    disabled={compactActionBusy}
-	                    className="flex items-center justify-center gap-1.5 border border-cyan-200 bg-cyan-50 px-3 py-2 text-[11px] font-medium text-cyan-700 transition hover:border-cyan-300 hover:bg-cyan-100 disabled:cursor-wait disabled:opacity-65"
+	                    className={getMediaToolbarButtonClass()}
 	                    onClick={handleSimpleImageThreeViewClick}
 	                  >
-	                    {compactThreeViewPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Layout className="h-3.5 w-3.5" />}
+	                    {compactThreeViewPending ? <Loader2 className={`${mediaToolbarIconClass} animate-spin`} /> : <Layout className={mediaToolbarIconClass} />}
 	                    <span>三视图</span>
 	                  </button>
 	                  <button
 	                    type="button"
 	                    disabled={compactActionBusy}
-	                    className="flex items-center justify-center gap-1.5 border border-emerald-200 bg-emerald-50 px-3 py-2 text-[11px] font-medium text-emerald-700 transition hover:border-emerald-300 hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-65"
+	                    className={getMediaToolbarButtonClass()}
 	                    onClick={handleSimpleImageRmbgClick}
 	                  >
-	                    {compactRmbgPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Scissors className="h-3.5 w-3.5" />}
+	                    {compactRmbgPending ? <Loader2 className={`${mediaToolbarIconClass} animate-spin`} /> : <Scissors className={mediaToolbarIconClass} />}
 	                    <span>抠图</span>
 	                  </button>
 	                  <button
 	                    type="button"
 	                    disabled={compactActionBusy}
-	                    className="flex items-center justify-center gap-1.5 border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-700 disabled:cursor-wait disabled:opacity-65"
+	                    className={getMediaToolbarButtonClass()}
 	                    onClick={handleSimpleImageRemoveClick}
 	                  >
-	                    {compactRemovePending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+	                    {compactRemovePending ? <Loader2 className={`${mediaToolbarIconClass} animate-spin`} /> : <Sparkles className={mediaToolbarIconClass} />}
 	                    <span>去水印</span>
 	                  </button>
 	                  <button
 	                    type="button"
-	                    className="flex items-center justify-center gap-1.5 border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+	                    className={getMediaToolbarButtonClass()}
 	                    onClick={() => onPreview?.(simpleMediaActiveItem)}
 	                  >
-	                    <Maximize className="h-3.5 w-3.5" />
+	                    <Maximize className={mediaToolbarIconClass} />
 	                    <span>预览</span>
 	                  </button>
-	                  <button
-	                    type="button"
-	                    className="flex items-center justify-center gap-1.5 border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
-	                    onClick={() => {
-	                      removeImage(simpleMediaActionIndex);
-	                      setSimpleMediaActionIndex(-1);
-	                    }}
-	                  >
-	                    <Trash2 className="h-3.5 w-3.5" />
-	                    <span>删除</span>
-	                  </button>
-	                </div>
-	              )}
+	                </>
+	              ) : null}
 	            </div>
-	          ) : null}
+	          </div>
 	          {showSimpleVideoEditor && hasSimpleMediaVideoSelection ? (
 	            <div
 	              className="fixed inset-0 z-[170] flex items-center justify-center bg-white/42 px-4 backdrop-blur-[2px]"
@@ -4012,19 +4104,6 @@ const NodeComponent = ({
 	          <div className="absolute -top-5 left-0 cursor-grab select-none text-[11px] font-medium tracking-[0.08em] text-slate-500 active:cursor-grabbing">
 	            {title}
 	          </div>
-          <button
-            type="button"
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={(e) => {
-              e.stopPropagation();
-              onDelete?.();
-            }}
-            className="nodrag absolute right-2 top-2 z-20 inline-flex h-7 w-7 items-center justify-center border border-slate-200 bg-white text-slate-500 transition-colors hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
-            title="删除组件"
-            aria-label="删除组件"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
         </>
       )}
 
@@ -4178,36 +4257,13 @@ const NodeComponent = ({
                     )
                   ) : null}
                   {compactRmbgPending ? (
-                    <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
-                      <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(8,15,34,0.2),rgba(8,15,34,0.6))] backdrop-blur-[2px]" />
-                      <div className="absolute inset-y-0 left-1/2 w-[46%] -translate-x-1/2 bg-[linear-gradient(90deg,rgba(255,255,255,0),rgba(34,197,94,0.16),rgba(16,185,129,0.2),rgba(255,255,255,0))] opacity-85 blur-xl animate-pulse" />
-                      <div className="absolute inset-x-0 top-[20%] h-px bg-[linear-gradient(90deg,rgba(16,185,129,0),rgba(16,185,129,0.8),rgba(16,185,129,0))] shadow-[0_0_18px_rgba(16,185,129,0.28)] animate-pulse" />
-                      <div className="absolute inset-0 flex items-center justify-center">
-                        <div className="rounded-[20px] border border-slate-200 bg-white px-4 py-3 text-center text-slate-700 shadow-[0_16px_40px_rgba(15,23,42,0.12)] backdrop-blur-xl">
-                          <div className="flex items-center justify-center gap-2">
-                            <Loader2 className="h-4 w-4 animate-spin text-emerald-600" />
-                            <span className="text-[12px] font-medium tracking-[0.04em] text-slate-800">正在抠图</span>
-                          </div>
-                          <div className="mt-1 text-[10px] text-slate-600">请稍候，正在移除背景并保留主体</div>
-                        </div>
-                      </div>
-                    </div>
+                    renderBackgroundProcessingOverlay({ title: "正在抠图" })
                   ) : null}
                   {compactRemovePending ? (
-                    <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
-                      <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(2,6,23,0.18),rgba(2,6,23,0.56))] backdrop-blur-[2px]" />
-                      <div className="absolute inset-y-0 left-1/2 w-[44%] -translate-x-1/2 bg-[linear-gradient(90deg,rgba(255,255,255,0),rgba(255,255,255,0.18),rgba(125,211,252,0.14),rgba(255,255,255,0))] opacity-80 blur-xl animate-pulse" />
-                      <div className="absolute inset-x-0 top-[18%] h-px bg-[linear-gradient(90deg,rgba(34,211,238,0),rgba(34,211,238,0.7),rgba(34,211,238,0))] shadow-[0_0_18px_rgba(34,211,238,0.35)] animate-pulse" />
-                      <div className="absolute inset-0 flex items-center justify-center">
-                        <div className="rounded-[20px] border border-slate-200 bg-white px-4 py-3 text-center text-slate-700 shadow-[0_16px_40px_rgba(15,23,42,0.12)] backdrop-blur-xl">
-                          <div className="flex items-center justify-center gap-2">
-                            <Loader2 className="h-4 w-4 animate-spin text-cyan-700" />
-                            <span className="text-[12px] font-medium tracking-[0.04em] text-slate-800">正在去除水印</span>
-                          </div>
-                          <div className="mt-1 text-[10px] text-slate-600">请稍候，图片正在轻量修复中</div>
-                        </div>
-                      </div>
-                    </div>
+                    renderBackgroundProcessingOverlay({
+                      title: "正在去除水印",
+                      description: "请稍候，图片正在轻量修复中",
+                    })
                   ) : null}
                   {compactVideoUpscalePending ? (
                     <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
@@ -4226,20 +4282,13 @@ const NodeComponent = ({
                     </div>
                   ) : null}
                   {videoLineartPending ? (
-                    <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
-                      <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(15,23,42,0.24),rgba(15,23,42,0.68))] backdrop-blur-[2px]" />
-                      <div className="absolute inset-y-0 left-1/2 w-[48%] -translate-x-1/2 bg-[linear-gradient(90deg,rgba(255,255,255,0),rgba(226,232,240,0.18),rgba(148,163,184,0.2),rgba(255,255,255,0))] opacity-85 blur-xl animate-pulse" />
-                      <div className="absolute inset-x-0 top-[22%] h-px bg-[linear-gradient(90deg,rgba(148,163,184,0),rgba(148,163,184,0.85),rgba(148,163,184,0))] shadow-[0_0_18px_rgba(148,163,184,0.28)] animate-pulse" />
-                      <div className="absolute inset-0 flex items-center justify-center">
-                        <div className="rounded-[20px] border border-slate-200 bg-white px-4 py-3 text-center text-slate-700 shadow-[0_16px_40px_rgba(15,23,42,0.12)] backdrop-blur-xl">
-                          <div className="flex items-center justify-center gap-2">
-                            <Loader2 className="h-4 w-4 animate-spin text-slate-700" />
-                            <span className="text-[12px] font-medium tracking-[0.04em] text-slate-800">正在转线稿</span>
-                          </div>
-                          <div className="mt-1 text-[10px] text-slate-600">请稍候，正在生成线稿视频</div>
-                        </div>
-                      </div>
-                    </div>
+                    renderBackgroundProcessingOverlay({
+                      title: "正在转线稿",
+                      description: "请稍候，正在生成线稿视频",
+                    })
+                  ) : null}
+                  {videoRmbgPending ? (
+                    renderBackgroundProcessingOverlay({ title: "正在移除背景" })
                   ) : null}
                   <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_70%_35%,rgba(34,211,238,0.12),transparent_42%)] opacity-80 transition-opacity duration-300" />
                   <div className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-black/60 via-black/10 to-transparent" />
@@ -4262,7 +4311,7 @@ const NodeComponent = ({
 
               {compactActiveImage ? (
 	                <div
-	                  className={`nodrag absolute bottom-full left-0 z-30 mb-3 w-max min-w-[252px] max-w-[calc(100vw-48px)] border border-slate-200 bg-white p-2 shadow-[0_22px_54px_rgba(15,23,42,0.12)] transition-all duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+	                  className={`nodrag absolute bottom-full left-0 z-30 mb-3 w-max min-w-[252px] max-w-[calc(100vw-48px)] ${mediaToolbarClass} transition-all duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${
 	                    showCompactInputActions
 	                      ? "pointer-events-auto translate-y-0 opacity-100"
                       : "pointer-events-none translate-y-2 opacity-0"
@@ -4271,34 +4320,43 @@ const NodeComponent = ({
                 >
                   {compactActiveIsVideo ? (
                     <>
-                      <div className="flex gap-2">
+                      <div className={mediaToolbarRowClass}>
                         <button
                           type="button"
                           disabled={compactActionBusy}
-                          className="flex flex-1 items-center justify-center gap-1.5 border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-65"
+                          className={getMediaToolbarButtonClass()}
+                          onClick={handleCompactVideoRmbgClick}
+                        >
+                          {videoRmbgPending ? <Loader2 className={`${mediaToolbarIconClass} animate-spin`} /> : <Wand2 className={mediaToolbarIconClass} />}
+                          <span>去背景</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={compactActionBusy}
+                          className={getMediaToolbarButtonClass()}
                           onClick={handleCompactVideoLineartClick}
                         >
-                          <Scan className="h-3.5 w-3.5" />
+                          <Scan className={mediaToolbarIconClass} />
                           <span>转线稿</span>
                         </button>
                         <button
                           type="button"
                           disabled={compactActionBusy}
-                          className="flex flex-1 items-center justify-center gap-1.5 border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] font-medium text-rose-700 transition hover:border-rose-300 hover:bg-rose-100 disabled:cursor-wait disabled:opacity-65"
+                          className={getMediaToolbarButtonClass({ active: showCompactVideoUpscaleOptions })}
                           onClick={handleCompactVideoUpscaleClick}
                         >
-                          <TrendingUp className="h-3.5 w-3.5" />
+                          <TrendingUp className={mediaToolbarIconClass} />
                           <span>视频超清</span>
                         </button>
                       </div>
 	                    {showCompactVideoUpscaleOptions ? (
-                        <div className="mt-2 grid grid-cols-2 gap-2 border border-rose-100 bg-rose-50/60 p-2">
+                        <div className={mediaToolbarOptionRowClass}>
                           {VIDEO_HD_TEMPLATE_OPTIONS.map((item) => (
                             <button
                               key={item.value}
                               type="button"
                               disabled={compactActionBusy}
-                              className="border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium text-slate-700 transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-wait disabled:opacity-65"
+                              className={getMediaToolbarButtonClass()}
                               onClick={() => handleCompactVideoUpscaleOptionClick(item.value)}
                             >
                               {item.label}
@@ -4308,32 +4366,33 @@ const NodeComponent = ({
                       ) : null}
                     </>
                   ) : (
-                    <div className="grid grid-cols-3 gap-2">
+                    <div className={mediaToolbarRowClass}>
                       <button
                         type="button"
                         disabled={compactActionBusy}
-                        className="flex items-center justify-center gap-1.5 rounded-full border border-cyan-200 bg-cyan-50 px-4 py-2 text-[11px] font-medium text-cyan-700 shadow-[0_14px_28px_rgba(34,211,238,0.08)] backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-100 disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65 disabled:brightness-100"
+                        className={getMediaToolbarButtonClass()}
                         onClick={handleCompactThreeViewClick}
                       >
-                        {compactThreeViewPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Layout className="h-3.5 w-3.5" />}
+                        {compactThreeViewPending ? <Loader2 className={`${mediaToolbarIconClass} animate-spin`} /> : <Layout className={mediaToolbarIconClass} />}
                         {compactThreeViewPending ? "生成中..." : hasCompactThreeViewResult ? "重试三视图" : "三视图"}
                       </button>
                       <button
                         type="button"
                         disabled={compactActionBusy}
-                        className="flex items-center justify-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-4 py-2 text-[11px] font-medium text-emerald-700 shadow-[0_14px_28px_rgba(16,185,129,0.08)] backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-emerald-300 hover:bg-emerald-100 disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65 disabled:brightness-100"
+                        className={getMediaToolbarButtonClass()}
                         onClick={handleCompactRmbgClick}
                       >
-                        {compactRmbgPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Scissors className="h-3.5 w-3.5" />}
+                        {compactRmbgPending ? <Loader2 className={`${mediaToolbarIconClass} animate-spin`} /> : <Scissors className={mediaToolbarIconClass} />}
                         抠图
                       </button>
                       <button
                         type="button"
                         disabled={compactActionBusy}
-                        className="flex items-center justify-center gap-1.5 rounded-full border border-slate-200 bg-white px-4 py-2 text-[11px] font-medium text-slate-700 shadow-[0_14px_28px_rgba(15,23,42,0.08)] backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-700 disabled:translate-y-0 disabled:cursor-wait disabled:opacity-65 disabled:brightness-100"
+                        className={getMediaToolbarButtonClass()}
                         onClick={handleCompactRemoveClick}
                       >
-                        {compactRemovePending ? "处理中..." : "去水印"}
+                        {compactRemovePending ? <Loader2 className={`${mediaToolbarIconClass} animate-spin`} /> : <Sparkles className={mediaToolbarIconClass} />}
+                        <span>{compactRemovePending ? "处理中..." : "去水印"}</span>
                       </button>
                     </div>
                   )}
@@ -4375,7 +4434,13 @@ const NodeComponent = ({
         )}
 
         {isInput && !isCompactInput && (
-          <div className="relative overflow-hidden bg-white">
+          <div
+            className="relative overflow-hidden bg-white"
+            onMouseDown={(e) => {
+              e.stopPropagation();
+              setShowSimpleMediaToolbar(true);
+            }}
+          >
             {node.data.images?.length > 0 ? (
               <div className="nodrag max-h-[520px] overflow-y-auto custom-scrollbar">
 	                {node.data.images.map((img, i) => {
@@ -4383,10 +4448,11 @@ const NodeComponent = ({
 	                  const isVideoItem = isVideoContent(img);
 	                  const showVideoActions = isVideoItem && simpleMediaActionIndex === i;
 	                  const showImageActions = !isVideoItem && simpleMediaActionIndex === i;
+	                  const showVideoRmbgOverlay = isVideoItem && videoRmbgPending && simpleMediaActionIndex === i;
 	                  const showVideoLineartOverlay = isVideoItem && videoLineartPending && simpleMediaActionIndex === i;
-	                  const showImageRmbgOverlay = !isVideoItem && compactRmbgPending && simpleMediaActionIndex === i;
-	                  const showImageRemoveOverlay = !isVideoItem && compactRemovePending && simpleMediaActionIndex === i;
-	                  const showImageThreeViewOverlay = !isVideoItem && compactThreeViewPending && simpleMediaActionIndex === i;
+	                  const showImageRmbgOverlay = !isVideoItem && compactRmbgPending;
+	                  const showImageRemoveOverlay = !isVideoItem && compactRemovePending;
+	                  const showImageThreeViewOverlay = !isVideoItem && compactThreeViewPending;
 	                  return (
 	                    <div
 	                      key={i}
@@ -4406,7 +4472,8 @@ const NodeComponent = ({
 	                            onMouseDown={(e) => e.stopPropagation()}
 	                            onClick={(e) => {
 	                              e.stopPropagation();
-	                              setSimpleMediaActionIndex((prev) => (prev === i ? -1 : i));
+	                              setShowSimpleMediaToolbar(true);
+	                              setSimpleMediaActionIndex(i);
 	                            }}
 	                            title="点击显示操作"
 	                            muted
@@ -4414,20 +4481,13 @@ const NodeComponent = ({
 	                            playsInline
 	                          />
 	                          {showVideoLineartOverlay ? (
-	                            <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
-	                              <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(15,23,42,0.24),rgba(15,23,42,0.68))] backdrop-blur-[2px]" />
-	                              <div className="absolute inset-y-0 left-1/2 w-[48%] -translate-x-1/2 bg-[linear-gradient(90deg,rgba(255,255,255,0),rgba(226,232,240,0.18),rgba(148,163,184,0.2),rgba(255,255,255,0))] opacity-85 blur-xl animate-pulse" />
-	                              <div className="absolute inset-x-0 top-[22%] h-px bg-[linear-gradient(90deg,rgba(148,163,184,0),rgba(148,163,184,0.85),rgba(148,163,184,0))] shadow-[0_0_18px_rgba(148,163,184,0.28)] animate-pulse" />
-	                              <div className="absolute inset-0 flex items-center justify-center px-4">
-	                                <div className="border border-slate-200 bg-white px-4 py-3 text-center text-slate-700 shadow-[0_16px_40px_rgba(15,23,42,0.12)]">
-	                                  <div className="flex items-center justify-center gap-2">
-	                                    <Loader2 className="h-4 w-4 animate-spin text-slate-700" />
-	                                    <span className="text-[12px] font-medium tracking-[0.04em] text-slate-800">正在转线稿</span>
-	                                  </div>
-	                                  <div className="mt-1 text-[10px] text-slate-600">请稍候，正在生成线稿视频</div>
-	                                </div>
-	                              </div>
-	                            </div>
+	                            renderBackgroundProcessingOverlay({
+	                              title: "正在转线稿",
+	                              description: "请稍候，正在生成线稿视频",
+	                            })
+	                          ) : null}
+	                          {showVideoRmbgOverlay ? (
+	                            renderBackgroundProcessingOverlay({ title: "正在移除背景" })
 	                          ) : null}
 	                        </>
 	                      ) : (
@@ -4438,42 +4498,20 @@ const NodeComponent = ({
                             onMouseDown={(e) => e.stopPropagation()}
                             onClick={(e) => {
                               e.stopPropagation();
-                              setSimpleMediaActionIndex((prev) => (prev === i ? -1 : i));
+                              setShowSimpleMediaToolbar(true);
+                              setSimpleMediaActionIndex(i);
                             }}
                             title="点击显示操作"
                             alt=""
                           />
                           {showImageRmbgOverlay ? (
-                            <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
-                              <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(8,15,34,0.2),rgba(8,15,34,0.6))] backdrop-blur-[2px]" />
-                              <div className="absolute inset-y-0 left-1/2 w-[46%] -translate-x-1/2 bg-[linear-gradient(90deg,rgba(255,255,255,0),rgba(34,197,94,0.16),rgba(16,185,129,0.2),rgba(255,255,255,0))] opacity-85 blur-xl animate-pulse" />
-                              <div className="absolute inset-x-0 top-[20%] h-px bg-[linear-gradient(90deg,rgba(16,185,129,0),rgba(16,185,129,0.8),rgba(16,185,129,0))] shadow-[0_0_18px_rgba(16,185,129,0.28)] animate-pulse" />
-                              <div className="absolute inset-0 flex items-center justify-center px-4">
-                                <div className="border border-slate-200 bg-white px-4 py-3 text-center text-slate-700 shadow-[0_16px_40px_rgba(15,23,42,0.12)]">
-                                  <div className="flex items-center justify-center gap-2">
-                                    <Loader2 className="h-4 w-4 animate-spin text-emerald-600" />
-                                    <span className="text-[12px] font-medium tracking-[0.04em] text-slate-800">正在抠图</span>
-                                  </div>
-                                  <div className="mt-1 text-[10px] text-slate-600">请稍候，正在移除背景并保留主体</div>
-                                </div>
-                              </div>
-                            </div>
+                            renderBackgroundProcessingOverlay({ title: "正在抠图" })
                           ) : null}
                           {showImageRemoveOverlay ? (
-                            <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
-                              <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(2,6,23,0.18),rgba(2,6,23,0.56))] backdrop-blur-[2px]" />
-                              <div className="absolute inset-y-0 left-1/2 w-[44%] -translate-x-1/2 bg-[linear-gradient(90deg,rgba(255,255,255,0),rgba(255,255,255,0.18),rgba(125,211,252,0.14),rgba(255,255,255,0))] opacity-80 blur-xl animate-pulse" />
-                              <div className="absolute inset-x-0 top-[18%] h-px bg-[linear-gradient(90deg,rgba(34,211,238,0),rgba(34,211,238,0.7),rgba(34,211,238,0))] shadow-[0_0_18px_rgba(34,211,238,0.35)] animate-pulse" />
-                              <div className="absolute inset-0 flex items-center justify-center px-4">
-                                <div className="border border-slate-200 bg-white px-4 py-3 text-center text-slate-700 shadow-[0_16px_40px_rgba(15,23,42,0.12)]">
-                                  <div className="flex items-center justify-center gap-2">
-                                    <Loader2 className="h-4 w-4 animate-spin text-cyan-700" />
-                                    <span className="text-[12px] font-medium tracking-[0.04em] text-slate-800">正在去除水印</span>
-                                  </div>
-                                  <div className="mt-1 text-[10px] text-slate-600">请稍候，图片正在轻量修复中</div>
-                                </div>
-                              </div>
-                            </div>
+                            renderBackgroundProcessingOverlay({
+                              title: "正在去除水印",
+                              description: "请稍候，图片正在轻量修复中",
+                            })
                           ) : null}
                           {showImageThreeViewOverlay ? (
                             <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
@@ -4494,37 +4532,22 @@ const NodeComponent = ({
 	                        </>
                       )}
 
-                      {!isVideoItem && !showImageActions && (
-                        <div className="absolute bottom-2 right-2 flex gap-1 opacity-0 transition-opacity group-hover/img:opacity-100">
-                          <button
-                            onMouseDown={(e) => e.stopPropagation()}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              removeImage(i);
-                            }}
-                            className="nodrag inline-flex h-7 w-7 items-center justify-center border border-slate-200 bg-white/95 text-slate-500 backdrop-blur-sm transition-colors hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
-                            type="button"
-                            title="删除素材"
-                            aria-label="删除素材"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      )}
                     </div>
                   );
                 })}
 
-                <label className="block cursor-pointer border-t border-slate-200 bg-white px-3 py-2 text-center text-[11px] text-slate-500 transition hover:bg-slate-50 hover:text-slate-700">
-                  添加图片/视频
-                  <input type="file" multiple accept="image/*,video/*" className="hidden" onChange={handleFileUpload} />
-                </label>
               </div>
             ) : (
-              <label className="nodrag flex min-h-[132px] cursor-pointer items-center justify-center px-4 py-8 text-[11px] text-slate-500 transition hover:bg-slate-50 hover:text-slate-700">
-                点击上传图片/视频
-                <input type="file" multiple accept="image/*,video/*" className="hidden" onChange={handleFileUpload} />
-              </label>
+              <div
+                className="nodrag flex min-h-[132px] cursor-pointer items-center justify-center px-4 py-8 text-center text-[11px] text-slate-500 transition hover:bg-slate-50 hover:text-slate-700"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowSimpleMediaToolbar(true);
+                }}
+              >
+                点击右上角上传图片/视频
+              </div>
             )}
           </div>
         )}
@@ -5972,29 +5995,31 @@ const handleNodeMouseDown = (e, nid) => {
       if (isEditableElement(event.target) || isEditableElement(document.activeElement)) return;
 
       const clipboardItems = Array.from(event.clipboardData?.items || []);
-      const imageFiles = clipboardItems
-        .filter((item) => item.kind === "file" && String(item.type || "").startsWith("image/"))
+      const mediaFiles = clipboardItems
+        .filter((item) => item.kind === "file")
         .map((item) => item.getAsFile())
-        .filter((file) => file && isImageFileLike(file));
+        .filter((file) => file && isMediaFileLike(file));
 
-      if (!imageFiles.length) return;
+      if (!mediaFiles.length) return;
 
       event.preventDefault();
       const point = getCanvasPastePoint();
       const position = getMediaUploadNodePosition(point);
+      const imageCount = mediaFiles.filter((file) => isImageFileLike(file)).length;
+      const videoCount = mediaFiles.length - imageCount;
       setCanvasDropUploading({
         x: position.x,
         y: position.y,
-        total: imageFiles.length,
-        images: imageFiles.length,
-        videos: 0,
+        total: mediaFiles.length,
+        images: imageCount,
+        videos: videoCount,
       });
 
       try {
-        const pastedMediaItems = await readFilesAsDataUrls(imageFiles);
+        const pastedMediaItems = await readFilesAsDataUrls(mediaFiles);
         createMediaUploadNodeAt(point, pastedMediaItems);
         setRunToast({
-          message: `已粘贴到画布：${imageFiles.length} 张图片`,
+          message: `已粘贴到画布：${mediaFiles.length} 个文件${imageCount ? ` · ${imageCount} 张图片` : ""}${videoCount ? ` · ${videoCount} 个视频` : ""}`,
           type: "info",
         });
         setTimeout(() => setRunToast(null), 2200);
@@ -6227,41 +6252,47 @@ const handleNodeMouseDown = (e, nid) => {
       try {
         const sourceNode = nodesRef.current.find((n) => n.id === sourceNodeId);
         const images = Array.isArray(sourceNode?.data?.images) ? sourceNode.data.images : [];
-        const safeIndex = Math.max(0, Math.min(imageIndex, images.length - 1));
-        const sourceImage = images[safeIndex] || images[0] || "";
-        if (!sourceImage) {
+        const imageEntries = images
+          .map((item, index) => ({ item, index }))
+          .filter(({ item }) => !!item && !isVideoContent(item));
+        if (!imageEntries.length) {
           throw new Error("缺少去水印输入图片");
         }
 
-        const resp = await apiFetch(`/api/remove_watermark`, {
-          method: "POST",
-          skipAuth: true,
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            image: sourceImage,
-            size: "1024x1024",
-            aspect_ratio: "1:1",
-          }),
-        });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok) {
-          throw new Error(extractApiError(data));
-        }
-
-        const nextImage = data.image || data.images?.[0] || "";
-        if (!nextImage) {
-          throw new Error("去水印未返回结果");
-        }
-
         const nextImages = [...images];
-        nextImages[safeIndex] = nextImage;
+        for (const { item, index } of imageEntries) {
+          const resp = await apiFetch(`/api/remove_watermark`, {
+            method: "POST",
+            skipAuth: true,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              image: item,
+              size: "1024x1024",
+              aspect_ratio: "1:1",
+            }),
+          });
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok) {
+            throw new Error(extractApiError(data));
+          }
+
+          const nextImage = data.image || data.images?.[0] || "";
+          if (!nextImage) {
+            throw new Error("去水印未返回结果");
+          }
+          nextImages[index] = nextImage;
+        }
+
         pushHistory();
         updateNodeData(sourceNodeId, {
           images: nextImages,
           status: "idle",
           error: "",
         });
-        setRunToast({ message: "去水印完成", type: "info" });
+        setRunToast({
+          message: imageEntries.length > 1 ? `批量去水印完成，共 ${imageEntries.length} 张` : "去水印完成",
+          type: "info",
+        });
         setTimeout(() => setRunToast(null), 2200);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error || "去水印失败");
@@ -6278,41 +6309,47 @@ const handleNodeMouseDown = (e, nid) => {
       try {
         const sourceNode = nodesRef.current.find((n) => n.id === sourceNodeId);
         const images = Array.isArray(sourceNode?.data?.images) ? sourceNode.data.images : [];
-        const safeIndex = Math.max(0, Math.min(imageIndex, images.length - 1));
-        const sourceImage = images[safeIndex] || images[0] || "";
-        if (!sourceImage) {
+        const imageEntries = images
+          .map((item, index) => ({ item, index }))
+          .filter(({ item }) => !!item && !isVideoContent(item));
+        if (!imageEntries.length) {
           throw new Error("缺少抠图输入图片");
         }
 
-        const resp = await apiFetch(`/api/rmbg`, {
-          method: "POST",
-          skipAuth: true,
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            image: sourceImage,
-            size: "1024x1024",
-            aspect_ratio: "1:1",
-          }),
-        });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok) {
-          throw new Error(extractApiError(data));
-        }
-
-        const nextImage = data.image || data.images?.[0] || "";
-        if (!nextImage) {
-          throw new Error("抠图未返回结果");
-        }
-
         const nextImages = [...images];
-        nextImages[safeIndex] = nextImage;
+        for (const { item, index } of imageEntries) {
+          const resp = await apiFetch(`/api/rmbg`, {
+            method: "POST",
+            skipAuth: true,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              image: item,
+              size: "1024x1024",
+              aspect_ratio: "1:1",
+            }),
+          });
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok) {
+            throw new Error(extractApiError(data));
+          }
+
+          const nextImage = data.image || data.images?.[0] || "";
+          if (!nextImage) {
+            throw new Error("抠图未返回结果");
+          }
+          nextImages[index] = nextImage;
+        }
+
         pushHistory();
         updateNodeData(sourceNodeId, {
           images: nextImages,
           status: "idle",
           error: "",
         });
-        setRunToast({ message: "抠图完成", type: "info" });
+        setRunToast({
+          message: imageEntries.length > 1 ? `批量抠图完成，共 ${imageEntries.length} 张` : "抠图完成",
+          type: "info",
+        });
         setTimeout(() => setRunToast(null), 2200);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error || "抠图失败");
@@ -6415,6 +6452,7 @@ const handleNodeMouseDown = (e, nid) => {
       const safeTemplateEnum =
         parseInt(String(templateEnum ?? VOLC_VIDEO_HD_TEMPLATE_ENUM_1), 10) || VOLC_VIDEO_HD_TEMPLATE_ENUM_1;
       const authorizationInfo = resolveMemberAuthorizationInfo();
+      const firstSourceImage = String(retrySources?.[imageEntries[0]?.index] || imageEntries[0]?.item || "").trim();
       const proxyPayload = {
         authorization: authorizationInfo?.value || "",
         history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
@@ -6545,6 +6583,58 @@ const handleNodeMouseDown = (e, nid) => {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error || "视频转线稿失败");
         setRunToast({ message: `视频转线稿失败：${message}`, type: "error" });
+        setTimeout(() => setRunToast(null), 2600);
+        throw error;
+      }
+    },
+    [apiFetch, pushHistory],
+  );
+
+  const runVideoRmbg = useCallback(
+    async (sourceNodeId, mediaIndex = 0) => {
+      try {
+        const sourceNode = nodesRef.current.find((node) => node.id === sourceNodeId);
+        const sourceImages = Array.isArray(sourceNode?.data?.images) ? sourceNode.data.images : [];
+        const safeIndex = Math.max(0, Math.min(mediaIndex, sourceImages.length - 1));
+        const retrySources =
+          sourceNode?.data?.videoRmbgSourceVideos && typeof sourceNode.data.videoRmbgSourceVideos === "object"
+            ? sourceNode.data.videoRmbgSourceVideos
+            : {};
+        const retrySourceVideo = String(retrySources?.[safeIndex] || "").trim();
+        const sourceVideo = retrySourceVideo || sourceImages[safeIndex] || sourceImages[0] || "";
+        if (!sourceVideo || !isVideoContent(sourceVideo)) {
+          throw new Error("缺少可用于去背景的视频素材");
+        }
+
+        const result = await runVideoRmbgTask(
+          {
+            video: sourceVideo,
+          },
+          apiFetch,
+        );
+        const resultUrl = String(result?.video || "").trim();
+        if (!resultUrl) {
+          throw new Error("视频去背景未返回结果");
+        }
+
+        pushHistory();
+        const nextImages = [...sourceImages];
+        nextImages[safeIndex] = resultUrl;
+        updateNodeData(sourceNodeId, {
+          images: nextImages,
+          videoRmbgSourceVideos: {
+            ...retrySources,
+            [safeIndex]: retrySourceVideo || sourceVideo,
+          },
+          videoRmbgLastResultVideo: resultUrl,
+          status: "idle",
+          error: "",
+        });
+        setRunToast({ message: "视频去背景完成", type: "info" });
+        setTimeout(() => setRunToast(null), 2200);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error || "视频去背景失败");
+        setRunToast({ message: `视频去背景失败：${message}`, type: "error" });
         setTimeout(() => setRunToast(null), 2600);
         throw error;
       }
@@ -9336,10 +9426,14 @@ const handleNodeMouseDown = (e, nid) => {
     async (sourceNodeId, imageIndex = 0) => {
       const sourceNode = nodesRef.current.find((node) => node.id === sourceNodeId);
       const sourceImages = Array.isArray(sourceNode?.data?.images) ? sourceNode.data.images : [];
-      const safeIndex = Math.max(0, Math.min(imageIndex, sourceImages.length - 1));
-      const retrySourceImage = String(sourceNode?.data?.compactThreeViewSourceImage || "").trim();
-      const sourceImage = retrySourceImage || sourceImages[safeIndex] || sourceImages[0] || "";
-      if (!sourceImage) {
+      const retrySources =
+        sourceNode?.data?.compactThreeViewSourceImages && typeof sourceNode.data.compactThreeViewSourceImages === "object"
+          ? sourceNode.data.compactThreeViewSourceImages
+          : {};
+      const imageEntries = sourceImages
+        .map((item, index) => ({ item, index }))
+        .filter(({ item }) => !!item && !isVideoContent(item));
+      if (!imageEntries.length) {
         throw new Error("缺少三视图输入图片");
       }
 
@@ -9374,7 +9468,7 @@ const handleNodeMouseDown = (e, nid) => {
         ai_chat_session_id: aiChatSessionIdRef.current || "",
         ai_chat_model_id: modelId,
         message: THREE_VIEW_PROMPT,
-        images: [sourceImage],
+        images: firstSourceImage ? [firstSourceImage] : [],
         ...resolvedParamPayload,
       };
 
@@ -9392,38 +9486,55 @@ const handleNodeMouseDown = (e, nid) => {
         payload: {
           ...proxyPayload,
           authorization: `${proxyPayload.authorization.slice(0, 18)}...`,
-          images: ["count=1"],
+          images: [`count=${imageEntries.length}`],
         },
         authorizationSource: authorizationInfo?.source || "none",
       });
+      const nextImages = [...sourceImages];
+      const nextRetrySources = { ...retrySources };
+      let lastResultUrl = "";
+      for (const { item, index } of imageEntries) {
+        const retrySourceImage = String(nextRetrySources?.[index] || "").trim();
+        const sourceImage = retrySourceImage || item;
+        const proxyData = await submitAIChatImageTask(
+          apiFetch,
+          {
+            ...proxyPayload,
+            history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
+            ai_chat_session_id: aiChatSessionIdRef.current || "",
+            images: [sourceImage],
+          },
+          {
+            onDebug: (event) => pushApiDebugDetail("aiChatImage", event),
+          },
+        );
+        if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
+        if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
 
-      const proxyData = await submitAIChatImageTask(apiFetch, proxyPayload, {
-        onDebug: (event) => pushApiDebugDetail("aiChatImage", event),
-      });
-      if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
-      if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
-
-      const resultUrl =
-        pickFirstImageUrl(proxyData?.image_url) ||
-        pickFirstImageUrl(proxyData?.events) ||
-        pickFirstImageUrl(proxyData?.text) ||
-        "";
-      const doneErrMsg = String(proxyData?.done_error || "").trim();
-      if (!resultUrl && doneErrMsg) {
-        throw new Error(`AI Chat 返回错误：${doneErrMsg}`);
-      }
-      if (!resultUrl) {
-        const summary = summarizeAIChatResponse(proxyData);
-        throw new Error(`aiChat 三视图未返回可解析图片URL${summary ? ` | 响应摘要: ${summary}` : ""}`);
+        const resultUrl =
+          pickFirstImageUrl(proxyData?.image_url) ||
+          pickFirstImageUrl(proxyData?.events) ||
+          pickFirstImageUrl(proxyData?.text) ||
+          "";
+        const doneErrMsg = String(proxyData?.done_error || "").trim();
+        if (!resultUrl && doneErrMsg) {
+          throw new Error(`AI Chat 返回错误：${doneErrMsg}`);
+        }
+        if (!resultUrl) {
+          const summary = summarizeAIChatResponse(proxyData);
+          throw new Error(`aiChat 三视图未返回可解析图片URL${summary ? ` | 响应摘要: ${summary}` : ""}`);
+        }
+        nextImages[index] = resultUrl;
+        nextRetrySources[index] = retrySourceImage || sourceImage;
+        lastResultUrl = resultUrl;
       }
 
       pushHistory();
-      const nextImages = [...sourceImages];
-      nextImages[safeIndex] = resultUrl;
       updateNodeData(sourceNodeId, {
         images: nextImages,
-        compactThreeViewSourceImage: retrySourceImage || sourceImage,
-        compactThreeViewLastResultImage: resultUrl,
+        compactThreeViewSourceImages: nextRetrySources,
+        compactThreeViewSourceImage: String(nextRetrySources?.[imageIndex] || sourceNode?.data?.compactThreeViewSourceImage || "").trim(),
+        compactThreeViewLastResultImage: lastResultUrl,
         status: "idle",
         error: "",
       });
@@ -9431,7 +9542,10 @@ const handleNodeMouseDown = (e, nid) => {
         status: "success",
         message: `three-view model=${modelId} params=${Object.keys(resolvedParamPayload).length}`,
       });
-      setRunToast({ message: "三视图生成完成", type: "info" });
+      setRunToast({
+        message: imageEntries.length > 1 ? `批量三视图完成，共 ${imageEntries.length} 张` : "三视图生成完成",
+        type: "info",
+      });
       setTimeout(() => setRunToast(null), 2200);
     },
     [
@@ -10391,13 +10505,6 @@ const handleNodeMouseDown = (e, nid) => {
                       <div className="mt-0.5 text-xs font-semibold text-emerald-700">{formatMemberPoints(memberTotalPoint)}</div>
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => logout(true)}
-                    className="mt-3 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-left text-[11px] text-slate-700 hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700"
-                  >
-                    退出登录
-                  </button>
                   {memberInfoLoginUrl ? (
                     <button
                       type="button"
@@ -10451,13 +10558,6 @@ const handleNodeMouseDown = (e, nid) => {
                     <div className="mt-1 text-sm font-semibold text-emerald-700">{formatMemberPoints(memberTotalPoint)}</div>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => logout(true)}
-                  className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] text-slate-700 hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700 transition-colors"
-                >
-                  退出登录
-                </button>
                 {memberInfoLoginUrl ? (
                   <button
                     type="button"
@@ -10694,6 +10794,7 @@ const handleNodeMouseDown = (e, nid) => {
                 onRunCompactRemoveWatermark={runCompactRemoveWatermark}
                 onRunCompactThreeView={runCompactThreeView}
                 onRunCompactVideoUpscale={runCompactVideoUpscale}
+                onRunVideoRmbg={runVideoRmbg}
                 onRunVideoLineart={runVideoLineart}
                 onRunVideoSplit={runVideoSplit}
               />

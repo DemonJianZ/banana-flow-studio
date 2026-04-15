@@ -123,6 +123,12 @@ class VideoLineartRequest(BaseModel):
 class VideoLineartResponse(BaseModel):
     video: str
 
+class VideoRmbgRequest(BaseModel):
+    video: str
+
+class VideoRmbgResponse(BaseModel):
+    video: str
+
 class VideoSplitSegmentRequest(BaseModel):
     start_sec: float
     end_sec: float
@@ -226,6 +232,17 @@ class VideoLineartTaskStartResponse(BaseModel):
     status: str
 
 class VideoLineartTaskStatusResponse(BaseModel):
+    task_id: str
+    status: str
+    progress: float = 0.0
+    video: Optional[str] = None
+    error: Optional[str] = None
+
+class VideoRmbgTaskStartResponse(BaseModel):
+    task_id: str
+    status: str
+
+class VideoRmbgTaskStatusResponse(BaseModel):
     task_id: str
     status: str
     progress: float = 0.0

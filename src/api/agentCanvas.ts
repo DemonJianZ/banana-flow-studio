@@ -121,6 +121,8 @@ const AGENT_IDEA_SCRIPT_TIMEOUT_MS = 90_000;
 const AGENT_DRAMA_TIMEOUT_MS = 90_000;
 const VIDEO_LINEART_POLL_INTERVAL_MS = 1200;
 const VIDEO_LINEART_TIMEOUT_MS = 600_000;
+const VIDEO_RMBG_POLL_INTERVAL_MS = 1200;
+const VIDEO_RMBG_TIMEOUT_MS = 600_000;
 const VIDEO_SPLIT_POLL_INTERVAL_MS = 1200;
 const VIDEO_SPLIT_TIMEOUT_MS = 600_000;
 
@@ -310,6 +312,52 @@ export async function runVideoLineartTask(payload, apiFetch) {
   }
 
   throw new Error("视频转线稿超时，请稍后重试");
+}
+
+export async function runVideoRmbgTask(payload, apiFetch) {
+  const call = createCaller(apiFetch);
+  const startResp = await call("/api/video_rmbg/start", {
+    method: "POST",
+    body: JSON.stringify({
+      video: String(payload?.video || "").trim(),
+    }),
+  });
+  const startData = await startResp.json().catch(() => ({}));
+  if (!startResp.ok) {
+    throw new Error(extractApiError(startData));
+  }
+
+  const taskId = String(startData?.task_id || "").trim();
+  if (!taskId) {
+    throw new Error("视频去背景任务创建失败");
+  }
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < VIDEO_RMBG_TIMEOUT_MS) {
+    const statusResp = await call(`/api/video_rmbg/status/${encodeURIComponent(taskId)}`, {
+      method: "GET",
+    });
+    const statusData = await statusResp.json().catch(() => ({}));
+    if (!statusResp.ok) {
+      throw new Error(extractApiError(statusData));
+    }
+
+    const status = String(statusData?.status || "").trim().toLowerCase();
+    if (status === "success") {
+      const video = String(statusData?.video || "").trim();
+      if (!video) {
+        throw new Error("视频去背景未返回结果");
+      }
+      return statusData;
+    }
+    if (status === "error") {
+      throw new Error(extractApiError(statusData?.error || statusData));
+    }
+
+    await delay(VIDEO_RMBG_POLL_INTERVAL_MS);
+  }
+
+  throw new Error("视频去背景超时，请稍后重试");
 }
 
 export async function runVideoSplitTask(payload, apiFetch) {

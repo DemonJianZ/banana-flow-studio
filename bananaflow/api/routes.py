@@ -37,6 +37,7 @@ from core.config import (
     MODEL_COMFYUI_MULTI_ANGLESHOTS,
     MODEL_COMFYUI_VIDEO_UPSCALE,
     MODEL_COMFYUI_VIDEO_LINEART,
+    MODEL_COMFYUI_VIDEO_RMBG,
     MODEL_COMFYUI_CONTROLNET,
     MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO,
     MODEL_COMFYUI_QWEN_I2V,
@@ -59,10 +60,12 @@ from schemas.api import (
     MultiAngleShotsRequest, MultiAngleShotsResponse,
     VideoUpscaleRequest, VideoUpscaleResponse,
     VideoLineartRequest, VideoLineartResponse,
+    VideoRmbgRequest, VideoRmbgResponse,
     VideoSplitRequest, VideoSplitResponse,
     ControlnetPoseVideoRequest, ControlnetPoseVideoResponse,
     VideoUpscaleTaskStartResponse, VideoUpscaleTaskStatusResponse,
     VideoLineartTaskStartResponse, VideoLineartTaskStatusResponse,
+    VideoRmbgTaskStartResponse, VideoRmbgTaskStatusResponse,
     VideoSplitTaskStartResponse, VideoSplitTaskStatusResponse,
     EditRequest, EditResponse,
     Img2VideoRequest, Img2VideoResponse,
@@ -94,6 +97,7 @@ from services.comfyui import (
     run_controlnet_pose_video_workflow,
     run_video_upscale_workflow,
     run_video_lineart_workflow,
+    run_video_rmbg_workflow,
     run_video_split_workflow,
 )
 
@@ -139,6 +143,8 @@ video_upscale_tasks: Dict[str, Dict[str, Any]] = {}
 video_upscale_tasks_lock = threading.Lock()
 video_lineart_tasks: Dict[str, Dict[str, Any]] = {}
 video_lineart_tasks_lock = threading.Lock()
+video_rmbg_tasks: Dict[str, Dict[str, Any]] = {}
+video_rmbg_tasks_lock = threading.Lock()
 video_split_tasks: Dict[str, Dict[str, Any]] = {}
 video_split_tasks_lock = threading.Lock()
 idea_script_orchestrator = IdeaScriptOrchestrator()
@@ -1440,6 +1446,19 @@ def _set_video_lineart_task(task_id: str, **patch: Any) -> None:
 def _get_video_lineart_task(task_id: str) -> Optional[Dict[str, Any]]:
     with video_lineart_tasks_lock:
         current = video_lineart_tasks.get(task_id)
+        return dict(current) if isinstance(current, dict) else None
+
+
+def _set_video_rmbg_task(task_id: str, **patch: Any) -> None:
+    with video_rmbg_tasks_lock:
+        current = video_rmbg_tasks.get(task_id, {})
+        current.update(patch)
+        video_rmbg_tasks[task_id] = current
+
+
+def _get_video_rmbg_task(task_id: str) -> Optional[Dict[str, Any]]:
+    with video_rmbg_tasks_lock:
+        current = video_rmbg_tasks.get(task_id)
         return dict(current) if isinstance(current, dict) else None
 
 
@@ -3484,6 +3503,68 @@ def _run_video_lineart_task(task_id: str, req_id: str, user_id: Optional[str], p
         )
 
 
+def _run_video_rmbg_task(task_id: str, req_id: str, user_id: Optional[str], payload: Dict[str, Any]) -> None:
+    t0 = time.time()
+
+    try:
+        _set_video_rmbg_task(task_id, status="running", progress=0.1, updated_at=time.time())
+        video_bytes, mime_type = run_video_rmbg_workflow(
+            req_id=req_id,
+            video_input=str(payload.get("video") or ""),
+        )
+        if not video_bytes:
+            raise RuntimeError("No video returned")
+
+        output_data_url = bytes_to_data_url(video_bytes, mime_type=mime_type or "video/mp4")
+        _set_video_rmbg_task(
+            task_id,
+            status="success",
+            progress=1.0,
+            video=output_data_url,
+            updated_at=time.time(),
+        )
+        prompt_logger.log(
+            req_id,
+            "video_rmbg",
+            payload,
+            "",
+            {
+                "model": MODEL_COMFYUI_VIDEO_RMBG,
+            },
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=(str(user_id).strip() or "anonymous"),
+            inputs_full=payload,
+            output_full={"videos": [output_data_url]},
+        )
+        if str(user_id or "").strip():
+            record_usage(str(user_id), MODEL_COMFYUI_VIDEO_RMBG)
+    except Exception as e:
+        _set_video_rmbg_task(
+            task_id,
+            status="error",
+            error=str(e),
+            updated_at=time.time(),
+        )
+        sys_logger.error(f"[{req_id}] VideoRmbg Task Error: {e}")
+        prompt_logger.log(
+            req_id,
+            "video_rmbg",
+            payload,
+            "",
+            {
+                "model": MODEL_COMFYUI_VIDEO_RMBG,
+            },
+            {"file": "mem"},
+            time.time() - t0,
+            user_id=(str(user_id).strip() or "anonymous"),
+            inputs_full=payload,
+            error=str(e),
+        )
+        if str(user_id or "").strip():
+            record_usage(str(user_id), MODEL_COMFYUI_VIDEO_RMBG)
+
+
 def _run_video_split_task(task_id: str, req_id: str, user_id: Optional[str], payload: Dict[str, Any]) -> None:
     t0 = time.time()
     segments = _normalize_video_split_segments(payload.get("segments"))
@@ -3647,6 +3728,45 @@ def video_lineart_status(task_id: str):
         raise HTTPException(status_code=404, detail="Task not found")
 
     return VideoLineartTaskStatusResponse(
+        task_id=task_id,
+        status=str(task.get("status") or "queued"),
+        progress=float(task.get("progress") or 0.0),
+        video=task.get("video"),
+        error=task.get("error"),
+    )
+
+
+@router.post("/api/video_rmbg/start", response_model=VideoRmbgTaskStartResponse)
+def video_rmbg_start(req: VideoRmbgRequest, request: Request, current_user=Depends(_get_current_user_optional)):
+    req_id = request.state.req_id
+    payload = req.model_dump()
+    task_id = uuid.uuid4().hex
+    user_id = str((current_user or {}).get("id") or "").strip()
+    _set_video_rmbg_task(
+        task_id,
+        user_id=user_id,
+        status="queued",
+        progress=0.0,
+        created_at=time.time(),
+        updated_at=time.time(),
+    )
+
+    worker = threading.Thread(
+        target=_run_video_rmbg_task,
+        args=(task_id, req_id, user_id, payload),
+        daemon=True,
+    )
+    worker.start()
+    return VideoRmbgTaskStartResponse(task_id=task_id, status="queued")
+
+
+@router.get("/api/video_rmbg/status/{task_id}", response_model=VideoRmbgTaskStatusResponse)
+def video_rmbg_status(task_id: str):
+    task = _get_video_rmbg_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return VideoRmbgTaskStatusResponse(
         task_id=task_id,
         status=str(task.get("status") or "queued"),
         progress=float(task.get("progress") or 0.0),

@@ -27,11 +27,13 @@ from core.config import (
     COMFYUI_VIDEO_QWEN_I2V_PATH,
     COMFYUI_UPSCALE_PATH,
     COMFYUI_LINEART_PATH,
+    COMFYUI_VIDEO_RMBG_PATH,
     COMFYUI_CONTROLNET_PATH,
     COMFYUI_OUTPUT_NODE_ID,
     COMFYUI_TIMEOUT_SEC,
     COMFYUI_VIDEO_UPSCALE_TIMEOUT_SEC,
     COMFYUI_VIDEO_LINEART_TIMEOUT_SEC,
+    COMFYUI_VIDEO_RMBG_TIMEOUT_SEC,
     COMFYUI_POLL_INTERVAL_SEC,
 )
 from core.logging import sys_logger
@@ -1601,6 +1603,70 @@ def run_video_lineart_workflow(
         output_bytes = _download_file(output_info)
 
         output_name = str(output_info.get("filename") or "lineart.mp4")
+        output_ext = os.path.splitext(output_name)[1].lower() or ".mp4"
+        output_mime = _guess_mime_from_ext(output_ext)
+        if output_mime == "application/octet-stream":
+            output_mime = "video/mp4"
+        return output_bytes, output_mime
+
+
+def run_video_rmbg_workflow(
+    *,
+    req_id: str,
+    video_input: str,
+) -> tuple[bytes, str]:
+    workflow = _load_workflow(COMFYUI_VIDEO_RMBG_PATH)
+    workflow = copy.deepcopy(workflow)
+    load_node_id = _find_workflow_node_id(
+        workflow,
+        ["LoadVideo", "VHS_LoadVideo", "VHS_LoadVideoPath"],
+        required_inputs=["file"],
+    ) or ("7" if str("7") in workflow else None)
+    rmbg_node_id = _find_workflow_node_id(
+        workflow,
+        ["RMBG"],
+        required_inputs=["image"],
+    ) or ("10" if str("10") in workflow else None)
+    save_node_id = _find_workflow_node_id(
+        workflow,
+        ["SaveVideo", "VHS_VideoCombine"],
+        required_inputs=["filename_prefix"],
+    ) or ("13" if str("13") in workflow else None)
+
+    if not load_node_id:
+        raise ComfyUiError(
+            f"Video RMBG workflow missing video load node (class_type in LoadVideo/VHS_LoadVideo/VHS_LoadVideoPath). "
+            f"workflow={COMFYUI_VIDEO_RMBG_PATH}"
+        )
+    if not rmbg_node_id:
+        raise ComfyUiError(
+            f"Video RMBG workflow missing RMBG node (class_type=RMBG). workflow={COMFYUI_VIDEO_RMBG_PATH}"
+        )
+    if not save_node_id:
+        raise ComfyUiError(
+            f"Video RMBG workflow missing save node (class_type in SaveVideo/VHS_VideoCombine). "
+            f"workflow={COMFYUI_VIDEO_RMBG_PATH}"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="comfyui-video-rmbg-") as temp_dir:
+        source_path = _materialize_video_input(video_input, temp_dir)
+        source_ext = os.path.splitext(source_path)[1].lower() or ".mp4"
+        upload_name = f"video-rmbg-{uuid.uuid4().hex}{source_ext}"
+        sys_logger.info(f"[{req_id}] Video RMBG upload {upload_name}")
+
+        with open(source_path, "rb") as f:
+            uploaded = _upload_file(f.read(), upload_name, _guess_mime_from_ext(source_ext))
+
+        _set_node_input(workflow, load_node_id, "file", uploaded)
+        _set_node_input(workflow, save_node_id, "filename_prefix", f"video/rmbg-{req_id}")
+
+        client_id = uuid.uuid4().hex
+        prompt_id = _queue_prompt(workflow, client_id)
+        history = _wait_for_history(prompt_id, timeout_sec=COMFYUI_VIDEO_RMBG_TIMEOUT_SEC)
+        output_info = _pick_output_file(history, preferred_node_ids=[save_node_id])
+        output_bytes = _download_file(output_info)
+
+        output_name = str(output_info.get("filename") or "video-rmbg.mp4")
         output_ext = os.path.splitext(output_name)[1].lower() or ".mp4"
         output_mime = _guess_mime_from_ext(output_ext)
         if output_mime == "application/octet-stream":
