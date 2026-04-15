@@ -9,6 +9,7 @@ from core.http_logging import install_http_logging
 from memory.service import expire_preferences, init_memories_store
 from services.genai_client import init_client
 from sessions.service import init_sessions_store
+from storage.asset_library import init_asset_library_store
 from storage.usage import init_usage_db
 from core.logging import sys_logger
 
@@ -81,6 +82,7 @@ def create_app() -> FastAPI:
 
     init_auth_db()
     init_usage_db()
+    init_asset_library_store()
     init_sessions_store()
     init_memories_store()
     if _as_bool(os.getenv("BANANAFLOW_MEMORY_TTL_CLEANUP_ON_STARTUP"), default=False):

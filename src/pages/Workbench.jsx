@@ -55,6 +55,8 @@ import {
   GripVertical,
   Volume2,
   VolumeX,
+  FolderOpen,
+  Save,
 } from "lucide-react";
 import { useAuth } from "../auth/AuthProvider";
 import { useNavigate } from "../router";
@@ -90,6 +92,7 @@ import {
   setPreference as setMemoryPreference,
 } from "../api/memoryPreferences";
 import { harvestEvalCase } from "../api/qualityFeedback";
+import { saveAssetLibraryDbStore, migrateAssetLibraryLocalStorage } from "../lib/assetLibraryDb";
 import {
   aiChatAnchor,
   aiChatStream,
@@ -131,6 +134,7 @@ const MEDIA_UPLOAD_NODE_DROP_OFFSET_Y = 96;
 const MEDIA_UPLOAD_NODE_EMPTY_HEIGHT = 132;
 const CANVAS_KEY = "bananaflow_canvas_id";
 const AGENT_SESSION_STORE_KEY = "bananaflow_agent_canvas_sessions_v1";
+const ASSET_LIBRARY_STORE_KEY = "bananaflow_asset_library_v1";
 const AGENT_RUN_STEPS = [
   "推断受众",
   "生成脚本",
@@ -648,6 +652,270 @@ const buildVideoSplitDrafts = (segments) =>
     endSec: String(item?.endSec ?? ""),
   }));
 
+const cloneAssetLibrarySnapshot = (value) => {
+  try {
+    return JSON.parse(JSON.stringify(value || {}));
+  } catch {
+    return { nodes: [], connections: [], viewport: { x: 0, y: 0, zoom: 1 } };
+  }
+};
+
+const getSnapshotMediaItems = (snapshot) => {
+  const nodes = Array.isArray(snapshot?.nodes) ? snapshot.nodes : [];
+  const items = [];
+  nodes.forEach((node) => {
+    const mediaGroups = [
+      ...(Array.isArray(node?.data?.images) ? node.data.images : []),
+      ...(Array.isArray(node?.data?.uploadedImages) ? node.data.uploadedImages : []),
+    ];
+    mediaGroups
+      .map((url) => String(url || "").trim())
+      .filter(Boolean)
+      .forEach((url, index) => {
+        items.push({
+          id: `${node?.id || "node"}_${index}`,
+          url,
+          kind: isVideoContent(url) ? "video" : "image",
+          nodeId: String(node?.id || ""),
+          nodeType: String(node?.type || ""),
+          nodeTitle: String(node?.data?.title || "").trim(),
+        });
+      });
+  });
+  return items;
+};
+
+const getAssetLibraryAssetKey = (url, kind) => `${String(kind || "image").trim()}:${String(url || "").trim()}`;
+
+const buildSnapshotDigest = (snapshot) => {
+  const nodes = Array.isArray(snapshot?.nodes) ? snapshot.nodes : [];
+  const connections = Array.isArray(snapshot?.connections) ? snapshot.connections : [];
+  const mediaItems = getSnapshotMediaItems(snapshot);
+  const images = mediaItems.filter((item) => item.kind === "image").length;
+  const videos = mediaItems.filter((item) => item.kind === "video").length;
+  const firstTextNode = nodes.find((node) => node?.type === "text_input" && String(node?.data?.text || "").trim());
+  const firstPromptNode = nodes.find((node) => String(node?.data?.prompt || "").trim());
+  const titleSource =
+    String(firstTextNode?.data?.text || "").trim() ||
+    String(firstPromptNode?.data?.prompt || "").trim() ||
+    String(nodes[0]?.data?.title || "").trim();
+  const title = titleSource ? titleSource.slice(0, 20) : "未命名作品";
+  const summaryParts = [
+    `${nodes.length} 个节点`,
+    `${connections.length} 条连线`,
+  ];
+  if (images > 0) summaryParts.push(`${images} 张图片`);
+  if (videos > 0) summaryParts.push(`${videos} 个视频`);
+  return {
+    title,
+    coverUrl: mediaItems[0]?.url || "",
+    mediaItems,
+    summary: summaryParts.join(" · "),
+    assetCount: mediaItems.length,
+    nodeCount: nodes.length,
+    connectionCount: connections.length,
+  };
+};
+
+const normalizeAssetLibraryItem = (item) => ({
+  id: String(item?.id || "").trim(),
+  kind: String(item?.kind || "draft").trim() || "draft",
+  canvasId: String(item?.canvasId || item?.canvas_id || "").trim(),
+  title: String(item?.title || "").trim(),
+  summary: String(item?.summary || "").trim(),
+  coverUrl: String(item?.coverUrl || item?.cover_url || "").trim(),
+  assetCount: Number(item?.assetCount ?? item?.asset_count ?? 0) || 0,
+  nodeCount: Number(item?.nodeCount ?? item?.node_count ?? 0) || 0,
+  connectionCount: Number(item?.connectionCount ?? item?.connection_count ?? 0) || 0,
+  snapshot: item?.snapshot && typeof item.snapshot === "object" ? item.snapshot : { nodes: [], connections: [], viewport: {} },
+  createdAt: String(item?.createdAt || item?.created_at || "").trim(),
+  updatedAt: String(item?.updatedAt || item?.updated_at || "").trim(),
+});
+
+const normalizeAssetLibraryWork = (item) => ({
+  ...normalizeAssetLibraryItem(item),
+  latestVersionId: String(item?.latestVersionId || item?.latest_version_id || "").trim(),
+  versionCount: Number(item?.versionCount ?? item?.version_count ?? 0) || 0,
+});
+
+const normalizeAssetLibraryWorkVersion = (item) => ({
+  id: String(item?.id || "").trim(),
+  workId: String(item?.workId || item?.work_id || "").trim(),
+  canvasId: String(item?.canvasId || item?.canvas_id || "").trim(),
+  title: String(item?.title || "").trim(),
+  summary: String(item?.summary || "").trim(),
+  coverUrl: String(item?.coverUrl || item?.cover_url || "").trim(),
+  assetCount: Number(item?.assetCount ?? item?.asset_count ?? 0) || 0,
+  nodeCount: Number(item?.nodeCount ?? item?.node_count ?? 0) || 0,
+  connectionCount: Number(item?.connectionCount ?? item?.connection_count ?? 0) || 0,
+  versionIndex: Number(item?.versionIndex ?? item?.version_index ?? 0) || 0,
+  snapshot: item?.snapshot && typeof item.snapshot === "object" ? item.snapshot : { nodes: [], connections: [], viewport: {} },
+  createdAt: Number(item?.createdAt ?? item?.created_at ?? 0) || 0,
+});
+
+const normalizeAssetLibraryAsset = (item) => ({
+  id: String(item?.id || "").trim(),
+  url: String(item?.url || "").trim(),
+  kind: String(item?.kind || "image").trim() || "image",
+  nodeId: String(item?.nodeId || item?.node_id || "").trim(),
+  nodeType: String(item?.nodeType || item?.node_type || "").trim(),
+  nodeTitle: String(item?.nodeTitle || item?.node_title || "").trim(),
+  sourceKind: String(item?.sourceKind || item?.source_kind || "snapshot").trim() || "snapshot",
+  workId: String(item?.workId || item?.work_id || "").trim(),
+  versionId: String(item?.versionId || item?.version_id || "").trim(),
+  canvasId: String(item?.canvasId || item?.canvas_id || "").trim(),
+  title: String(item?.title || "").trim(),
+  createdAt: Number(item?.createdAt ?? item?.created_at ?? 0) || 0,
+  updatedAt: Number(item?.updatedAt ?? item?.updated_at ?? 0) || 0,
+  lastUsedAt: Number(item?.lastUsedAt ?? item?.last_used_at ?? 0) || 0,
+  usageCount: Number(item?.usageCount ?? item?.usage_count ?? 0) || 0,
+});
+
+const buildAssetLibraryAssetsFromSnapshot = (snapshot, meta = {}) => {
+  const timestamp = Number(meta?.createdAt ?? Date.now()) || Date.now();
+  return getSnapshotMediaItems(snapshot).map((item) => ({
+    id: `asset_${generateId()}`,
+    url: item.url,
+    kind: item.kind,
+    nodeId: item.nodeId,
+    nodeType: item.nodeType,
+    nodeTitle: item.nodeTitle,
+    sourceKind: String(meta?.sourceKind || "snapshot"),
+    workId: String(meta?.workId || ""),
+    versionId: String(meta?.versionId || ""),
+    canvasId: String(meta?.canvasId || ""),
+    title: item.nodeTitle || (item.kind === "video" ? "视频资产" : "图片资产"),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    lastUsedAt: timestamp,
+    usageCount: 1,
+  }));
+};
+
+const mergeAssetLibraryAssets = (existingAssets, incomingAssets) => {
+  const nextMap = new Map();
+  (Array.isArray(existingAssets) ? existingAssets : []).forEach((item) => {
+    const normalized = normalizeAssetLibraryAsset(item);
+    if (!normalized.url) return;
+    nextMap.set(getAssetLibraryAssetKey(normalized.url, normalized.kind), normalized);
+  });
+  (Array.isArray(incomingAssets) ? incomingAssets : []).forEach((item) => {
+    const normalized = normalizeAssetLibraryAsset(item);
+    if (!normalized.url) return;
+    const key = getAssetLibraryAssetKey(normalized.url, normalized.kind);
+    const existing = nextMap.get(key);
+    nextMap.set(key, existing
+      ? {
+          ...existing,
+          nodeId: normalized.nodeId || existing.nodeId,
+          nodeType: normalized.nodeType || existing.nodeType,
+          nodeTitle: normalized.nodeTitle || existing.nodeTitle,
+          sourceKind: normalized.sourceKind || existing.sourceKind,
+          workId: normalized.workId || existing.workId,
+          versionId: normalized.versionId || existing.versionId,
+          canvasId: normalized.canvasId || existing.canvasId,
+          title: normalized.title || existing.title,
+          updatedAt: Math.max(existing.updatedAt || 0, normalized.updatedAt || 0),
+          lastUsedAt: Math.max(existing.lastUsedAt || 0, normalized.lastUsedAt || 0),
+          usageCount: (Number(existing.usageCount || 0) || 0) + (Number(normalized.usageCount || 0) || 1),
+        }
+      : normalized);
+  });
+  return Array.from(nextMap.values()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).slice(0, 300);
+};
+
+const normalizeAssetLibraryStore = (store) => {
+  const drafts = Array.isArray(store?.drafts) ? store.drafts.map(normalizeAssetLibraryItem) : [];
+  const rawWorks = Array.isArray(store?.works) ? store.works : [];
+  let works = rawWorks.map(normalizeAssetLibraryWork);
+  let workVersions = Array.isArray(store?.workVersions) ? store.workVersions.map(normalizeAssetLibraryWorkVersion) : [];
+  let assets = Array.isArray(store?.assets) ? store.assets.map(normalizeAssetLibraryAsset) : [];
+
+  if (workVersions.length === 0) {
+    const generatedVersions = [];
+    works = works.map((work) => {
+      const hasSnapshot = work?.snapshot && typeof work.snapshot === "object";
+      if (!hasSnapshot) return work;
+      const versionId = `legacy_version_${work.id || generateId()}`;
+      const createdAt = Number(work.createdAt || work.updatedAt || Date.now()) || Date.now();
+      generatedVersions.push({
+        id: versionId,
+        workId: work.id,
+        canvasId: work.canvasId,
+        title: work.title,
+        summary: work.summary,
+        coverUrl: work.coverUrl,
+        assetCount: work.assetCount,
+        nodeCount: work.nodeCount,
+        connectionCount: work.connectionCount,
+        versionIndex: 1,
+        snapshot: cloneAssetLibrarySnapshot(work.snapshot),
+        createdAt,
+      });
+      return {
+        ...work,
+        latestVersionId: versionId,
+        versionCount: 1,
+      };
+    });
+    workVersions = generatedVersions;
+  }
+
+  if (assets.length === 0) {
+    const generatedAssets = [];
+    workVersions.forEach((version) => {
+      generatedAssets.push(
+        ...buildAssetLibraryAssetsFromSnapshot(version.snapshot, {
+          sourceKind: "work_version",
+          workId: version.workId,
+          versionId: version.id,
+          canvasId: version.canvasId,
+          createdAt: version.createdAt,
+        }),
+      );
+    });
+    drafts.forEach((draft) => {
+      generatedAssets.push(
+        ...buildAssetLibraryAssetsFromSnapshot(draft.snapshot, {
+          sourceKind: "draft",
+          canvasId: draft.canvasId,
+          createdAt: Number(draft.updatedAt || draft.createdAt || Date.now()) || Date.now(),
+        }),
+      );
+    });
+    assets = mergeAssetLibraryAssets([], generatedAssets);
+  } else {
+    assets = mergeAssetLibraryAssets([], assets);
+  }
+
+  const versionCountByWorkId = new Map();
+  workVersions.forEach((version) => {
+    if (!version.workId) return;
+    versionCountByWorkId.set(version.workId, (versionCountByWorkId.get(version.workId) || 0) + 1);
+  });
+  works = works.map((work) => ({
+    ...work,
+    versionCount: work.versionCount || versionCountByWorkId.get(work.id) || 0,
+  }));
+
+  return {
+    drafts,
+    works,
+    workVersions: workVersions.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)),
+    assets,
+  };
+};
+
+const loadAssetLibraryStore = () => {
+  try {
+    const text = localStorage.getItem(ASSET_LIBRARY_STORE_KEY);
+    if (!text) return createEmptyAssetLibraryStore();
+    return normalizeAssetLibraryStore(JSON.parse(text));
+  } catch {
+    return createEmptyAssetLibraryStore();
+  }
+};
+
 const shortenSessionTitle = (text, maxLen = 16) => {
   const value = String(text || "").trim();
   if (!value) return "新会话";
@@ -810,6 +1078,21 @@ const formatDebugTime = (timestamp) => {
   if (!timestamp) return "--";
   try {
     return new Date(timestamp).toLocaleTimeString("zh-CN", { hour12: false });
+  } catch {
+    return "--";
+  }
+};
+
+const formatAssetLibraryTime = (timestamp) => {
+  if (!timestamp) return "--";
+  try {
+    return new Date(timestamp).toLocaleString("zh-CN", {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
   } catch {
     return "--";
   }
@@ -3118,6 +3401,8 @@ const NodeComponent = ({
   onRunVideoRmbg,
   onRunVideoLineart,
   onRunVideoSplit,
+  shouldAutoOpenUploadPicker = false,
+  onAutoOpenUploadPickerHandled,
 }) => {
   const [showCopied, setShowCopied] = useState(false);
   const [compactActiveIndex, setCompactActiveIndex] = useState(0);
@@ -3155,6 +3440,15 @@ const NodeComponent = ({
 
     e.target.value = "";
   };
+
+  const openSimpleMediaUploadPicker = useCallback(
+    (event = null) => {
+      event?.stopPropagation?.();
+      setShowSimpleMediaToolbar(true);
+      simpleMediaUploadInputRef.current?.click();
+    },
+    [],
+  );
 
   const removeImage = (index) => {
     const newImages = (node.data.images || []).filter((_, i) => i !== index);
@@ -3258,6 +3552,26 @@ const NodeComponent = ({
   const hasSimpleMediaVideoSelection = hasSimpleMediaSelection && simpleMediaActiveIsVideo;
 
   useEffect(() => {
+    if (!shouldAutoOpenUploadPicker || !isSimpleMediaInputNode) return;
+    setShowSimpleMediaToolbar(true);
+  }, [isSimpleMediaInputNode, shouldAutoOpenUploadPicker]);
+
+  useEffect(() => {
+    if (!shouldAutoOpenUploadPicker || !isSimpleMediaInputNode || !showSimpleMediaToolbar) return;
+    const timer = window.setTimeout(() => {
+      simpleMediaUploadInputRef.current?.click();
+      onAutoOpenUploadPickerHandled?.(node.id);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [
+    isSimpleMediaInputNode,
+    node.id,
+    onAutoOpenUploadPickerHandled,
+    shouldAutoOpenUploadPicker,
+    showSimpleMediaToolbar,
+  ]);
+
+  useEffect(() => {
     setCompactActiveIndex((prev) => {
       const maxIndex = Math.max(0, compactImages.length - 1);
       return Math.min(prev, maxIndex);
@@ -3344,6 +3658,9 @@ const NodeComponent = ({
       setShowCompactInputActions(false);
     } catch (error) {
       console.error("[Workbench] three_view_direct:error", error);
+      const message = error instanceof Error ? error.message : String(error || "三视图生成失败");
+      setRunToast({ message: `三视图失败：${message}`, type: "error" });
+      setTimeout(() => setRunToast(null), 2600);
     } finally {
       setCompactThreeViewPending(false);
     }
@@ -3477,6 +3794,9 @@ const NodeComponent = ({
       setSimpleMediaActionIndex(-1);
     } catch (error) {
       console.error("[Workbench] simple_three_view_direct:error", error);
+      const message = error instanceof Error ? error.message : String(error || "三视图生成失败");
+      setRunToast({ message: `三视图失败：${message}`, type: "error" });
+      setTimeout(() => setRunToast(null), 2600);
     } finally {
       setCompactThreeViewPending(false);
     }
@@ -3852,16 +4172,19 @@ const NodeComponent = ({
         </div>
       )}
 
-	      {isSimpleMediaInputNode && (showSimpleMediaToolbar || hasSimpleMediaSelection) && (
+      {isSimpleMediaInputNode ? (
+        <input
+          ref={simpleMediaUploadInputRef}
+          type="file"
+          multiple
+          accept="image/*,video/*"
+          className="hidden"
+          onChange={handleFileUpload}
+        />
+      ) : null}
+
+	      {isSimpleMediaInputNode && (node.data.images?.length > 0) && (showSimpleMediaToolbar || hasSimpleMediaSelection) && (
 	        <>
-	          <input
-	            ref={simpleMediaUploadInputRef}
-	            type="file"
-	            multiple
-	            accept="image/*,video/*"
-	            className="hidden"
-	            onChange={handleFileUpload}
-	          />
 	          <div
 	            className="absolute bottom-full left-1/2 z-30 mb-8 w-max max-w-[calc(100vw-48px)] -translate-x-1/2"
 	            onMouseDown={(e) => e.stopPropagation()}
@@ -3873,11 +4196,7 @@ const NodeComponent = ({
                   <button
                     type="button"
                     className={getMediaToolbarButtonClass({ active: !hasSimpleMediaSelection })}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setShowSimpleMediaToolbar(true);
-                      simpleMediaUploadInputRef.current?.click();
-                    }}
+                    onClick={openSimpleMediaUploadPicker}
                     title="上传图片/视频"
                     aria-label="上传图片/视频"
                   >
@@ -3927,11 +4246,7 @@ const NodeComponent = ({
 	                  <button
 	                    type="button"
 	                    className={getMediaToolbarButtonClass({ active: !hasSimpleMediaSelection })}
-	                    onClick={(e) => {
-	                      e.stopPropagation();
-	                      setShowSimpleMediaToolbar(true);
-	                      simpleMediaUploadInputRef.current?.click();
-	                    }}
+	                    onClick={openSimpleMediaUploadPicker}
 	                    title="上传图片/视频"
 	                    aria-label="上传图片/视频"
 	                  >
@@ -4305,6 +4620,12 @@ const NodeComponent = ({
                       description: "请稍候，图片正在轻量修复中",
                     })
                   ) : null}
+                  {compactThreeViewPending && !compactActiveIsVideo ? (
+                    renderBackgroundProcessingOverlay({
+                      title: "正在生成三视图",
+                      description: "请稍候，正在生成多视角结果",
+                    })
+                  ) : null}
                   {compactVideoUpscalePending ? (
                     <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
                       <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(15,23,42,0.24),rgba(2,6,23,0.62))] backdrop-blur-[2px]" />
@@ -4478,6 +4799,10 @@ const NodeComponent = ({
             className="relative overflow-hidden bg-white"
             onClick={(e) => {
               e.stopPropagation();
+              if (!node.data.images?.length) {
+                openSimpleMediaUploadPicker(e);
+                return;
+              }
               setShowSimpleMediaToolbar(true);
             }}
           >
@@ -4591,20 +4916,10 @@ const NodeComponent = ({
                             })
                           ) : null}
                           {showImageThreeViewOverlay ? (
-                            <div className="pointer-events-none absolute inset-0 z-[2] overflow-hidden">
-                              <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(8,15,34,0.2),rgba(8,15,34,0.58))] backdrop-blur-[2px]" />
-                              <div className="absolute inset-y-0 left-1/2 w-[48%] -translate-x-1/2 bg-[linear-gradient(90deg,rgba(255,255,255,0),rgba(103,232,249,0.18),rgba(34,211,238,0.18),rgba(255,255,255,0))] opacity-85 blur-xl animate-pulse" />
-                              <div className="absolute inset-x-0 top-[20%] h-px bg-[linear-gradient(90deg,rgba(34,211,238,0),rgba(34,211,238,0.8),rgba(34,211,238,0))] shadow-[0_0_18px_rgba(34,211,238,0.32)] animate-pulse" />
-                              <div className="absolute inset-0 flex items-center justify-center px-4">
-                                <div className="border border-slate-200 bg-white px-4 py-3 text-center text-slate-700 shadow-[0_16px_40px_rgba(15,23,42,0.12)]">
-                                  <div className="flex items-center justify-center gap-2">
-                                    <Loader2 className="h-4 w-4 animate-spin text-cyan-700" />
-                                    <span className="text-[12px] font-medium tracking-[0.04em] text-slate-800">正在生成三视图</span>
-                                  </div>
-                                  <div className="mt-1 text-[10px] text-slate-600">请稍候，正在生成多视角结果</div>
-                                </div>
-                              </div>
-                            </div>
+                            renderBackgroundProcessingOverlay({
+                              title: "正在生成三视图",
+                              description: "请稍候，正在生成多视角结果",
+                            })
                           ) : null}
 	                        </>
                       )}
@@ -4618,12 +4933,9 @@ const NodeComponent = ({
               <div
                 className="nodrag flex min-h-[132px] cursor-pointer items-center justify-center px-4 py-8 text-center text-[11px] text-slate-500 transition hover:bg-slate-50 hover:text-slate-700"
                 onMouseDown={(e) => e.stopPropagation()}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setShowSimpleMediaToolbar(true);
-                }}
+                onClick={openSimpleMediaUploadPicker}
               >
-                点击右上角上传图片/视频
+                点击上传图片/视频
               </div>
             )}
           </div>
@@ -4785,6 +5097,17 @@ const Workbench = () => {
   const [hoveredSidebarPreview, setHoveredSidebarPreview] = useState(null);
   const [sidebarWorkflowMenu, setSidebarWorkflowMenu] = useState(null);
   const [activeSidebarItemKey, setActiveSidebarItemKey] = useState("");
+  const [assetLibraryStore, setAssetLibraryStore] = useState(() => loadAssetLibraryStore());
+  const [showAssetLibrary, setShowAssetLibrary] = useState(false);
+  const [assetLibraryTab, setAssetLibraryTab] = useState("works");
+  const [assetLibraryLoaded, setAssetLibraryLoaded] = useState(false);
+  const [expandedAssetWorkIds, setExpandedAssetWorkIds] = useState(new Set());
+  const [assetLibraryDetailWorkId, setAssetLibraryDetailWorkId] = useState("");
+  const [pendingUploadNodeId, setPendingUploadNodeId] = useState("");
+  const [canvasId] = useState(() => {
+    const saved = localStorage.getItem(CANVAS_KEY);
+    return saved || newCanvasId();
+  });
   const [rightPanelWidth, setRightPanelWidth] = useState(460);
   const [agentStore, setAgentStore] = useState(() => loadAgentStore());
   const [agentInput, setAgentInput] = useState("");
@@ -4857,6 +5180,7 @@ const Workbench = () => {
   const agentUploadInputRef = useRef(null);
   const agentComposerRef = useRef(null);
   const workspaceShellRef = useRef(null);
+  const assetLibraryRestoredRef = useRef(false);
   const viewportRef = useRef(viewport);
   const promptPolishApplyRef = useRef(null);
   const agentCardDragRef = useRef(null);
@@ -4880,6 +5204,79 @@ const Workbench = () => {
   const hasActiveAgentConversation = agentTurns.length > 0 || !!activePendingTask;
   const hasAgentResultCards = agentResultCards.length > 0;
   const minimizedAgentCards = agentResultCards.filter((card) => card.minimized);
+  const assetLibraryDrafts = useMemo(() => assetLibraryStore?.drafts || EMPTY_LIST, [assetLibraryStore]);
+  const assetLibraryWorks = useMemo(() => assetLibraryStore?.works || EMPTY_LIST, [assetLibraryStore]);
+  const assetLibraryWorkVersions = useMemo(() => assetLibraryStore?.workVersions || EMPTY_LIST, [assetLibraryStore]);
+  const assetLibraryAssets = useMemo(() => assetLibraryStore?.assets || EMPTY_LIST, [assetLibraryStore]);
+  const assetLibraryVersionsByWorkId = useMemo(() => {
+    const next = new Map();
+    assetLibraryWorkVersions.forEach((item) => {
+      if (!item?.workId) return;
+      if (!next.has(item.workId)) next.set(item.workId, []);
+      next.get(item.workId).push(item);
+    });
+    next.forEach((list) => list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)));
+    return next;
+  }, [assetLibraryWorkVersions]);
+  const assetLibraryAssetsByWorkId = useMemo(() => {
+    const next = new Map();
+    assetLibraryAssets.forEach((item) => {
+      if (!item?.workId) return;
+      if (!next.has(item.workId)) next.set(item.workId, []);
+      next.get(item.workId).push(item);
+    });
+    next.forEach((list) => list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)));
+    return next;
+  }, [assetLibraryAssets]);
+  const activeCanvasDraft = useMemo(
+    () => assetLibraryDrafts.find((item) => item.canvasId === canvasId) || null,
+    [assetLibraryDrafts, canvasId],
+  );
+  const assetLibraryDetailWork = useMemo(
+    () => assetLibraryWorks.find((item) => item.id === assetLibraryDetailWorkId) || null,
+    [assetLibraryWorks, assetLibraryDetailWorkId],
+  );
+  const assetLibraryDetailVersions = useMemo(
+    () => (assetLibraryDetailWork ? assetLibraryVersionsByWorkId.get(assetLibraryDetailWork.id) || EMPTY_LIST : EMPTY_LIST),
+    [assetLibraryDetailWork, assetLibraryVersionsByWorkId],
+  );
+  const assetLibraryDetailLatestVersion = assetLibraryDetailVersions[0] || null;
+  const assetLibraryDetailSnapshot = assetLibraryDetailLatestVersion?.snapshot || assetLibraryDetailWork?.snapshot || null;
+  const assetLibraryDetailDigest = useMemo(
+    () => (assetLibraryDetailSnapshot ? buildSnapshotDigest(assetLibraryDetailSnapshot) : null),
+    [assetLibraryDetailSnapshot],
+  );
+  const assetLibraryDetailAssets = useMemo(() => {
+    if (!assetLibraryDetailWork) return EMPTY_LIST;
+    const linkedAssets = assetLibraryAssetsByWorkId.get(assetLibraryDetailWork.id) || EMPTY_LIST;
+    if (linkedAssets.length > 0) return linkedAssets;
+    return Array.isArray(assetLibraryDetailDigest?.mediaItems)
+      ? assetLibraryDetailDigest.mediaItems.map((item, index) => ({
+          id: `detail_fallback_${assetLibraryDetailWork.id}_${index}`,
+          url: item.url,
+          kind: item.kind,
+          title: item.nodeTitle || (item.kind === "video" ? "视频素材" : "图片素材"),
+          nodeTitle: item.nodeTitle,
+          updatedAt: assetLibraryDetailWork.updatedAt || assetLibraryDetailWork.createdAt || Date.now(),
+          createdAt: assetLibraryDetailWork.createdAt || assetLibraryDetailWork.updatedAt || Date.now(),
+          usageCount: 1,
+        }))
+      : EMPTY_LIST;
+  }, [assetLibraryAssetsByWorkId, assetLibraryDetailDigest, assetLibraryDetailWork]);
+
+  useEffect(() => {
+    if (assetLibraryDetailWorkId && !assetLibraryDetailWork) {
+      setAssetLibraryDetailWorkId("");
+    }
+  }, [assetLibraryDetailWork, assetLibraryDetailWorkId]);
+
+  useEffect(() => {
+    if (!pendingUploadNodeId) return;
+    const exists = nodes.some((item) => item.id === pendingUploadNodeId);
+    if (!exists) {
+      setPendingUploadNodeId("");
+    }
+  }, [nodes, pendingUploadNodeId]);
 
   const openPromptPolishPicker = useCallback(({ title = "AI 润色", sourcePrompt = "", variants = [], onUse }) => {
     const normalizedVariants = normalizePromptPolishVariants({ variants });
@@ -5399,11 +5796,6 @@ const Workbench = () => {
   const nodesRef = useRef(nodes);
   const connectionsRef = useRef(connections);
 
-  const [canvasId] = useState(() => {
-    // 如果你后续支持“画布列表/切换”，这里可以从 URL 参数取
-    const saved = localStorage.getItem(CANVAS_KEY);
-    return saved || newCanvasId();
-  });
   const handleRightPanelResizeStart = useCallback(
     (e) => {
       if (agentHistoryCollapsed) return;
@@ -5437,6 +5829,94 @@ const Workbench = () => {
   useEffect(() => {
     saveAgentStore(agentStore);
   }, [agentStore]);
+  useEffect(() => {
+    let cancelled = false;
+    setAssetLibraryLoaded(false);
+    migrateAssetLibraryLocalStorage(loadAssetLibraryStore)
+      .then((store) => {
+        if (cancelled) return;
+        setAssetLibraryStore(normalizeAssetLibraryStore(store));
+        setAssetLibraryLoaded(true);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error("[Workbench] asset_library_indexeddb_load:error", error);
+        setAssetLibraryStore(normalizeAssetLibraryStore(loadAssetLibraryStore()));
+        setAssetLibraryLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  useEffect(() => {
+    if (!assetLibraryLoaded) return;
+    void saveAssetLibraryDbStore(assetLibraryStore).catch((error) => {
+      console.error("[Workbench] asset_library_indexeddb_save:error", error);
+    });
+  }, [assetLibraryLoaded, assetLibraryStore]);
+  useEffect(() => {
+    if (assetLibraryRestoredRef.current) return;
+    const draft = (assetLibraryStore?.drafts || []).find((item) => item.canvasId === canvasId);
+    const hasDraftContent =
+      (Array.isArray(draft?.snapshot?.nodes) && draft.snapshot.nodes.length > 0) ||
+      (Array.isArray(draft?.snapshot?.connections) && draft.snapshot.connections.length > 0);
+    if (hasDraftContent) {
+      const nextSnapshot = cloneAssetLibrarySnapshot(draft.snapshot);
+      setNodes(Array.isArray(nextSnapshot.nodes) ? nextSnapshot.nodes : []);
+      setConnections(Array.isArray(nextSnapshot.connections) ? nextSnapshot.connections : []);
+      if (nextSnapshot.viewport && typeof nextSnapshot.viewport === "object") {
+        setViewport({
+          x: Number(nextSnapshot.viewport.x || 0),
+          y: Number(nextSnapshot.viewport.y || 0),
+          zoom: Number(nextSnapshot.viewport.zoom || 1) || 1,
+        });
+      }
+      setRunToast({ message: "已恢复上次未完成的画布草稿", type: "info" });
+      setTimeout(() => setRunToast(null), 2200);
+    }
+    assetLibraryRestoredRef.current = true;
+  }, [assetLibraryStore, canvasId]);
+  useEffect(() => {
+    if (!assetLibraryRestoredRef.current || !assetLibraryLoaded) return undefined;
+    const timer = window.setTimeout(() => {
+      const snapshot = cloneAssetLibrarySnapshot({
+        nodes,
+        connections,
+        viewport,
+      });
+      const digest = buildSnapshotDigest(snapshot);
+      const draftRecord = {
+        id: `draft_${canvasId}`,
+        canvasId,
+        title: digest.title,
+        summary: digest.summary,
+        coverUrl: digest.coverUrl,
+        assetCount: digest.assetCount,
+        nodeCount: digest.nodeCount,
+        connectionCount: digest.connectionCount,
+        updatedAt: Date.now(),
+        snapshot,
+      };
+      setAssetLibraryStore((prev) => {
+        const current = normalizeAssetLibraryStore(prev);
+        const draftsNext = [draftRecord, ...((current.drafts || []).filter((item) => item.canvasId !== canvasId))].slice(0, 12);
+        const nonDraftAssets = (current.assets || []).filter(
+          (item) => !(item.sourceKind === "draft" && item.canvasId === canvasId),
+        );
+        const draftAssets = buildAssetLibraryAssetsFromSnapshot(snapshot, {
+          sourceKind: "draft",
+          canvasId,
+          createdAt: Date.now(),
+        });
+        return {
+          ...current,
+          drafts: draftsNext,
+          assets: mergeAssetLibraryAssets(nonDraftAssets, draftAssets),
+        };
+      });
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [assetLibraryLoaded, canvasId, connections, nodes, viewport]);
   useEffect(() => {
     const onMouseMove = (event) => {
       const drag = rightPanelResizeRef.current;
@@ -5697,6 +6177,137 @@ const Workbench = () => {
   };
   const canUndo = historyStep > 0;
   const canRedo = historyStep < history.length - 1;
+
+  const restoreSnapshotToCanvas = useCallback(
+    (snapshot, successMessage = "已恢复到画布") => {
+      if (!snapshot || typeof snapshot !== "object") return;
+      pushHistory();
+      const nextSnapshot = cloneAssetLibrarySnapshot(snapshot);
+      setNodes(Array.isArray(nextSnapshot.nodes) ? nextSnapshot.nodes : []);
+      setConnections(Array.isArray(nextSnapshot.connections) ? nextSnapshot.connections : []);
+      if (nextSnapshot.viewport && typeof nextSnapshot.viewport === "object") {
+        setViewport({
+          x: Number(nextSnapshot.viewport.x || 0),
+          y: Number(nextSnapshot.viewport.y || 0),
+          zoom: Number(nextSnapshot.viewport.zoom || 1) || 1,
+        });
+      }
+      setSelectedNodeIds(new Set());
+      setSelectedConnectionIds(new Set());
+      setActiveNodeId(null);
+      setShowAssetLibrary(false);
+      setRunToast({ message: successMessage, type: "info" });
+      setTimeout(() => setRunToast(null), 2200);
+    },
+    [pushHistory],
+  );
+
+  const saveCurrentCanvasAsWork = useCallback(() => {
+    if (nodes.length === 0 && connections.length === 0) {
+      setRunToast({ message: "当前画布为空，先添加素材或工作流再保存", type: "error" });
+      setTimeout(() => setRunToast(null), 2200);
+      return;
+    }
+    const snapshot = cloneAssetLibrarySnapshot({
+      nodes,
+      connections,
+      viewport,
+    });
+    const digest = buildSnapshotDigest(snapshot);
+    const now = Date.now();
+    setAssetLibraryStore((prev) => {
+      const current = normalizeAssetLibraryStore(prev);
+      const existingWork = (current.works || []).find((item) => item.canvasId === canvasId) || null;
+      const workId = existingWork?.id || `work_${generateId()}`;
+      const existingVersions = (current.workVersions || []).filter((item) => item.workId === workId);
+      const versionRecord = {
+        id: `work_version_${generateId()}`,
+        workId,
+        canvasId,
+        title: digest.title,
+        summary: digest.summary,
+        coverUrl: digest.coverUrl,
+        assetCount: digest.assetCount,
+        nodeCount: digest.nodeCount,
+        connectionCount: digest.connectionCount,
+        versionIndex: existingVersions.length + 1,
+        snapshot,
+        createdAt: now,
+      };
+      const workRecord = {
+        ...(existingWork || {}),
+        id: workId,
+        kind: "work",
+        canvasId,
+        title: digest.title,
+        summary: digest.summary,
+        coverUrl: digest.coverUrl,
+        assetCount: digest.assetCount,
+        nodeCount: digest.nodeCount,
+        connectionCount: digest.connectionCount,
+        latestVersionId: versionRecord.id,
+        versionCount: existingVersions.length + 1,
+        createdAt: existingWork?.createdAt || now,
+        updatedAt: now,
+        snapshot,
+      };
+      const nextWorks = existingWork
+        ? [workRecord, ...(current.works || []).filter((item) => item.id !== workId)]
+        : [workRecord, ...(current.works || [])];
+      const nextAssets = mergeAssetLibraryAssets(
+        current.assets,
+        buildAssetLibraryAssetsFromSnapshot(snapshot, {
+          sourceKind: "work_version",
+          workId,
+          versionId: versionRecord.id,
+          canvasId,
+          createdAt: now,
+        }),
+      );
+      return {
+        ...current,
+        works: nextWorks.slice(0, 30),
+        workVersions: [versionRecord, ...(current.workVersions || [])].slice(0, 200),
+        assets: nextAssets,
+        drafts: (current.drafts || []).map((item) =>
+          item.canvasId === canvasId
+            ? {
+                ...item,
+                title: workRecord.title,
+                summary: workRecord.summary,
+                coverUrl: workRecord.coverUrl,
+                assetCount: workRecord.assetCount,
+                nodeCount: workRecord.nodeCount,
+                connectionCount: workRecord.connectionCount,
+                snapshot,
+                updatedAt: now,
+              }
+            : item,
+        ),
+      };
+    });
+    setShowAssetLibrary(true);
+    setAssetLibraryTab("works");
+    setRunToast({ message: "已保存到作品库，并追加一个新版本", type: "info" });
+    setTimeout(() => setRunToast(null), 2200);
+  }, [canvasId, connections, nodes, viewport]);
+
+  const removeAssetLibraryItem = useCallback((kind, id) => {
+    setAssetLibraryStore((prev) => {
+      const current = normalizeAssetLibraryStore(prev);
+      if (kind === "works") {
+        return {
+          ...current,
+          works: (current.works || []).filter((item) => item.id !== id),
+          workVersions: (current.workVersions || []).filter((item) => item.workId !== id),
+        };
+      }
+      return {
+        ...current,
+        [kind]: (current?.[kind] || []).filter((item) => item.id !== id),
+      };
+    });
+  }, []);
 
   const deleteSelection = () => {
     if (selectedNodeIds.size === 0 && selectedConnectionIds.size === 0) return;
@@ -6016,6 +6627,33 @@ const handleNodeMouseDown = (e, nid) => {
     return getCanvasViewportCenterPoint();
   }, [getCanvasViewportCenterPoint, screenToCanvas]);
 
+  const restoreAssetToCanvas = useCallback(
+    (asset) => {
+      const url = String(asset?.url || "").trim();
+      if (!url) return;
+      createMediaUploadNodeAt(getCanvasViewportCenterPoint(), [url]);
+      setShowAssetLibrary(false);
+      setRunToast({ message: "已将素材放回画布", type: "info" });
+      setTimeout(() => setRunToast(null), 2200);
+      setAssetLibraryStore((prev) => {
+        const current = normalizeAssetLibraryStore(prev);
+        return {
+          ...current,
+          assets: (current.assets || []).map((item) =>
+            item.id === asset.id
+              ? {
+                  ...item,
+                  lastUsedAt: Date.now(),
+                  usageCount: (Number(item.usageCount || 0) || 0) + 1,
+                }
+              : item,
+          ),
+        };
+      });
+    },
+    [createMediaUploadNodeAt, getCanvasViewportCenterPoint],
+  );
+
   const handleCanvasDragEnter = useCallback((e) => {
     const hasMediaFiles = Array.from(e.dataTransfer?.items || []).some(
       (item) =>
@@ -6183,6 +6821,7 @@ const handleNodeMouseDown = (e, nid) => {
     setNodes((p) => [...p, newNode]);
     if (newConnection) setConnections((p) => [...p, newConnection]);
     setSelectedNodeIds(new Set([id]));
+    return id;
   };
 
   const createText2ImgTemplate = () => {
@@ -9468,6 +10107,7 @@ const handleNodeMouseDown = (e, nid) => {
       if (!imageEntries.length) {
         throw new Error("缺少三视图输入图片");
       }
+      const firstSourceImage = String(retrySources?.[imageEntries[0]?.index] || imageEntries[0]?.item || "").trim();
 
       const modelId = String(threeViewImageModelId || "").trim();
       if (!modelId) {
@@ -10247,6 +10887,482 @@ const handleNodeMouseDown = (e, nid) => {
         </div>
       )}
 
+      {showAssetLibrary ? (
+        <div
+          className="fixed inset-0 z-[88] bg-[rgba(15,23,42,0.14)] backdrop-blur-[2px]"
+          onMouseDown={() => {
+            setShowAssetLibrary(false);
+            setAssetLibraryDetailWorkId("");
+          }}
+        >
+          <div
+            className="absolute right-4 top-24 bottom-4 z-[89] flex w-[420px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_28px_60px_rgba(15,23,42,0.16)]"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.8)_46%,rgba(255,255,255,0.7))]" />
+            <div className="relative flex items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
+              <div>
+                <div className="text-[15px] font-semibold text-slate-800">用户资产库</div>
+                <div className="mt-1 text-[12px] leading-5 text-slate-500">
+                  {assetLibraryDetailWork
+                    ? "查看作品封面、摘要、版本与素材，并从任意版本继续创作。"
+                    : "自动保存当前草稿，手动沉淀作品，并随时恢复到画布继续创作。"}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAssetLibrary(false);
+                  setAssetLibraryDetailWorkId("");
+                }}
+                className="rounded-full p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-900"
+                aria-label="关闭资产库"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="relative flex items-center gap-2 border-b border-slate-200 bg-slate-50/80 px-5 py-3">
+              {assetLibraryDetailWork ? (
+                <button
+                  type="button"
+                  onClick={() => setAssetLibraryDetailWorkId("")}
+                  className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] text-slate-700 transition-colors hover:border-slate-300 hover:bg-slate-50"
+                >
+                  <ChevronRight className="h-3.5 w-3.5 rotate-180" />
+                  返回列表
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => {
+                  setAssetLibraryTab("works");
+                  setAssetLibraryDetailWorkId("");
+                }}
+                className={`rounded-full px-3 py-1.5 text-[11px] transition-colors ${
+                  assetLibraryTab === "works" ? "bg-slate-900 text-white" : "border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-slate-900"
+                }`}
+              >
+                作品 {assetLibraryWorks.length}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAssetLibraryTab("drafts");
+                  setAssetLibraryDetailWorkId("");
+                }}
+                className={`rounded-full px-3 py-1.5 text-[11px] transition-colors ${
+                  assetLibraryTab === "drafts" ? "bg-slate-900 text-white" : "border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-slate-900"
+                }`}
+              >
+                草稿 {assetLibraryDrafts.length}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAssetLibraryTab("assets");
+                  setAssetLibraryDetailWorkId("");
+                }}
+                className={`rounded-full px-3 py-1.5 text-[11px] transition-colors ${
+                  assetLibraryTab === "assets" ? "bg-slate-900 text-white" : "border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-slate-900"
+                }`}
+              >
+                素材 {assetLibraryAssets.length}
+              </button>
+              <button
+                type="button"
+                onClick={saveCurrentCanvasAsWork}
+                disabled={nodes.length === 0 && connections.length === 0}
+                className={`ml-auto inline-flex items-center gap-1 rounded-full px-2.5 py-1.5 text-[10px] transition-colors ${
+                  nodes.length === 0 && connections.length === 0
+                    ? "cursor-not-allowed border border-slate-200 bg-white text-slate-300"
+                    : "border border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:bg-slate-100 hover:text-slate-700"
+                }`}
+              >
+                <Save className="h-3.5 w-3.5" />
+                保存当前作品
+              </button>
+            </div>
+            <div className="relative min-h-0 flex-1 overflow-y-auto bg-slate-50/70 p-4 custom-scrollbar">
+              {assetLibraryDetailWork ? (
+                <div className="space-y-6">
+                  <div className="overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_22px_44px_rgba(15,23,42,0.08)]">
+                    <div className="flex gap-5 p-5">
+                      <div className="flex h-36 w-36 shrink-0 items-center justify-center overflow-hidden rounded-[22px] border border-slate-200 bg-slate-100 shadow-[0_10px_24px_rgba(15,23,42,0.06)]">
+                        {assetLibraryDetailWork.coverUrl ? (
+                          isVideoContent(assetLibraryDetailWork.coverUrl) ? (
+                            <video src={assetLibraryDetailWork.coverUrl} className="h-full w-full object-cover" muted loop playsInline />
+                          ) : (
+                            <img src={assetLibraryDetailWork.coverUrl} alt={assetLibraryDetailWork.title} className="h-full w-full object-cover" />
+                          )
+                        ) : (
+                          <FolderOpen className="h-6 w-6 text-slate-400" />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[22px] font-semibold tracking-[-0.02em] text-slate-950">
+                          {assetLibraryDetailWork.title || "未命名作品"}
+                        </div>
+                        <div className="mt-3 text-[12px] leading-6 text-slate-500">
+                          {assetLibraryDetailWork.summary || assetLibraryDetailDigest?.summary || "暂无摘要"}
+                        </div>
+                        <div className="mt-4 flex flex-wrap gap-1.5 text-[10px] text-slate-400">
+                          <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">
+                            最近更新 {formatAssetLibraryTime(assetLibraryDetailWork.updatedAt || assetLibraryDetailWork.createdAt)}
+                          </span>
+                          <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">
+                            {assetLibraryDetailWork.versionCount || assetLibraryDetailVersions.length || 1} 个版本
+                          </span>
+                          <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">
+                            {assetLibraryDetailAssets.length} 个素材
+                          </span>
+                          <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">
+                            {assetLibraryDetailWork.nodeCount || assetLibraryDetailDigest?.nodeCount || 0} 节点
+                          </span>
+                        </div>
+                        <div className="mt-5 flex items-center justify-between gap-3">
+                          <button
+                            type="button"
+                            onClick={() => restoreSnapshotToCanvas(assetLibraryDetailSnapshot, "已恢复作品到画布")}
+                            className="inline-flex items-center gap-1.5 rounded-full bg-slate-900 px-4 py-2 text-[11px] font-medium text-white transition-colors hover:bg-slate-800"
+                          >
+                            <FolderOpen className="h-3.5 w-3.5" />
+                            继续创作
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!window.confirm("确认删除这份作品吗？")) return;
+                              removeAssetLibraryItem("works", assetLibraryDetailWork.id);
+                              setAssetLibraryDetailWorkId("");
+                            }}
+                            className="inline-flex items-center gap-1 rounded-full px-1 py-1 text-[10px] text-slate-400 transition-colors hover:text-rose-600"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            删除作品
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="overflow-hidden rounded-[22px] border border-slate-200 bg-white shadow-[0_8px_18px_rgba(15,23,42,0.04)]">
+                    <div className="border-b border-slate-200 px-4 py-3">
+                      <div className="text-[13px] font-semibold text-slate-800">版本历史</div>
+                      <div className="mt-1 text-[11px] text-slate-500">每次保存作品都会在这里保留一个可恢复版本。</div>
+                    </div>
+                    <div className="space-y-1 p-3">
+                      {assetLibraryDetailVersions.length === 0 ? (
+                        <div className="rounded-[18px] border border-dashed border-slate-200 bg-slate-50 px-3 py-6 text-center text-[11px] text-slate-500">
+                          这份作品暂时没有可展示的版本记录。
+                        </div>
+                      ) : null}
+                      {assetLibraryDetailVersions.map((version) => {
+                        const versionDigest = buildSnapshotDigest(version.snapshot);
+                        return (
+                          <div key={version.id} className="flex items-center gap-3 rounded-[16px] px-2 py-2 transition-colors hover:bg-slate-50">
+                            <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-slate-300" />
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2 text-[11px] text-slate-700">
+                                <span className="font-medium">版本 {version.versionIndex || 1}</span>
+                                <span className="text-slate-400">{formatAssetLibraryTime(version.createdAt)}</span>
+                              </div>
+                              <div className="mt-1 truncate text-[10px] text-slate-400">
+                                {version.summary || versionDigest.summary}
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => restoreSnapshotToCanvas(version.snapshot, `已恢复版本 ${version.versionIndex || 1} 到画布`)}
+                              className="inline-flex shrink-0 items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[10px] text-slate-500 transition-colors hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700"
+                            >
+                              恢复
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="overflow-hidden rounded-[22px] border border-slate-200 bg-white shadow-[0_8px_18px_rgba(15,23,42,0.04)]">
+                    <div className="border-b border-slate-200 px-4 py-3">
+                      <div className="text-[13px] font-semibold text-slate-800">关联素材</div>
+                      <div className="mt-1 text-[11px] text-slate-500">从这个作品沉淀出来的图片和视频，可随时放回画布复用。</div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 p-3">
+                      {assetLibraryDetailAssets.length === 0 ? (
+                        <div className="col-span-2 rounded-[18px] border border-dashed border-slate-200 bg-slate-50 px-3 py-6 text-center text-[11px] text-slate-500">
+                          这份作品还没有沉淀出独立素材。
+                        </div>
+                      ) : null}
+                      {assetLibraryDetailAssets.map((item) => (
+                        <div key={item.id} className="group overflow-hidden rounded-[18px] border border-slate-200 bg-white transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_14px_28px_rgba(15,23,42,0.08)]">
+                          <div className="flex h-32 items-center justify-center overflow-hidden bg-slate-100">
+                            {item.url ? (
+                              item.kind === "video" ? (
+                                <video src={item.url} className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]" muted loop playsInline />
+                              ) : (
+                                <img src={item.url} alt={item.title || "素材"} className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]" />
+                              )
+                            ) : (
+                              <FolderOpen className="h-5 w-5 text-slate-400" />
+                            )}
+                          </div>
+                          <div className="space-y-2 p-3">
+                            <div className="truncate text-[11px] font-medium text-slate-800">
+                              {item.title || (item.kind === "video" ? "视频素材" : "图片素材")}
+                            </div>
+                            <div className="text-[10px] leading-5 text-slate-400">
+                              {item.nodeTitle || "来自画布节点"} · {item.kind === "video" ? "视频" : "图片"}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => restoreAssetToCanvas(item)}
+                              className="inline-flex w-full items-center justify-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[10px] text-slate-500 transition-colors hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700"
+                            >
+                              <FolderOpen className="h-3 w-3" />
+                              放回画布
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : assetLibraryTab === "drafts" ? (
+                <div className="space-y-3">
+                  {activeCanvasDraft ? (
+                    <div className="rounded-[20px] border border-cyan-200 bg-cyan-50 px-4 py-3 text-[12px] text-cyan-700">
+                      当前画布草稿已自动保存：{formatAssetLibraryTime(activeCanvasDraft.updatedAt)}
+                    </div>
+                  ) : null}
+                  {assetLibraryDrafts.length === 0 ? (
+                    <div className="rounded-[22px] border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-[12px] text-slate-500">
+                      还没有草稿。开始拖素材、搭工作流后会自动出现在这里。
+                    </div>
+                  ) : null}
+                  {assetLibraryDrafts.map((item) => {
+                    const digest = buildSnapshotDigest(item.snapshot);
+                    const imageCount = digest.mediaItems.filter((media) => media.kind === "image").length;
+                    const videoCount = digest.mediaItems.filter((media) => media.kind === "video").length;
+                    return (
+                      <div key={item.id} className="overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-[0_10px_24px_rgba(15,23,42,0.05)]">
+                        <div className="flex gap-3 p-3">
+                          <div className="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-[18px] border border-slate-200 bg-slate-100">
+                            {item.coverUrl ? (
+                              isVideoContent(item.coverUrl) ? (
+                                <video src={item.coverUrl} className="h-full w-full object-cover" muted loop playsInline />
+                              ) : (
+                                <img src={item.coverUrl} alt={item.title} className="h-full w-full object-cover" />
+                              )
+                            ) : (
+                              <FolderOpen className="h-5 w-5 text-slate-400" />
+                            )}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-[15px] font-semibold tracking-[-0.01em] text-slate-950">{item.title || "未命名草稿"}</div>
+                            <div className="mt-1 text-[11px] leading-5 text-slate-500">{item.summary || digest.summary}</div>
+                            <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] text-slate-400">
+                              <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">{formatAssetLibraryTime(item.updatedAt)}</span>
+                              <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">{item.nodeCount || digest.nodeCount} 节点</span>
+                              {imageCount > 0 ? <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">{imageCount} 图</span> : null}
+                              {videoCount > 0 ? <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">{videoCount} 视频</span> : null}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 border-t border-slate-200 px-3 py-2.5">
+                          <button
+                            type="button"
+                            onClick={() => restoreSnapshotToCanvas(item.snapshot, "已恢复草稿到画布")}
+                            className="inline-flex items-center gap-1.5 rounded-full bg-slate-900 px-3.5 py-1.5 text-[11px] font-medium text-white transition-colors hover:bg-slate-800"
+                          >
+                            <FolderOpen className="h-3.5 w-3.5" />
+                            恢复到画布
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!window.confirm("确认删除这份草稿吗？")) return;
+                              removeAssetLibraryItem("drafts", item.id);
+                            }}
+                            className="inline-flex items-center gap-1.5 rounded-full px-1 py-1.5 text-[11px] text-slate-500 transition-colors hover:text-rose-600"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            删除
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : assetLibraryTab === "works" ? (
+                <div className="space-y-3">
+                  {assetLibraryWorks.length === 0 ? (
+                    <div className="rounded-[22px] border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-[12px] text-slate-500">
+                      还没有保存作品。先把当前画布保存为作品，后续就能反复复现和继续编辑。
+                    </div>
+                  ) : null}
+                  {assetLibraryWorks.map((item) => {
+                    const versions = assetLibraryVersionsByWorkId.get(item.id) || EMPTY_LIST;
+                    const latestVersion = versions[0] || null;
+                    const latestSnapshot = latestVersion?.snapshot || item.snapshot;
+                    const digest = buildSnapshotDigest(latestSnapshot);
+                    const imageCount = digest.mediaItems.filter((media) => media.kind === "image").length;
+                    const videoCount = digest.mediaItems.filter((media) => media.kind === "video").length;
+                    const isExpanded = expandedAssetWorkIds.has(item.id);
+                    return (
+                      <div key={item.id} className="overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-[0_10px_24px_rgba(15,23,42,0.05)]">
+                        <div className="flex gap-3 p-3">
+                          <div className="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-[18px] border border-slate-200 bg-slate-100">
+                            {item.coverUrl ? (
+                              isVideoContent(item.coverUrl) ? (
+                                <video src={item.coverUrl} className="h-full w-full object-cover" muted loop playsInline />
+                              ) : (
+                                <img src={item.coverUrl} alt={item.title} className="h-full w-full object-cover" />
+                              )
+                            ) : (
+                              <FolderOpen className="h-5 w-5 text-slate-400" />
+                            )}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-[15px] font-semibold tracking-[-0.01em] text-slate-950">{item.title || "未命名作品"}</div>
+                            <div className="mt-1 text-[11px] leading-5 text-slate-500">{item.summary || digest.summary}</div>
+                            <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] text-slate-400">
+                              <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">{formatAssetLibraryTime(item.updatedAt || item.createdAt)}</span>
+                              <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">{item.versionCount || versions.length || 1} 个版本</span>
+                              <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">{item.nodeCount || digest.nodeCount} 节点</span>
+                              {imageCount > 0 ? <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">{imageCount} 图</span> : null}
+                              {videoCount > 0 ? <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">{videoCount} 视频</span> : null}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 border-t border-slate-200 px-3 py-2.5">
+                          <button
+                            type="button"
+                            onClick={() => restoreSnapshotToCanvas(latestSnapshot, "已恢复作品到画布")}
+                            className="inline-flex items-center gap-1.5 rounded-full bg-slate-900 px-3.5 py-1.5 text-[11px] font-medium text-white transition-colors hover:bg-slate-800"
+                          >
+                            <FolderOpen className="h-3.5 w-3.5" />
+                            继续创作
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setAssetLibraryDetailWorkId(item.id)}
+                            className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] text-slate-500 transition-colors hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700"
+                          >
+                            <Info className="h-3.5 w-3.5" />
+                            查看详情
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedAssetWorkIds((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(item.id)) next.delete(item.id);
+                                else next.add(item.id);
+                                return next;
+                              })
+                            }
+                            className="inline-flex items-center gap-1.5 rounded-full px-1 py-1.5 text-[11px] text-slate-500 transition-colors hover:text-slate-700"
+                          >
+                            <History className="h-3.5 w-3.5" />
+                            版本 {versions.length || 1}
+                            {isExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!window.confirm("确认删除这份作品吗？")) return;
+                              removeAssetLibraryItem("works", item.id);
+                            }}
+                            className="inline-flex items-center gap-1.5 rounded-full px-1 py-1.5 text-[11px] text-slate-500 transition-colors hover:text-rose-600"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            删除
+                          </button>
+                        </div>
+                        {isExpanded ? (
+                          <div className="border-t border-slate-200 bg-slate-50/80 px-3 py-3">
+                            <div className="mb-2 text-[11px] font-medium text-slate-600">版本历史</div>
+                            <div className="space-y-2">
+                              {versions.map((version) => (
+                                <div key={version.id} className="flex items-center gap-2 rounded-[18px] border border-slate-200 bg-white px-3 py-2">
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-2 text-[11px] text-slate-700">
+                                      <span className="font-medium">版本 {version.versionIndex || 1}</span>
+                                      <span className="text-slate-400">{formatAssetLibraryTime(version.createdAt)}</span>
+                                    </div>
+                                    <div className="mt-1 truncate text-[10px] text-slate-400">
+                                      {version.summary || buildSnapshotDigest(version.snapshot).summary}
+                                    </div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => restoreSnapshotToCanvas(version.snapshot, `已恢复版本 ${version.versionIndex || 1} 到画布`)}
+                                    className="inline-flex shrink-0 items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[10px] text-slate-500 transition-colors hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700"
+                                  >
+                                    恢复
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {assetLibraryAssets.length === 0 ? (
+                    <div className="rounded-[22px] border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-[12px] text-slate-500">
+                      还没有沉淀素材。上传图片/视频或保存作品后，这里的素材会持续累积。
+                    </div>
+                  ) : null}
+                  {assetLibraryAssets.map((item) => (
+                    <div key={item.id} className="overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-[0_10px_24px_rgba(15,23,42,0.05)]">
+                      <div className="flex gap-3 p-3">
+                        <div className="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-[18px] border border-slate-200 bg-slate-100">
+                          {item.url ? (
+                            item.kind === "video" ? (
+                              <video src={item.url} className="h-full w-full object-cover" muted loop playsInline />
+                            ) : (
+                              <img src={item.url} alt={item.title || "素材"} className="h-full w-full object-cover" />
+                            )
+                          ) : (
+                            <FolderOpen className="h-5 w-5 text-slate-400" />
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-[15px] font-semibold tracking-[-0.01em] text-slate-950">{item.title || (item.kind === "video" ? "视频素材" : "图片素材")}</div>
+                          <div className="mt-1 text-[11px] leading-5 text-slate-400">
+                            {item.nodeTitle || "来自画布节点"} · {item.kind === "video" ? "视频" : "图片"} · {item.sourceKind === "work_version" ? "作品版本" : "草稿"}
+                          </div>
+                          <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] text-slate-400">
+                            <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">{formatAssetLibraryTime(item.updatedAt || item.createdAt)}</span>
+                            <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">已复用 {item.usageCount || 1} 次</span>
+                            {item.workId ? <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">关联作品</span> : null}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 border-t border-slate-200 px-3 py-2.5">
+                        <button
+                          type="button"
+                          onClick={() => restoreAssetToCanvas(item)}
+                          className="inline-flex items-center gap-1.5 rounded-full bg-slate-900 px-3.5 py-1.5 text-[11px] font-medium text-white transition-colors hover:bg-slate-800"
+                        >
+                          <FolderOpen className="h-3.5 w-3.5" />
+                          放回画布
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {isAdminUser && agentDevMode ? (
         <div className="fixed right-4 bottom-4 z-[92] w-[320px] max-w-[calc(100vw-1rem)] overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_24px_60px_rgba(15,23,42,0.12)]">
           <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(248,250,252,0.82)_48%,rgba(255,255,255,0.72))]" />
@@ -10299,7 +11415,10 @@ const handleNodeMouseDown = (e, nid) => {
                 type="button"
                 onClick={() => {
                   setActiveSidebarItemKey("node_upload");
-                  safeInvoke(() => addNode(NODE_TYPES.INPUT), "图片/视频上传");
+                  safeInvoke(() => {
+                    const nextNodeId = addNode(NODE_TYPES.INPUT);
+                    if (nextNodeId) setPendingUploadNodeId(nextNodeId);
+                  }, "图片/视频上传");
                 }}
                 className="animate-bf-breathe flex h-11 w-full scale-[1.05] items-center justify-center rounded-[24px] border border-[#B9E975] bg-[linear-gradient(135deg,#A7E163_0%,#8FD14F_100%)] text-[#1F2937] transition-all duration-200 ease-in-out hover:scale-[1.075] hover:brightness-[1.02]"
                 style={{
@@ -10663,6 +11782,29 @@ const handleNodeMouseDown = (e, nid) => {
             className="absolute bottom-6 z-50 flex gap-2 select-none"
             style={{ left: leftSidebarWidth + 28 }}
           >
+            <button
+              type="button"
+              onClick={saveCurrentCanvasAsWork}
+              disabled={nodes.length === 0 && connections.length === 0}
+              className={`relative inline-flex items-center gap-1.5 rounded-[16px] px-3 py-2 text-[11px] shadow-[0_18px_36px_rgba(15,23,42,0.08)] transition-colors ${
+                nodes.length === 0 && connections.length === 0
+                  ? "cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400"
+                  : "border border-cyan-200 bg-cyan-50 text-cyan-700 hover:bg-cyan-100 hover:text-cyan-800"
+              }`}
+              title="保存当前作品"
+            >
+              <Save className="h-3.5 w-3.5" />
+              保存作品
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowAssetLibrary(true)}
+              className="relative inline-flex items-center gap-1.5 rounded-[16px] border border-slate-200 bg-white px-3 py-2 text-[11px] text-slate-700 shadow-[0_18px_36px_rgba(15,23,42,0.08)] transition-colors hover:bg-slate-50 hover:text-slate-900"
+              title="打开资产库"
+            >
+              <FolderOpen className="h-3.5 w-3.5" />
+              资产库
+            </button>
             <div className="relative flex items-center rounded-[16px] border border-slate-200 bg-white p-0.5 shadow-[0_18px_36px_rgba(15,23,42,0.08)] text-slate-500">
               <button onClick={() => zoomCanvas(-0.2)} className="relative rounded-[12px] p-1.5 transition-colors hover:bg-slate-100 hover:text-slate-900"><Minus className="w-3 h-3" /></button>
               <span className="relative w-9 text-center text-[10px] font-mono text-slate-700">{Math.round(viewport.zoom * 100)}%</span>
@@ -10745,6 +11887,10 @@ const handleNodeMouseDown = (e, nid) => {
                 onRunVideoRmbg={runVideoRmbg}
                 onRunVideoLineart={runVideoLineart}
                 onRunVideoSplit={runVideoSplit}
+                shouldAutoOpenUploadPicker={pendingUploadNodeId === n.id}
+                onAutoOpenUploadPickerHandled={(nodeId) => {
+                  setPendingUploadNodeId((prev) => (prev === nodeId ? "" : prev));
+                }}
               />
             ))}
 

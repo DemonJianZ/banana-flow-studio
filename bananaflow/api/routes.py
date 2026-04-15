@@ -50,6 +50,7 @@ from core.config import (
 from core.logging import sys_logger
 from auth_routes import get_current_user
 from storage.usage import record_usage
+from storage.asset_library import list_asset_library_items, upsert_asset_library_item, delete_asset_library_item
 
 from schemas.api import (
     Text2ImgRequest, Text2ImgResponse,
@@ -74,6 +75,7 @@ from schemas.api import (
     AgentDramaRequest, AgentDramaResponse,
     PromptPolishRequest, PromptPolishResponse,
     AIChatImageTaskSubmitResponse, AIChatImageTaskStatusResponse,
+    AssetLibraryItemRequest, AssetLibraryItemResponse, AssetLibraryListResponse, AssetLibraryUpsertResponse, AssetLibraryDeleteResponse,
 )
 from storage.ai_chat_tasks import (
     create_ai_chat_task,
@@ -238,6 +240,29 @@ def _record_usage_if_authed(current_user: Optional[Dict[str, Any]], model: str) 
         record_usage(user_id, model)
 
 
+def _normalize_asset_library_item_payload(item: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = item.get("snapshot") if isinstance(item.get("snapshot"), dict) else {}
+    return {
+        "id": str(item.get("id") or "").strip(),
+        "user_id": str(item.get("user_id") or "").strip(),
+        "kind": str(item.get("kind") or "draft").strip() or "draft",
+        "canvas_id": str(item.get("canvas_id") or "").strip(),
+        "title": str(item.get("title") or "").strip(),
+        "summary": str(item.get("summary") or "").strip(),
+        "cover_url": str(item.get("cover_url") or "").strip(),
+        "asset_count": int(item.get("asset_count") or 0),
+        "node_count": int(item.get("node_count") or 0),
+        "connection_count": int(item.get("connection_count") or 0),
+        "snapshot": {
+            "nodes": snapshot.get("nodes") if isinstance(snapshot.get("nodes"), list) else [],
+            "connections": snapshot.get("connections") if isinstance(snapshot.get("connections"), list) else [],
+            "viewport": snapshot.get("viewport") if isinstance(snapshot.get("viewport"), dict) else {},
+        },
+        "created_at": str(item.get("created_at") or "").strip(),
+        "updated_at": str(item.get("updated_at") or "").strip(),
+    }
+
+
 def _safe_json_hash(data: Dict[str, Any]) -> str:
     encoded = json.dumps(dict(data or {}), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -258,6 +283,41 @@ _IDEA_SCRIPT_LLM_TIMEOUT_MESSAGE = (
     "生成脚本超时。当前已建议使用轻量脚本模式；如仍超时，请检查 Ollama Gemma4 是否正常响应，"
     "或调大 IDEA_SCRIPT_INFERENCE_TIMEOUT_SEC / IDEA_SCRIPT_GENERATION_TIMEOUT_SEC。"
 )
+
+
+@router.get("/api/asset_library/items", response_model=AssetLibraryListResponse)
+def list_asset_library(kind: Optional[str] = Query(default=None), current_user=Depends(get_current_user)):
+    user_id = str((current_user or {}).get("id") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    kind_text = str(kind or "").strip() or None
+    items = [
+        AssetLibraryItemResponse(**_normalize_asset_library_item_payload(item))
+        for item in list_asset_library_items(user_id=user_id, kind=kind_text)
+    ]
+    return AssetLibraryListResponse(items=items)
+
+
+@router.post("/api/asset_library/items", response_model=AssetLibraryUpsertResponse)
+def upsert_asset_library(req: AssetLibraryItemRequest, current_user=Depends(get_current_user)):
+    user_id = str((current_user or {}).get("id") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    payload = req.model_dump()
+    item_id = str(payload.get("id") or "").strip()
+    if not item_id:
+        raise HTTPException(status_code=400, detail="item id is required")
+    item = upsert_asset_library_item(user_id=user_id, item=payload)
+    return AssetLibraryUpsertResponse(item=AssetLibraryItemResponse(**_normalize_asset_library_item_payload(item)))
+
+
+@router.delete("/api/asset_library/items/{item_id}", response_model=AssetLibraryDeleteResponse)
+def delete_asset_library(item_id: str, current_user=Depends(get_current_user)):
+    user_id = str((current_user or {}).get("id") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    deleted = delete_asset_library_item(user_id=user_id, item_id=item_id) > 0
+    return AssetLibraryDeleteResponse(deleted=deleted)
 _AI_CHAT_MODEL_ID_NANO_BANANA_PRO = str(os.getenv("AI_CHAT_MODEL_ID_NANO_BANANA_PRO") or "").strip()
 _AI_CHAT_MODEL_ID_SEEDANCE_1_0 = str(os.getenv("AI_CHAT_MODEL_ID_SEEDANCE_1_0") or "").strip()
 _AI_CHAT_IMAGE_SIZE_ID_MAP = {

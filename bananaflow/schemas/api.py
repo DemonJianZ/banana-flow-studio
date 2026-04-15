@@ -215,6 +215,55 @@ class AIChatImageTaskStatusResponse(BaseModel):
     created_at: str = ""
     updated_at: str = ""
 
+
+class AssetLibrarySnapshot(BaseModel):
+    nodes: List[Dict[str, Any]] = Field(default_factory=list)
+    connections: List[Dict[str, Any]] = Field(default_factory=list)
+    viewport: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AssetLibraryItemRequest(BaseModel):
+    id: str
+    kind: str = Field(default="draft")
+    canvas_id: str = Field(default="")
+    title: str = Field(default="")
+    summary: str = Field(default="")
+    cover_url: str = Field(default="")
+    asset_count: int = Field(default=0)
+    node_count: int = Field(default=0)
+    connection_count: int = Field(default=0)
+    snapshot: AssetLibrarySnapshot = Field(default_factory=AssetLibrarySnapshot)
+
+
+class AssetLibraryItemResponse(BaseModel):
+    id: str
+    user_id: str = Field(default="")
+    kind: str = Field(default="draft")
+    canvas_id: str = Field(default="")
+    title: str = Field(default="")
+    summary: str = Field(default="")
+    cover_url: str = Field(default="")
+    asset_count: int = Field(default=0)
+    node_count: int = Field(default=0)
+    connection_count: int = Field(default=0)
+    snapshot: AssetLibrarySnapshot = Field(default_factory=AssetLibrarySnapshot)
+    created_at: str = Field(default="")
+    updated_at: str = Field(default="")
+
+
+class AssetLibraryListResponse(BaseModel):
+    items: List[AssetLibraryItemResponse] = Field(default_factory=list)
+
+
+class AssetLibraryUpsertResponse(BaseModel):
+    ok: bool = True
+    item: AssetLibraryItemResponse
+
+
+class AssetLibraryDeleteResponse(BaseModel):
+    ok: bool = True
+    deleted: bool = False
+
 class VideoUpscaleTaskStartResponse(BaseModel):
     task_id: str
     status: str
