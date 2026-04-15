@@ -18,6 +18,49 @@ from bananaflow.services import comfyui  # noqa: E402
 
 
 class ComfyUiVideoWorkflowTests(unittest.TestCase):
+    def test_trim_video_segment_should_drop_audio_by_default(self):
+        with (
+            mock.patch.object(comfyui, "_read_video_dimensions", return_value=(1920, 1080)),
+            mock.patch.object(comfyui, "_run_ffmpeg") as mock_run_ffmpeg,
+        ):
+            comfyui._trim_video_segment(
+                input_path="source.mp4",
+                output_path="segment.mp4",
+                start_sec=0,
+                end_sec=2.5,
+                req_id="req_trim",
+                segment_index=1,
+                output_resolution="720p",
+            )
+
+        cmd = mock_run_ffmpeg.call_args[0][0]
+        self.assertIn("-an", cmd)
+        self.assertIn("-0:a", cmd)
+        self.assertIn("-sn", cmd)
+        self.assertIn("-dn", cmd)
+        self.assertNotIn("0:a?", cmd)
+
+    def test_trim_video_segment_should_keep_audio_when_requested(self):
+        with (
+            mock.patch.object(comfyui, "_read_video_dimensions", return_value=(1080, 1920)),
+            mock.patch.object(comfyui, "_run_ffmpeg") as mock_run_ffmpeg,
+        ):
+            comfyui._trim_video_segment(
+                input_path="source.mp4",
+                output_path="segment.mp4",
+                start_sec=1,
+                end_sec=4,
+                req_id="req_trim_audio",
+                segment_index=2,
+                output_resolution="480p",
+                include_audio=True,
+            )
+
+        cmd = mock_run_ffmpeg.call_args[0][0]
+        self.assertIn("0:a?", cmd)
+        self.assertIn("-c:a", cmd)
+        self.assertNotIn("-an", cmd)
+
     def test_run_image_z_image_turbo_workflow_should_fill_prompt_and_size(self):
         workflow = {
             "58": {"inputs": {"value": ""}},

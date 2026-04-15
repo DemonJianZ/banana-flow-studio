@@ -52,10 +52,9 @@ import {
   Send,
   Scan,
   Scissors,
-  Search,
-  PanelLeftClose,
-  PanelLeftOpen,
   GripVertical,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
 import { useAuth } from "../auth/AuthProvider";
 import { useNavigate } from "../router";
@@ -629,9 +628,7 @@ const normalizeVideoSplitSegments = (segments, durationSec = 0) => {
     })
     .filter((item) => item.endSec > item.startSec);
 
-  return normalized.length
-    ? normalized
-    : [{ startSec: 0, endSec: safeDuration > 0 ? Math.min(safeDuration, DEFAULT_VIDEO_SPLIT_SEGMENT_LENGTH_SEC) : DEFAULT_VIDEO_SPLIT_SEGMENT_LENGTH_SEC }];
+  return normalized;
 };
 
 const formatVideoSplitTime = (value) => {
@@ -1817,6 +1814,7 @@ const ToolIconBtn = ({ icon, onClick, disabled, active, title }) => {
 
 const SidebarBtn = ({
   icon,
+  itemId = "",
   label,
   desc,
   onClick,
@@ -1824,87 +1822,48 @@ const SidebarBtn = ({
   bg,
   active = false,
   compact = false,
-  expanded = false,
   onHoverChange,
   category = "",
+  primary = false,
+  menuTrigger = false,
 }) => {
   const IconComponent = icon;
+  const iconNudgeXMap = {
+    workflow_bundle: 0,
+  };
+  const iconNudgeX = iconNudgeXMap[itemId] ?? 0;
   return (
     <button
-      onClick={onClick}
+      onClick={(event) => onClick?.(event)}
       onMouseEnter={(event) => onHoverChange?.(true, event.currentTarget)}
       onMouseLeave={() => onHoverChange?.(false)}
-      className={`group relative flex items-center border text-left transition-all duration-200 ${
-        compact
-          ? `justify-center rounded-xl ${
-              expanded ? "h-12 w-12 -translate-y-0.5" : "h-10 w-10"
-            } ${
-              active
-                ? "border-cyan-200 bg-cyan-50 text-cyan-700 shadow-[0_10px_24px_rgba(15,23,42,0.06)]"
-                : "border-transparent bg-white text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+      title={[label, desc].filter(Boolean).join(" · ")}
+      aria-label={label}
+      data-sidebar-workflow-trigger={menuTrigger ? "true" : undefined}
+      className={`group relative flex items-center justify-center rounded-full border text-left transition-all duration-200 ${
+        primary
+          ? `h-10 w-10 border-[rgba(169,211,126,0.75)] bg-[#A9D37E] text-slate-900 shadow-[0_8px_18px_rgba(126,184,74,0.16)] ${
+              active ? "ring-1 ring-[#DCEBC8]" : "hover:brightness-[0.985]"
             }`
-          : `mx-auto min-h-[88px] w-full items-center justify-between overflow-hidden rounded-[22px] px-3.5 py-3 ${
+          : `${compact ? "h-8 w-8" : "h-10 w-10"} border-transparent ${
               active
-                ? "bg-cyan-50 text-cyan-800 border-cyan-200 shadow-[0_10px_24px_rgba(15,23,42,0.06)]"
-                : "bg-white text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-50"
+                ? "bg-[#EEF1F4] text-slate-700"
+                : "bg-transparent text-[#6B7280] hover:bg-[#EAECEF] hover:text-slate-800 active:bg-[#E1E5E9]"
             }`
       }`}
     >
-      <span
-        className={`absolute left-0 top-2.5 bottom-2.5 w-0.5 rounded-r transition-all ${
-          active ? "bg-cyan-300" : expanded ? "bg-cyan-400/45" : "bg-transparent"
-        }`}
-      />
-      <div
-        className={`${
-          compact ? (expanded ? "w-8 h-8" : "w-7 h-7") : "h-10 w-10"
-        } rounded-2xl ${bg} flex items-center justify-center ${color} shrink-0 ring-1 transition-all ${
-          active ? "ring-slate-300" : "ring-slate-200 group-hover:ring-slate-300"
-        }`}
-      >
+      <span className="flex h-6 w-6 items-center justify-center">
         {IconComponent
           ? React.createElement(IconComponent, {
-              className: compact ? (expanded ? "w-[22px] h-[22px]" : "w-5 h-5") : "w-[18px] h-[18px]",
+              className: primary ? "h-[18px] w-[18px]" : "h-[18px] w-[18px]",
+              strokeWidth: 2.2,
+              style: iconNudgeX ? { transform: `translateX(${iconNudgeX}px)` } : undefined,
             })
           : null}
-      </div>
-      {!compact && (
-        <>
-          <div className="ml-3 min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <div className={`truncate text-[13px] font-medium leading-5 ${active ? "text-cyan-800" : "text-slate-800 group-hover:text-slate-900"}`}>{label}</div>
-              {category ? (
-                <span className={`shrink-0 rounded-full border px-2 py-1 text-[9px] leading-none ${
-                  active
-                    ? "border-cyan-200 bg-white text-cyan-700"
-                    : "border-slate-200 bg-slate-50 text-slate-500"
-                }`}>
-                  {category}
-                </span>
-              ) : null}
-            </div>
-            <div className={`mt-1 text-[11px] leading-5 whitespace-normal break-words ${active ? "text-cyan-700" : "text-slate-500"}`}>{desc}</div>
-          </div>
-        </>
-      )}
+      </span>
     </button>
   );
 };
-
-const SidebarSectionHeader = ({ title, open, onToggle }) => (
-  <button
-    type="button"
-    onClick={onToggle}
-    className="inline-flex w-full items-center gap-2 rounded-xl px-1 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500 transition-colors hover:text-slate-800"
-  >
-    <span className={`transition-transform ${open ? "rotate-90" : ""}`}>
-      <ChevronRight className="w-3 h-3 text-slate-500" />
-    </span>
-    <span className="h-1.5 w-1.5 rounded-full bg-slate-400 shrink-0" />
-    <span>{title}</span>
-    <span className="h-px flex-1 bg-gradient-to-r from-slate-300 via-slate-200 to-transparent" />
-  </button>
-);
 
 const AgentResultCardContent = ({
   turn,
@@ -2672,7 +2631,7 @@ const PropertyPanel = ({
             </div>
             <div className="relative">
               <textarea
-            className={`w-full bg-white border rounded p-2 pr-10 pb-9 text-xs text-slate-700 outline-none resize-none transition-colors border-slate-200 focus:${theme.border}`}
+            className="w-full resize-none rounded border border-slate-200 bg-white p-2 pb-9 pr-10 text-xs text-slate-700 outline-none transition-colors focus:border-slate-300"
                 rows={3}
                 placeholder={
                   node.data.mode === "relight"
@@ -3166,6 +3125,7 @@ const NodeComponent = ({
   const [showSimpleMediaToolbar, setShowSimpleMediaToolbar] = useState(false);
   const [showCompactInputActions, setShowCompactInputActions] = useState(false);
   const [showCompactVideoUpscaleOptions, setShowCompactVideoUpscaleOptions] = useState(false);
+  const [showSimpleVideoUpscaleOptions, setShowSimpleVideoUpscaleOptions] = useState(false);
   const [showSimpleVideoEditor, setShowSimpleVideoEditor] = useState(false);
   const [compactRmbgPending, setCompactRmbgPending] = useState(false);
   const [compactRemovePending, setCompactRemovePending] = useState(false);
@@ -3178,6 +3138,7 @@ const NodeComponent = ({
   const [videoSplitSegments, setVideoSplitSegments] = useState(() => normalizeVideoSplitSegments([]));
   const [videoSplitDrafts, setVideoSplitDrafts] = useState(() => buildVideoSplitDrafts(normalizeVideoSplitSegments([])));
   const [videoSplitOutputResolution, setVideoSplitOutputResolution] = useState(DEFAULT_VIDEO_SPLIT_OUTPUT_RESOLUTION);
+  const [videoSplitIncludeAudio, setVideoSplitIncludeAudio] = useState(false);
   const [promptPolishLoading, setPromptPolishLoading] = useState(false);
   const [promptPolishError, setPromptPolishError] = useState("");
   const nodeRootRef = useRef(null);
@@ -3320,12 +3281,14 @@ const NodeComponent = ({
   useEffect(() => {
     setShowCompactInputActions(false);
     setShowCompactVideoUpscaleOptions(false);
+    setShowSimpleVideoUpscaleOptions(false);
     setShowSimpleVideoEditor(false);
     setShowSimpleMediaToolbar(false);
     setCompactActiveIndex(0);
     setSimpleMediaActionIndex(-1);
     setVideoSplitDuration(0);
     setVideoSplitOutputResolution(DEFAULT_VIDEO_SPLIT_OUTPUT_RESOLUTION);
+    setVideoSplitIncludeAudio(false);
     const nextSegments = normalizeVideoSplitSegments([]);
     setVideoSplitSegments(nextSegments);
     setVideoSplitDrafts(buildVideoSplitDrafts(nextSegments));
@@ -3338,12 +3301,19 @@ const NodeComponent = ({
   }, [showCompactInputActions]);
 
   useEffect(() => {
+    if (!showSimpleMediaToolbar) {
+      setShowSimpleVideoUpscaleOptions(false);
+    }
+  }, [showSimpleMediaToolbar]);
+
+  useEffect(() => {
     if (!showCompactInputActions && simpleMediaActionIndex < 0 && !showSimpleMediaToolbar) return undefined;
 
     const handleOutsideMouseDown = (event) => {
       if (nodeRootRef.current?.contains(event.target)) return;
       setShowCompactInputActions(false);
       setShowCompactVideoUpscaleOptions(false);
+      setShowSimpleVideoUpscaleOptions(false);
       setShowSimpleMediaToolbar(false);
       setSimpleMediaActionIndex(-1);
       setShowSimpleVideoEditor(false);
@@ -3357,8 +3327,10 @@ const NodeComponent = ({
 
   useEffect(() => {
     if (!showSimpleVideoEditor) return;
+    setShowSimpleVideoUpscaleOptions(false);
     setVideoSplitDuration(0);
     setVideoSplitOutputResolution(DEFAULT_VIDEO_SPLIT_OUTPUT_RESOLUTION);
+    setVideoSplitIncludeAudio(false);
     const nextSegments = normalizeVideoSplitSegments([]);
     setVideoSplitSegments(nextSegments);
     setVideoSplitDrafts(buildVideoSplitDrafts(nextSegments));
@@ -3417,6 +3389,26 @@ const NodeComponent = ({
       setShowCompactInputActions(false);
     } catch (error) {
       console.error("[Workbench] video_upscale_direct:error", error);
+    } finally {
+      setCompactVideoUpscalePending(false);
+    }
+  };
+
+  const handleSimpleVideoUpscaleClick = async () => {
+    if (compactActionBusy) return;
+    setShowSimpleVideoEditor(false);
+    setShowSimpleVideoUpscaleOptions((prev) => !prev);
+  };
+
+  const handleSimpleVideoUpscaleOptionClick = async (templateEnum) => {
+    if (compactActionBusy || simpleMediaActionIndex < 0) return;
+    try {
+      setCompactVideoUpscalePending(true);
+      await onRunCompactVideoUpscale?.(node.id, simpleMediaActionIndex, templateEnum);
+      setShowSimpleVideoUpscaleOptions(false);
+      setShowSimpleMediaToolbar(false);
+    } catch (error) {
+      console.error("[Workbench] simple_video_upscale_direct:error", error);
     } finally {
       setCompactVideoUpscalePending(false);
     }
@@ -3608,10 +3600,17 @@ const NodeComponent = ({
   const handleVideoSplitRun = async () => {
     if (videoSplitPending || simpleMediaActionIndex < 0) return;
     try {
-      setVideoSplitPending(true);
       const normalized = commitVideoSplitDrafts();
-      await onRunVideoSplit?.(node.id, simpleMediaActionIndex, normalized, {
+      const effectiveSegments = normalized.length
+        ? normalized
+        : videoSplitDuration > 0
+        ? [{ startSec: 0, endSec: videoSplitDuration }]
+        : [];
+      if (!effectiveSegments.length) return;
+      setVideoSplitPending(true);
+      await onRunVideoSplit?.(node.id, simpleMediaActionIndex, effectiveSegments, {
         outputResolution: videoSplitOutputResolution,
+        includeAudio: videoSplitIncludeAudio,
       });
       setShowSimpleVideoEditor(false);
     } catch (error) {
@@ -3766,7 +3765,7 @@ const NodeComponent = ({
 
   const nodeShellClass = isTextInputNode
     ? `absolute w-[280px] overflow-visible border bg-white shadow-none flex flex-col transition-colors duration-200 ${
-        node.data.status === "error" ? "border-rose-300" : selected ? "border-cyan-400" : "border-slate-300"
+        node.data.status === "error" ? "border-rose-300" : "border-slate-300"
       }`
     : isSimpleMediaInputNode
     ? `absolute w-[280px] overflow-visible border bg-white shadow-none flex flex-col transition-colors duration-200 ${
@@ -3864,44 +3863,44 @@ const NodeComponent = ({
 	            onChange={handleFileUpload}
 	          />
 	          <div
-	            className={`absolute bottom-full left-1/2 z-30 mb-8 w-max min-w-[252px] max-w-[calc(100vw-48px)] -translate-x-1/2 ${mediaToolbarClass}`}
+	            className="absolute bottom-full left-1/2 z-30 mb-8 w-max max-w-[calc(100vw-48px)] -translate-x-1/2"
 	            onMouseDown={(e) => e.stopPropagation()}
 	          >
-	            <div className={mediaToolbarRowClass}>
-	              <button
-	                type="button"
-	                className={getMediaToolbarButtonClass({ active: !hasSimpleMediaSelection })}
-	                  onClick={(e) => {
-	                    e.stopPropagation();
-	                    setShowSimpleMediaToolbar(true);
-	                    simpleMediaUploadInputRef.current?.click();
-	                  }}
-	                title="上传图片/视频"
-	                aria-label="上传图片/视频"
-	              >
-	                <Upload className={mediaToolbarIconClass} />
-	                <span>上传</span>
-	              </button>
-	              {hasSimpleMediaVideoSelection ? (
-	                <>
-	                  <button
-	                    type="button"
-	                    className={getMediaToolbarButtonClass()}
-	                    onClick={() => onPreview?.(simpleMediaActiveItem)}
-	                    title="预览视频"
-	                    aria-label="预览视频"
-	                  >
-	                    <Play className={mediaToolbarIconClass} />
-	                    <span>预览</span>
-	                  </button>
-	                  <button
-	                    type="button"
-	                    disabled={videoSplitPending}
+            <div className={`${mediaToolbarClass} w-max min-w-[252px]`}>
+              <div className={mediaToolbarRowClass}>
+              {hasSimpleMediaVideoSelection ? (
+                <>
+                  <button
+                    type="button"
+                    className={getMediaToolbarButtonClass({ active: !hasSimpleMediaSelection })}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowSimpleMediaToolbar(true);
+                      simpleMediaUploadInputRef.current?.click();
+                    }}
+                    title="上传图片/视频"
+                    aria-label="上传图片/视频"
+                  >
+                    <Upload className={mediaToolbarIconClass} />
+                    <span>上传</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={videoSplitPending}
 	                    className={getMediaToolbarButtonClass()}
 	                    onClick={handleSimpleVideoEditorClick}
 	                  >
 	                    <Scissors className={mediaToolbarIconClass} />
 	                    <span>视频编辑</span>
+	                  </button>
+	                  <button
+	                    type="button"
+	                    disabled={compactActionBusy}
+	                    className={getMediaToolbarButtonClass({ active: showSimpleVideoUpscaleOptions })}
+	                    onClick={handleSimpleVideoUpscaleClick}
+	                  >
+	                    {compactVideoUpscalePending ? <Loader2 className={`${mediaToolbarIconClass} animate-spin`} /> : <TrendingUp className={mediaToolbarIconClass} />}
+	                    <span>视频超清</span>
 	                  </button>
 	                  <button
 	                    type="button"
@@ -3925,6 +3924,20 @@ const NodeComponent = ({
 	              ) : null}
 	              {hasSimpleMediaSelection && !hasSimpleMediaVideoSelection ? (
 	                <>
+	                  <button
+	                    type="button"
+	                    className={getMediaToolbarButtonClass({ active: !hasSimpleMediaSelection })}
+	                    onClick={(e) => {
+	                      e.stopPropagation();
+	                      setShowSimpleMediaToolbar(true);
+	                      simpleMediaUploadInputRef.current?.click();
+	                    }}
+	                    title="上传图片/视频"
+	                    aria-label="上传图片/视频"
+	                  >
+	                    <Upload className={mediaToolbarIconClass} />
+	                    <span>上传</span>
+	                  </button>
 	                  <button
 	                    type="button"
 	                    disabled={compactActionBusy}
@@ -3952,16 +3965,24 @@ const NodeComponent = ({
 	                    {compactRemovePending ? <Loader2 className={`${mediaToolbarIconClass} animate-spin`} /> : <Sparkles className={mediaToolbarIconClass} />}
 	                    <span>去水印</span>
 	                  </button>
-	                  <button
-	                    type="button"
-	                    className={getMediaToolbarButtonClass()}
-	                    onClick={() => onPreview?.(simpleMediaActiveItem)}
-	                  >
-	                    <Maximize className={mediaToolbarIconClass} />
-	                    <span>预览</span>
-	                  </button>
 	                </>
 	              ) : null}
+	              </div>
+	            {hasSimpleMediaVideoSelection && showSimpleVideoUpscaleOptions ? (
+	              <div className={mediaToolbarOptionRowClass}>
+	                {VIDEO_HD_TEMPLATE_OPTIONS.map((item) => (
+	                  <button
+	                    key={`simple-video-hd-${item.value}`}
+	                    type="button"
+	                    disabled={compactActionBusy}
+	                    className={getMediaToolbarButtonClass()}
+	                    onClick={() => handleSimpleVideoUpscaleOptionClick(item.value)}
+	                  >
+	                    {item.label}
+	                  </button>
+	                ))}
+	              </div>
+	            ) : null}
 	            </div>
 	          </div>
 	          {showSimpleVideoEditor && hasSimpleMediaVideoSelection ? (
@@ -4020,21 +4041,24 @@ const NodeComponent = ({
 	                      </button>
 	                    </div>
 	                    <div className="mt-3 space-y-2">
+                        {videoSplitSegments.length === 0 ? (
+                          <div className="border border-dashed border-slate-200 bg-slate-50 px-3 py-4 text-center text-[11px] text-slate-500">
+                            当前默认不分段，点击“新增分段”后开始编辑片段。
+                          </div>
+                        ) : null}
 	                      {videoSplitSegments.map((segment, index) => (
 	                        <div key={`${node.id}-split-${index}`} className="border border-slate-200 bg-slate-50 p-3">
 	                          <div className="mb-2 flex items-center justify-between text-[11px] text-slate-500">
 	                            <span>片段 {index + 1}</span>
-	                            {videoSplitSegments.length > 1 ? (
-	                              <button
-	                                type="button"
-	                                className="inline-flex h-7 w-7 items-center justify-center border border-slate-200 bg-white text-slate-500 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
-	                                onClick={() => handleVideoSplitSegmentRemove(index)}
-	                                title="删除分段"
-	                                aria-label="删除分段"
-	                              >
-	                                <Trash2 className="h-3.5 w-3.5" />
-	                              </button>
-	                            ) : null}
+	                            <button
+	                              type="button"
+	                              className="inline-flex h-7 w-7 items-center justify-center border border-slate-200 bg-white text-slate-500 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
+	                              onClick={() => handleVideoSplitSegmentRemove(index)}
+	                              title="删除分段"
+	                              aria-label="删除分段"
+	                            >
+	                              <Trash2 className="h-3.5 w-3.5" />
+	                            </button>
 	                          </div>
 	                          <div className="grid grid-cols-2 gap-2">
 	                            <label className="text-[10px] text-slate-500">
@@ -4084,16 +4108,32 @@ const NodeComponent = ({
 	                          ))}
 	                        </select>
 	                      </label>
+                        <label className="mt-3 flex cursor-pointer items-center gap-2 text-[11px] text-slate-600">
+                          <input
+                            type="checkbox"
+                            checked={videoSplitIncludeAudio}
+                            disabled={videoSplitPending}
+                            className="h-3.5 w-3.5 border border-slate-300 text-cyan-600"
+                            onChange={(e) => setVideoSplitIncludeAudio(Boolean(e.target.checked))}
+                          />
+                          <span className="inline-flex items-center gap-1.5">
+                            {videoSplitIncludeAudio ? <Volume2 className="h-3.5 w-3.5 text-slate-500" /> : <VolumeX className="h-3.5 w-3.5 text-slate-400" />}
+                            导出音频
+                          </span>
+                        </label>
+                        <div className="mt-1 text-[10px] text-slate-500">
+                          未勾选时默认输出静音视频。
+                        </div>
 	                    </div>
 		                    <div className="mt-4 flex justify-end border-t border-slate-200 pt-4">
 	                      <button
 	                        type="button"
-	                        disabled={videoSplitPending}
+	                        disabled={videoSplitPending || (videoSplitSegments.length === 0 && videoSplitDuration <= 0)}
 	                        className="inline-flex h-9 min-w-[124px] items-center justify-center gap-1.5 border border-slate-200 bg-white px-5 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-65"
 	                        onClick={handleVideoSplitRun}
 	                      >
-	                        {videoSplitPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Scissors className="h-3.5 w-3.5" />}
-	                        {videoSplitPending ? "分割中..." : "导出分段"}
+	                        {videoSplitPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : videoSplitSegments.length === 0 ? <Download className="h-3.5 w-3.5" /> : <Scissors className="h-3.5 w-3.5" />}
+	                        {videoSplitPending ? "处理中..." : videoSplitSegments.length === 0 ? "导出原片" : "导出分段"}
 	                      </button>
 	                    </div>
 	                  </div>
@@ -4436,18 +4476,19 @@ const NodeComponent = ({
         {isInput && !isCompactInput && (
           <div
             className="relative overflow-hidden bg-white"
-            onMouseDown={(e) => {
+            onClick={(e) => {
               e.stopPropagation();
               setShowSimpleMediaToolbar(true);
             }}
           >
             {node.data.images?.length > 0 ? (
-              <div className="nodrag max-h-[520px] overflow-y-auto custom-scrollbar">
+              <div className="max-h-[520px] overflow-y-auto custom-scrollbar">
 	                {node.data.images.map((img, i) => {
 	                  const isActive = activeArtifact?.url === img;
 	                  const isVideoItem = isVideoContent(img);
 	                  const showVideoActions = isVideoItem && simpleMediaActionIndex === i;
 	                  const showImageActions = !isVideoItem && simpleMediaActionIndex === i;
+	                  const showVideoUpscaleOverlay = isVideoItem && compactVideoUpscalePending && simpleMediaActionIndex === i;
 	                  const showVideoRmbgOverlay = isVideoItem && videoRmbgPending && simpleMediaActionIndex === i;
 	                  const showVideoLineartOverlay = isVideoItem && videoLineartPending && simpleMediaActionIndex === i;
 	                  const showImageRmbgOverlay = !isVideoItem && compactRmbgPending;
@@ -4466,10 +4507,25 @@ const NodeComponent = ({
 	                    >
 	                      {isVideoItem ? (
 	                        <>
+                            <button
+                              type="button"
+                              className="absolute bottom-3 right-3 z-10 inline-flex h-9 items-center justify-center gap-1.5 rounded-full border border-slate-200 bg-white/95 px-3 text-[11px] font-medium text-slate-700 shadow-[0_12px_24px_rgba(15,23,42,0.12)] backdrop-blur-md transition hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-700"
+                              onMouseDown={(e) => e.stopPropagation()}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onPreview?.(img);
+                              }}
+                              title="预览视频"
+                              aria-label="预览视频"
+                            >
+                              <Play className="h-3.5 w-3.5" />
+                              <span>预览</span>
+                            </button>
 	                          <video
 	                            src={img}
 	                            className="block h-auto max-h-[420px] w-full cursor-pointer bg-black object-contain"
-	                            onMouseDown={(e) => e.stopPropagation()}
+                              draggable={false}
+                              onDragStart={(e) => e.preventDefault()}
 	                            onClick={(e) => {
 	                              e.stopPropagation();
 	                              setShowSimpleMediaToolbar(true);
@@ -4486,16 +4542,37 @@ const NodeComponent = ({
 	                              description: "请稍候，正在生成线稿视频",
 	                            })
 	                          ) : null}
+	                          {showVideoUpscaleOverlay ? (
+	                            renderBackgroundProcessingOverlay({
+	                              title: "正在视频超清",
+	                              description: "请稍候，正在生成更清晰的视频版本",
+	                            })
+	                          ) : null}
 	                          {showVideoRmbgOverlay ? (
 	                            renderBackgroundProcessingOverlay({ title: "正在移除背景" })
 	                          ) : null}
 	                        </>
 	                      ) : (
 	                        <>
+                          <button
+                            type="button"
+                            className="absolute bottom-3 right-3 z-10 inline-flex h-9 items-center justify-center gap-1.5 rounded-full border border-slate-200 bg-white/95 px-3 text-[11px] font-medium text-slate-700 shadow-[0_12px_24px_rgba(15,23,42,0.12)] backdrop-blur-md transition hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-700"
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onPreview?.(img);
+                            }}
+                            title="预览图片"
+                            aria-label="预览图片"
+                          >
+                            <Maximize className="h-3.5 w-3.5" />
+                            <span>预览</span>
+                          </button>
                           <img
                             src={img}
                             className="block h-auto max-h-[420px] w-full cursor-pointer object-contain"
-                            onMouseDown={(e) => e.stopPropagation()}
+                            draggable={false}
+                            onDragStart={(e) => e.preventDefault()}
                             onClick={(e) => {
                               e.stopPropagation();
                               setShowSimpleMediaToolbar(true);
@@ -4704,16 +4781,9 @@ const Workbench = () => {
   const [expandedHistoryIds, setExpandedHistoryIds] = useState(new Set());
   const [apiStats, setApiStats] = useState(null);
   const [runToast, setRunToast] = useState(null);
-  const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(false);
-  const [leftSidebarQuery, setLeftSidebarQuery] = useState("");
   const [hoveredSidebarItemKey, setHoveredSidebarItemKey] = useState("");
   const [hoveredSidebarPreview, setHoveredSidebarPreview] = useState(null);
-  const [leftSidebarSectionOpen, setLeftSidebarSectionOpen] = useState({
-    nodes: true,
-    skills: false,
-    workflows: false,
-    learning: false,
-  });
+  const [sidebarWorkflowMenu, setSidebarWorkflowMenu] = useState(null);
   const [activeSidebarItemKey, setActiveSidebarItemKey] = useState("");
   const [rightPanelWidth, setRightPanelWidth] = useState(460);
   const [agentStore, setAgentStore] = useState(() => loadAgentStore());
@@ -4796,8 +4866,8 @@ const Workbench = () => {
   const previewOpenedBySpaceRef = useRef(false);
 
   const agentSessions = agentStore.sessions ?? EMPTY_LIST;
-  const isLeftSidebarCollapsed = leftSidebarCollapsed;
-  const leftSidebarWidth = isLeftSidebarCollapsed ? 76 : 340;
+  const isLeftSidebarCollapsed = true;
+  const leftSidebarWidth = isLeftSidebarCollapsed ? 62 : 140;
   const activeAgentSession = useMemo(
     () => agentSessions.find((session) => session.id === agentStore.activeSessionId) || agentSessions[0] || null,
     [agentSessions, agentStore.activeSessionId],
@@ -5334,9 +5404,6 @@ const Workbench = () => {
     const saved = localStorage.getItem(CANVAS_KEY);
     return saved || newCanvasId();
   });
-  const handleLeftSidebarSectionToggle = useCallback((key) => {
-    setLeftSidebarSectionOpen((prev) => ({ ...prev, [key]: !prev[key] }));
-  }, []);
   const handleRightPanelResizeStart = useCallback(
     (e) => {
       if (agentHistoryCollapsed) return;
@@ -5583,6 +5650,23 @@ const Workbench = () => {
     else setActiveNodeId(null);
   }, [selectedNodeIds]);
 
+  useEffect(() => {
+    if (!sidebarWorkflowMenu) return undefined;
+    const handlePointerDown = (event) => {
+      if (workspaceShellRef.current?.contains(event.target)) {
+        const target = event.target;
+        if (target?.closest?.("[data-sidebar-workflow-menu='true']") || target?.closest?.("[data-sidebar-workflow-trigger='true']")) {
+          return;
+        }
+      }
+      setSidebarWorkflowMenu(null);
+    };
+    document.addEventListener("mousedown", handlePointerDown, true);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown, true);
+    };
+  }, [sidebarWorkflowMenu]);
+
   const pushHistory = useCallback(() => {
     const s = { nodes: JSON.parse(JSON.stringify(nodes)), connections: JSON.parse(JSON.stringify(connections)) };
     setHistory((p) => {
@@ -5611,6 +5695,8 @@ const Workbench = () => {
       setHistoryStep(historyStep + 1);
     }
   };
+  const canUndo = historyStep > 0;
+  const canRedo = historyStep < history.length - 1;
 
   const deleteSelection = () => {
     if (selectedNodeIds.size === 0 && selectedConnectionIds.size === 0) return;
@@ -6167,61 +6253,6 @@ const handleNodeMouseDown = (e, nid) => {
     setViewport({ x: 0, y: 0, zoom: 1 });
   };
 
-  const createLocalText2ImgTemplate = () => {
-    pushHistory();
-    const n1 = { id: generateId(), type: NODE_TYPES.TEXT_INPUT, x: 100, y: 200, data: { text: "极简电商海报风格，主体居中，光线干净，细节清晰" } };
-    const n2 = {
-      id: generateId(),
-      type: NODE_TYPES.PROCESSOR,
-      x: 500,
-      y: 200,
-      data: {
-        mode: "local_text2img",
-        prompt: "",
-        templates: { size: "1024x1024", aspect_ratio: "1:1" },
-        batchSize: 1,
-        uploadedImages: [],
-        status: "idle",
-        refImage: null,
-        model: "comfyui-image-z-image-turbo",
-      },
-    };
-    const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
-    setNodes([n1, n2, n3]);
-    setConnections([
-      { id: generateId(), from: n1.id, to: n2.id },
-      { id: generateId(), from: n2.id, to: n3.id },
-    ]);
-    setViewport({ x: 0, y: 0, zoom: 1 });
-  };
-
-  const createLocalImg2VideoTemplate = () => {
-    pushHistory();
-    const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 200, data: { images: [] } };
-    const n2 = {
-      id: generateId(),
-      type: NODE_TYPES.VIDEO_GEN,
-      x: 500,
-      y: 200,
-      data: {
-        mode: "local_img2video",
-        model: "comfyui-qwen-i2v",
-        prompt: "natural motion",
-        templates: { duration: 5, resolution: "480p", ratio: "1:1", note: "" },
-        batchSize: 1,
-        status: "idle",
-        refImage: null,
-      },
-    };
-    const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
-    setNodes([n1, n2, n3]);
-    setConnections([
-      { id: generateId(), from: n1.id, to: n2.id },
-      { id: generateId(), from: n2.id, to: n3.id },
-    ]);
-    setViewport({ x: 0, y: 0, zoom: 1 });
-  };
-
   const createConnectedVideoNode = (sourceNodeId) => {
     pushHistory();
     const sourceNode = nodes.find((n) => n.id === sourceNodeId);
@@ -6659,6 +6690,7 @@ const handleNodeMouseDown = (e, nid) => {
             video: sourceVideo,
             segments: safeSegments,
             outputResolution: String(options?.outputResolution || DEFAULT_VIDEO_SPLIT_OUTPUT_RESOLUTION).trim().toLowerCase(),
+            includeAudio: Boolean(options?.includeAudio),
           },
           apiFetch,
         );
@@ -9621,15 +9653,6 @@ const handleNodeMouseDown = (e, nid) => {
             onClick: () => addNode(NODE_TYPES.TEXT_INPUT),
           },
           {
-            id: "node_upload",
-            icon: Upload,
-            label: "图片/视频上传",
-            desc: "主商品图/素材",
-            color: "text-blue-400",
-            bg: "bg-blue-500/10",
-            onClick: () => addNode(NODE_TYPES.INPUT),
-          },
-          {
             id: "node_image_generate",
             icon: ImagePlus,
             label: "图片生成",
@@ -9675,228 +9698,83 @@ const handleNodeMouseDown = (e, nid) => {
       {
         key: "skills",
         title: "技能",
-        items: [
-          {
-            id: "skill_feature_extract",
-            icon: Scan,
-            label: "特征提取",
-            desc: "面部/背景/服装首饰",
-            color: "text-cyan-300",
-            bg: "bg-cyan-500/10",
-            onClick: () =>
-              handleAnchorActionClick({
-                partEnum: AI_CHAT_PART_ENUM_207,
-                modelId: defaultImageModelId,
-                to: "skill_feature_extract",
-                debugLabel: "特征提取",
-                action: () => addNode(NODE_TYPES.PROCESSOR, "feature_extract"),
-              }),
-          },
-          {
-            id: "skill_multi_angleshots",
-            icon: LayoutGrid,
-            label: "多角度镜头",
-            desc: "单图扩展为 8 个机位",
-            color: "text-purple-300",
-            bg: "bg-purple-500/10",
-            onClick: () => addNode(NODE_TYPES.PROCESSOR, "multi_angleshots"),
-          },
-          {
-            id: "skill_video_upscale",
-            icon: TrendingUp,
-            label: "视频超清",
-            desc: "视频画质增强",
-            color: "text-rose-300",
-            bg: "bg-rose-500/10",
-            onClick: () =>
-              handleAnchorActionClick({
-                partEnum: AI_CHAT_PART_ENUM_6,
-                modelId: 1,
-                to: "skill_video_upscale",
-                debugLabel: "视频超清",
-                action: () => addNode(NODE_TYPES.PROCESSOR, "video_upscale"),
-              }),
-          },
-        ],
+        items: [],
       },
       {
         key: "workflows",
         title: "工作流",
         items: [
           {
-            id: "workflow_swap",
+            id: "workflow_bundle",
             icon: Layers,
-            label: "三合一换图",
-            desc: "换脸/换背景/换装/视频超清",
+            label: "工作流组件",
+            desc: "三合一换图 / 批量动图 / 批量花字",
             color: "text-purple-300",
             bg: "bg-purple-500/10",
-            onClick: () =>
-              handleAnchorActionClick({
-                partEnum: AI_CHAT_PART_ENUM_209,
-                modelId: 4,
-                to: "workflow_swap",
-                debugLabel: "三合一换图",
-                action: () => navigate("/app/swap"),
-              }),
-          },
-          {
-            id: "workflow_batch_video",
-            icon: Film,
-            label: "批量动图",
-            desc: "单图生成短视频/视频超清",
-            color: "text-sky-400",
-            bg: "bg-sky-500/10",
-            onClick: () =>
-              handleAnchorActionClick({
-                partEnum: AI_CHAT_PART_ENUM_210,
-                modelId: 4,
-                to: "workflow_batch_video",
-                debugLabel: "批量动图",
-                action: () => navigate("/app/batch-video"),
-              }),
-          },
-          {
-            id: "workflow_batch_wordart",
-            icon: Palette,
-            label: "批量花字",
-            desc: "批量添加花字文案",
-            color: "text-cyan-300",
-            bg: "bg-cyan-500/10",
-            onClick: () =>
-              handleAnchorActionClick({
-                partEnum: AI_CHAT_PART_ENUM_211,
-                modelId: defaultVideoModelId,
-                to: "workflow_batch_wordart",
-                debugLabel: "批量花字",
-                action: () => navigate("/app/batch-wordart"),
-              }),
+            onClick: (event) => {
+              const target = event?.currentTarget;
+              if (!target || !workspaceShellRef.current) return;
+              const itemRect = target.getBoundingClientRect();
+              const shellRect = workspaceShellRef.current.getBoundingClientRect();
+              setSidebarWorkflowMenu((prev) =>
+                prev
+                  ? null
+                  : {
+                      top: itemRect.top - shellRect.top + itemRect.height / 2,
+                    },
+              );
+            },
           },
         ],
       },
-      ...(isAdminUser
-        ? [
-            {
-              key: "learning",
-              title: "AI深度学习",
-              items: [
-                {
-                  id: "workflow_local_text2img",
-                  icon: ImagePlus,
-                  label: "本地：文生图",
-                  desc: "image_z_image_turbo 工作流",
-                  color: "text-purple-300",
-                  bg: "bg-purple-500/10",
-                  onClick: () => createLocalText2ImgTemplate(),
-                },
-                {
-                  id: "workflow_local_img2video",
-                  icon: Film,
-                  label: "本地：图生视频",
-                  desc: "Qwen_i2v 工作流",
-                  color: "text-sky-300",
-                  bg: "bg-sky-500/10",
-                  onClick: () => createLocalImg2VideoTemplate(),
-                },
-                {
-                  id: "workflow_pose_control",
-                  icon: Hand,
-                  label: "视频：姿态控制",
-                  desc: "参考图 + 姿态视频驱动",
-                  color: "text-rose-300",
-                  bg: "bg-rose-500/10",
-                  onClick: () => navigate("/app/pose-control-video"),
-                },
-              ],
-            },
-          ]
-        : []),
     ];
 
-    const query = leftSidebarQuery.trim().toLowerCase();
-    const hasSidebarQuery = Boolean(query);
-    const visibleSections = sections
-      .map((section) => ({
-        ...section,
-        items: section.items.filter((item) => {
-          if (!query) return true;
-          return [item.label, item.desc, section.title].join(" ").toLowerCase().includes(query);
-        }),
-      }))
-      .filter((section) => section.items.length > 0);
+    const visibleItems = sections.flatMap((section) =>
+      section.items.map((item) => ({
+        ...item,
+        sectionTitle: section.title,
+      })),
+    );
 
     return (
       <>
-        {visibleSections.length === 0 && !isLeftSidebarCollapsed ? (
-          <div className="rounded-md border border-slate-200 bg-slate-50 p-2.5 text-[11px] text-slate-500">
-            未找到匹配项，请尝试其他关键词。
-          </div>
-        ) : (
-          <div className={`flex flex-col space-y-2 ${isLeftSidebarCollapsed ? "items-center" : "items-stretch"}`}>
-            {visibleSections.map((section, idx) => {
-              const sectionOpen = isLeftSidebarCollapsed ? true : hasSidebarQuery ? true : !!leftSidebarSectionOpen[section.key];
-              return (
-                <div
-                  key={section.key}
-                  className={`flex w-full flex-col ${
-                    isLeftSidebarCollapsed
-                      ? `items-center ${idx === 0 ? "" : "border-t border-slate-200 pt-1.5"}`
-                      : "items-stretch rounded-[20px] border border-slate-200 bg-white px-3 py-2.5"
-                  }`}
-                >
-                  {!isLeftSidebarCollapsed && (
-                    <SidebarSectionHeader
-                      title={section.title}
-                      open={sectionOpen}
-                      onToggle={() => handleLeftSidebarSectionToggle(section.key)}
-                    />
-                  )}
-                  {sectionOpen && (
-                    <div className={isLeftSidebarCollapsed ? "flex w-full flex-col items-center space-y-1.5" : "mt-2 flex w-full flex-col space-y-2"}>
-                      {section.items.map((item) => (
-                        <SidebarBtn
-                          key={item.id}
-                          icon={item.icon}
-                          label={item.label}
-                          desc={item.desc}
-                          color={item.color}
-                          bg={item.bg}
-                          active={activeSidebarItemKey === item.id}
-                          compact={isLeftSidebarCollapsed}
-                          expanded={isLeftSidebarCollapsed ? hoveredSidebarItemKey === item.id : true}
-                          category={section.title}
-                          onHoverChange={(isHovering, target) => {
-                            if (!isLeftSidebarCollapsed) {
-                              setHoveredSidebarItemKey("");
-                              setHoveredSidebarPreview(null);
-                              return;
-                            }
-                            setHoveredSidebarItemKey(isHovering ? item.id : "");
-                            if (isHovering && target && workspaceShellRef.current) {
-                              const itemRect = target.getBoundingClientRect();
-                              const shellRect = workspaceShellRef.current.getBoundingClientRect();
-                              setHoveredSidebarPreview({
-                                ...item,
-                                active: activeSidebarItemKey === item.id,
-                                top: itemRect.top - shellRect.top + itemRect.height / 2,
-                              });
-                              return;
-                            }
-                            setHoveredSidebarPreview(null);
-                          }}
-                          onClick={() => {
-                            setActiveSidebarItemKey(item.id);
-                            safeInvoke(item.onClick, item.label || "侧栏操作");
-                            onAction?.();
-                          }}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
+        <div className="flex flex-col items-center gap-1.5">
+          {visibleItems.map((item, itemIndex) => (
+            <SidebarBtn
+              key={item.id}
+              icon={item.icon}
+              itemId={item.id}
+              label={item.label}
+              desc={item.desc}
+              color={item.color}
+              bg={item.bg}
+              active={activeSidebarItemKey === item.id}
+              compact
+              category={item.sectionTitle}
+              primary={false}
+              menuTrigger={item.id === "workflow_bundle"}
+              onHoverChange={(isHovering, target) => {
+                setHoveredSidebarItemKey(isHovering ? item.id : "");
+                if (isHovering && target && workspaceShellRef.current) {
+                  const itemRect = target.getBoundingClientRect();
+                  const shellRect = workspaceShellRef.current.getBoundingClientRect();
+                  setHoveredSidebarPreview({
+                    ...item,
+                    active: activeSidebarItemKey === item.id,
+                    top: itemRect.top - shellRect.top + itemRect.height / 2,
+                  });
+                  return;
+                }
+                setHoveredSidebarPreview(null);
+              }}
+              onClick={(event) => {
+                setActiveSidebarItemKey(item.id);
+                safeInvoke(() => item.onClick?.(event), item.label || "侧栏操作");
+                onAction?.();
+              }}
+            />
+          ))}
+        </div>
       </>
     );
   };
@@ -10414,173 +10292,147 @@ const handleNodeMouseDown = (e, nid) => {
 
       <div ref={workspaceShellRef} className="flex-1 flex relative min-h-0 overflow-hidden">
         {/* Sidebar */}
-        <div className="relative z-40 my-4 flex h-[calc(100%-2rem)] shrink-0 flex-col justify-between self-start">
-          <div
-            className={`flex min-h-0 flex-1 flex-col items-center self-start px-2 py-3 select-none`}
-            style={{ WebkitOverflowScrolling: "touch", width: leftSidebarWidth }}
-          >
-            {!isLeftSidebarCollapsed && (
-              <div className="mb-3 w-full">
-                <div className="relative">
-                  <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
-                  <input
-                    value={leftSidebarQuery}
-                    onChange={(e) => setLeftSidebarQuery(e.target.value)}
-                    placeholder="搜索节点 / 技能 / 工作流"
-                    className="h-9 w-full rounded-md border border-slate-200 bg-white pl-8 pr-2.5 text-[11px] text-slate-700 placeholder:text-slate-400 outline-none focus:border-slate-400"
-                  />
-                </div>
-              </div>
-            )}
-            <div className="min-h-0 w-full flex-1 overflow-y-auto overflow-x-visible custom-scrollbar [scrollbar-gutter:stable] overscroll-contain">
-              {!isLeftSidebarCollapsed && <div className="mb-2.5 h-px w-full bg-gradient-to-r from-slate-300 via-slate-200 to-transparent" />}
-              {renderSidebarContent()}
-            </div>
-            <div className="mt-3 w-full">
+        <div className="absolute left-4 top-1/2 z-40 flex -translate-y-1/2 shrink-0 flex-col items-center gap-2">
+          <div className="shrink-0" style={{ width: leftSidebarWidth }}>
+            <div className="mx-auto flex w-full rounded-[32px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.96)] p-1.5 shadow-[0_4px_16px_rgba(0,0,0,0.06)] backdrop-blur-xl">
               <button
                 type="button"
-                onClick={() => setLeftSidebarCollapsed((prev) => !prev)}
-                title={isLeftSidebarCollapsed ? "展开左侧菜单" : "收起左侧菜单"}
-                aria-label={isLeftSidebarCollapsed ? "展开左侧菜单" : "收起左侧菜单"}
-                className={`flex items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 shadow-[0_10px_28px_rgba(15,23,42,0.08)] transition-colors hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900 ${
-                  isLeftSidebarCollapsed ? "mx-auto h-9 w-9" : "h-10 w-full gap-2 text-[11px]"
-                }`}
+                onClick={() => {
+                  setActiveSidebarItemKey("node_upload");
+                  safeInvoke(() => addNode(NODE_TYPES.INPUT), "图片/视频上传");
+                }}
+                className="animate-bf-breathe flex h-11 w-full scale-[1.05] items-center justify-center rounded-[24px] border border-[#B9E975] bg-[linear-gradient(135deg,#A7E163_0%,#8FD14F_100%)] text-[#1F2937] transition-all duration-200 ease-in-out hover:scale-[1.075] hover:brightness-[1.02]"
+                style={{
+                  boxShadow: "0 0 0 4px rgba(163,230,53,0.15), 0 8px 20px rgba(0,0,0,0.12)",
+                }}
+                title="图片/视频上传"
+                aria-label="图片/视频上传"
               >
-                {isLeftSidebarCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
-                {!isLeftSidebarCollapsed && <span>{isLeftSidebarCollapsed ? "展开左侧菜单" : "收起组件列表"}</span>}
+                <Upload className="h-[18px] w-[18px]" strokeWidth={2.2} />
               </button>
             </div>
           </div>
-          <div className="mt-3 shrink-0 p-2" style={{ width: leftSidebarWidth }}>
-            {isLeftSidebarCollapsed ? (
-              <details className="relative group">
-                <summary
-                  className="list-none mx-auto flex h-10 w-10 cursor-pointer items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:text-slate-900 [&::-webkit-details-marker]:hidden"
-                  title={memberLabel}
-                >
-                  {memberAvatar ? (
-                    <img src={memberAvatar} alt={memberLabel} className="h-full w-full rounded-xl object-cover" />
-                  ) : (
-                    <span className="text-xs font-semibold">{String(memberLabel || "G").slice(0, 1).toUpperCase()}</span>
-                  )}
-                </summary>
-                <div className="absolute bottom-full left-0 mb-2 w-56 rounded-xl border border-slate-200 bg-white p-3 shadow-[0_20px_44px_rgba(15,23,42,0.1)] z-[70]">
-                  <div className="flex items-center gap-3">
-                    <div className="h-11 w-11 overflow-hidden rounded-xl border border-slate-200 bg-slate-100">
-                      {memberAvatar ? (
-                        <img src={memberAvatar} alt={memberLabel} className="h-full w-full object-cover" />
-                      ) : (
-                        <div className="flex h-full w-full items-center justify-center text-sm font-semibold text-slate-700">
-                          {String(memberLabel || "G").slice(0, 1).toUpperCase()}
-                        </div>
-                      )}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-semibold text-slate-800">{memberLabel}</div>
-                      <div className="text-[10px] text-slate-400">
-                        {memberInfoLoginUrl ? "会员未登录" : "会员信息"}
-                      </div>
-                      <div className="mt-1">
-                        <span
-                          className={`inline-flex rounded-full border px-2 py-0.5 text-[9px] ${
-                            userAuthsLoading
-                              ? "border-slate-200 bg-slate-50 text-slate-500"
-                              : isAdminUser
-                              ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-100"
-                              : "border-slate-200 bg-slate-50 text-slate-500"
-                          }`}
-                        >
-                          {userAuthsLoading ? "权限加载中" : isAdminUser ? "管理员" : "普通成员"}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="mt-3 grid grid-cols-2 gap-2">
-                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5">
-                      <div className="text-[10px] text-slate-500">当前积分</div>
-                      <div className="mt-0.5 text-xs font-semibold text-yellow-700">{formatMemberPoints(memberPoint)}</div>
-                    </div>
-                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5">
-                      <div className="text-[10px] text-slate-500">累计积分</div>
-                      <div className="mt-0.5 text-xs font-semibold text-emerald-700">{formatMemberPoints(memberTotalPoint)}</div>
-                    </div>
-                  </div>
-                  {memberInfoLoginUrl ? (
-                    <button
-                      type="button"
-                      onClick={() => navigateToMemberLogin(memberInfoLoginUrl)}
-                    className="mt-2 w-full rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-2 text-left text-[11px] text-cyan-700 hover:border-cyan-300 hover:bg-cyan-100"
-                    >
-                      前往会员登录
-                    </button>
-                  ) : null}
-                </div>
-              </details>
-            ) : (
-              <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-[0_14px_32px_rgba(15,23,42,0.06)]">
-                <div className="flex items-center gap-3">
-                  <div className="h-12 w-12 overflow-hidden rounded-2xl border border-slate-200 bg-slate-100">
-                    {memberAvatar ? (
-                      <img src={memberAvatar} alt={memberLabel} className="h-full w-full object-cover" />
-                    ) : (
-                      <div className="flex h-full w-full items-center justify-center text-sm font-semibold text-slate-700">
-                        {String(memberLabel || "G").slice(0, 1).toUpperCase()}
-                      </div>
-                    )}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-semibold text-slate-800">{memberLabel}</div>
-                    <div className="truncate text-[10px] text-slate-400">
-                      {memberInfoLoginUrl ? "会员未登录" : user?.email || "会员信息"}
-                    </div>
-                    <div className="mt-1">
-                      <span
-                        className={`inline-flex rounded-full border px-2 py-0.5 text-[9px] ${
-                          userAuthsLoading
-                            ? "border-slate-200 bg-slate-50 text-slate-500"
-                            : isAdminUser
-                            ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                            : "border-slate-200 bg-slate-50 text-slate-500"
-                        }`}
-                      >
-                        {userAuthsLoading ? "权限加载中" : isAdminUser ? "管理员" : "普通成员"}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-                <div className="mt-3 grid grid-cols-2 gap-2">
-                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-2">
-                    <div className="text-[10px] text-slate-500">当前积分</div>
-                    <div className="mt-1 text-sm font-semibold text-yellow-700">{formatMemberPoints(memberPoint)}</div>
-                  </div>
-                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-2">
-                    <div className="text-[10px] text-slate-500">累计积分</div>
-                    <div className="mt-1 text-sm font-semibold text-emerald-700">{formatMemberPoints(memberTotalPoint)}</div>
-                  </div>
-                </div>
-                {memberInfoLoginUrl ? (
-                  <button
-                    type="button"
-                    onClick={() => navigateToMemberLogin(memberInfoLoginUrl)}
-                    className="mt-2 w-full rounded-xl border border-cyan-200 bg-cyan-50 px-3 py-2 text-[11px] text-cyan-700 hover:border-cyan-300 hover:bg-cyan-100 transition-colors"
-                  >
-                    前往会员登录
-                  </button>
-                ) : null}
-              </div>
-            )}
+          <div
+            className="flex h-auto flex-col items-center rounded-[32px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.9)] px-2 py-2.5 shadow-[0_4px_16px_rgba(0,0,0,0.06)] backdrop-blur-xl select-none"
+            style={{ WebkitOverflowScrolling: "touch", width: leftSidebarWidth }}
+          >
+            <div className="w-full overflow-visible">
+              {renderSidebarContent()}
+            </div>
           </div>
+          <div className="shrink-0" style={{ width: leftSidebarWidth }}>
+            <div className="mx-auto flex w-full flex-col items-center gap-1.5 rounded-[32px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.9)] px-2 py-1.5 shadow-[0_4px_16px_rgba(0,0,0,0.06)] backdrop-blur-xl">
+              <button
+                type="button"
+                onClick={undo}
+                disabled={!canUndo}
+                title="撤销"
+                aria-label="撤销"
+                className={`flex h-8 w-8 items-center justify-center rounded-full transition-colors ${
+                  canUndo
+                    ? "text-[#6B7280] hover:bg-[#EAECEF] hover:text-slate-800 active:bg-[#E1E5E9]"
+                    : "cursor-not-allowed text-slate-300"
+                }`}
+              >
+                <span className="flex h-7 w-7 items-center justify-center">
+                  <Undo className="h-[18px] w-[18px]" strokeWidth={2.2} />
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={redo}
+                disabled={!canRedo}
+                title="重做"
+                aria-label="重做"
+                className={`flex h-8 w-8 items-center justify-center rounded-full transition-colors ${
+                  canRedo
+                    ? "text-[#6B7280] hover:bg-[#EAECEF] hover:text-slate-800 active:bg-[#E1E5E9]"
+                    : "cursor-not-allowed text-slate-300"
+                }`}
+              >
+                <span className="flex h-7 w-7 items-center justify-center">
+                  <Redo className="h-[18px] w-[18px]" strokeWidth={2.2} />
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="absolute bottom-4 left-4 z-40 shrink-0" style={{ width: leftSidebarWidth }}>
+          <details className="relative group">
+            <summary
+              className="list-none mx-auto flex h-11 w-11 cursor-pointer items-center justify-center rounded-full border border-[#E5E7EB] bg-[rgba(255,255,255,0.9)] text-slate-700 shadow-[0_4px_16px_rgba(0,0,0,0.06)] backdrop-blur-xl hover:bg-[#F8FAFC] hover:text-slate-900 [&::-webkit-details-marker]:hidden"
+              title={memberLabel}
+            >
+              {memberAvatar ? (
+                <img src={memberAvatar} alt={memberLabel} className="h-full w-full rounded-full object-cover" />
+              ) : (
+                <span className="text-xs font-semibold">{String(memberLabel || "G").slice(0, 1).toUpperCase()}</span>
+              )}
+            </summary>
+            <div className="absolute bottom-full left-0 z-[70] mb-2 w-56 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.96)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.1)] backdrop-blur-xl">
+              <div className="flex items-center gap-3">
+                <div className="h-11 w-11 overflow-hidden rounded-xl border border-slate-200 bg-slate-100">
+                  {memberAvatar ? (
+                    <img src={memberAvatar} alt={memberLabel} className="h-full w-full object-cover" />
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center text-sm font-semibold text-slate-700">
+                      {String(memberLabel || "G").slice(0, 1).toUpperCase()}
+                    </div>
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-semibold text-slate-800">{memberLabel}</div>
+                  <div className="text-[10px] text-slate-400">
+                    {memberInfoLoginUrl ? "会员未登录" : "会员信息"}
+                  </div>
+                  <div className="mt-1">
+                    <span
+                      className={`inline-flex rounded-full border px-2 py-0.5 text-[9px] ${
+                        userAuthsLoading
+                          ? "border-slate-200 bg-slate-50 text-slate-500"
+                          : isAdminUser
+                          ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-100"
+                          : "border-slate-200 bg-slate-50 text-slate-500"
+                      }`}
+                    >
+                      {userAuthsLoading ? "权限加载中" : isAdminUser ? "管理员" : "普通成员"}
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5">
+                  <div className="text-[10px] text-slate-500">当前积分</div>
+                  <div className="mt-0.5 text-xs font-semibold text-yellow-700">{formatMemberPoints(memberPoint)}</div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5">
+                  <div className="text-[10px] text-slate-500">累计积分</div>
+                  <div className="mt-0.5 text-xs font-semibold text-emerald-700">{formatMemberPoints(memberTotalPoint)}</div>
+                </div>
+              </div>
+              {memberInfoLoginUrl ? (
+                <button
+                  type="button"
+                  onClick={() => navigateToMemberLogin(memberInfoLoginUrl)}
+                  className="mt-2 w-full rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-2 text-left text-[11px] text-cyan-700 hover:border-cyan-300 hover:bg-cyan-100"
+                >
+                  前往会员登录
+                </button>
+              ) : null}
+            </div>
+          </details>
         </div>
 
         {isLeftSidebarCollapsed && hoveredSidebarPreview ? (
           <div
-            className="pointer-events-none absolute z-[55] w-72 -translate-y-1/2 rounded-2xl border border-slate-200 bg-white px-3.5 py-3.5 text-left shadow-[0_20px_44px_rgba(15,23,42,0.1)]"
-            style={{ left: leftSidebarWidth + 6, top: hoveredSidebarPreview.top }}
+            className="pointer-events-none absolute z-[55] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.96)] px-4 py-4 text-left shadow-[0_20px_44px_rgba(15,23,42,0.1)] backdrop-blur-xl"
+            style={{ left: leftSidebarWidth + 18, top: hoveredSidebarPreview.top }}
           >
-            <div className="absolute left-[-6px] top-1/2 h-3 w-3 -translate-y-1/2 rotate-45 border-l border-t border-slate-200 bg-white" />
+            <div className="absolute left-[-6px] top-1/2 h-3 w-3 -translate-y-1/2 rotate-45 border-l border-t border-[#E5E7EB] bg-[rgba(255,255,255,0.96)]" />
             <div className="flex items-start gap-3">
               <div
-                className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${hoveredSidebarPreview.bg} ${hoveredSidebarPreview.color} ring-1 ${
+                className={`mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280] ring-1 ${
                   hoveredSidebarPreview.active ? "ring-slate-400/35" : "ring-slate-200"
                 }`}
               >
@@ -10597,6 +10449,99 @@ const handleNodeMouseDown = (e, nid) => {
                 </div>
                 <div className="mt-2 text-[10px] text-slate-500">点击后会直接创建对应组件或进入对应工作流。</div>
               </div>
+            </div>
+          </div>
+        ) : null}
+
+        {sidebarWorkflowMenu ? (
+          <div
+            data-sidebar-workflow-menu="true"
+            className="absolute z-[58] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.98)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
+            style={{ left: leftSidebarWidth + 18, top: sidebarWorkflowMenu.top }}
+          >
+            <div className="mb-2 px-1 text-[11px] font-medium text-slate-500">选择工作流</div>
+            <div className="space-y-1.5">
+              <button
+                type="button"
+                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
+                onClick={() => {
+                  setActiveSidebarItemKey("workflow_swap");
+                  setSidebarWorkflowMenu(null);
+                  safeInvoke(
+                    () =>
+                      handleAnchorActionClick({
+                        partEnum: AI_CHAT_PART_ENUM_209,
+                        modelId: 4,
+                        to: "workflow_swap",
+                        debugLabel: "三合一换图",
+                        action: () => navigate("/app/swap"),
+                      }),
+                    "三合一换图",
+                  );
+                }}
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
+                  <Layers className="h-[18px] w-[18px]" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-medium text-slate-800">三合一换图</div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">换脸 / 换背景 / 换装 / 视频超清</div>
+                </div>
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
+                onClick={() => {
+                  setActiveSidebarItemKey("workflow_batch_video");
+                  setSidebarWorkflowMenu(null);
+                  safeInvoke(
+                    () =>
+                      handleAnchorActionClick({
+                        partEnum: AI_CHAT_PART_ENUM_210,
+                        modelId: 4,
+                        to: "workflow_batch_video",
+                        debugLabel: "批量动图",
+                        action: () => navigate("/app/batch-video"),
+                      }),
+                    "批量动图",
+                  );
+                }}
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
+                  <Film className="h-[18px] w-[18px]" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-medium text-slate-800">批量动图</div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">单图生成短视频 / 视频超清</div>
+                </div>
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
+                onClick={() => {
+                  setActiveSidebarItemKey("workflow_batch_wordart");
+                  setSidebarWorkflowMenu(null);
+                  safeInvoke(
+                    () =>
+                      handleAnchorActionClick({
+                        partEnum: AI_CHAT_PART_ENUM_211,
+                        modelId: defaultVideoModelId,
+                        to: "workflow_batch_wordart",
+                        debugLabel: "批量花字",
+                        action: () => navigate("/app/batch-wordart"),
+                      }),
+                    "批量花字",
+                  );
+                }}
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
+                  <Palette className="h-[18px] w-[18px]" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-medium text-slate-800">批量花字</div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">批量添加花字文案</div>
+                </div>
+              </button>
             </div>
           </div>
         ) : null}
@@ -10714,7 +10659,10 @@ const handleNodeMouseDown = (e, nid) => {
 	          ) : null}
 
 	          {/* Controls */}
-          <div className="absolute bottom-6 left-6 z-50 flex gap-2 select-none">
+          <div
+            className="absolute bottom-6 z-50 flex gap-2 select-none"
+            style={{ left: leftSidebarWidth + 28 }}
+          >
             <div className="relative flex items-center rounded-[16px] border border-slate-200 bg-white p-0.5 shadow-[0_18px_36px_rgba(15,23,42,0.08)] text-slate-500">
               <button onClick={() => zoomCanvas(-0.2)} className="relative rounded-[12px] p-1.5 transition-colors hover:bg-slate-100 hover:text-slate-900"><Minus className="w-3 h-3" /></button>
               <span className="relative w-9 text-center text-[10px] font-mono text-slate-700">{Math.round(viewport.zoom * 100)}%</span>

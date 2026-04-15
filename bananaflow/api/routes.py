@@ -1545,6 +1545,10 @@ def _normalize_video_split_resolution(value: Any) -> str:
     return "720p"
 
 
+def _normalize_video_split_include_audio(value: Any) -> bool:
+    return bool(value)
+
+
 def _parse_size_to_dimensions(size: Optional[str], aspect_ratio: Optional[str], *, default: tuple[int, int] = (1024, 1024)) -> tuple[int, int]:
     target = str(calculate_target_resolution(size or "1024x1024", aspect_ratio or "1:1") or "").strip()
     matched = re.match(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$", target)
@@ -3569,6 +3573,7 @@ def _run_video_split_task(task_id: str, req_id: str, user_id: Optional[str], pay
     t0 = time.time()
     segments = _normalize_video_split_segments(payload.get("segments"))
     output_resolution = _normalize_video_split_resolution(payload.get("output_resolution"))
+    include_audio = _normalize_video_split_include_audio(payload.get("include_audio"))
 
     try:
         if not segments:
@@ -3586,6 +3591,7 @@ def _run_video_split_task(task_id: str, req_id: str, user_id: Optional[str], pay
             video_input=str(payload.get("video") or ""),
             segments=segments,
             output_resolution=output_resolution,
+            include_audio=include_audio,
         )
         if not video_bytes_list:
             raise RuntimeError("No split videos returned")
@@ -3610,6 +3616,7 @@ def _run_video_split_task(task_id: str, req_id: str, user_id: Optional[str], pay
                 "model": VIDEO_SPLIT_MODEL_NAME,
                 "segment_count": len(output_videos),
                 "output_resolution": output_resolution,
+                "include_audio": include_audio,
             },
             {"file": "mem"},
             time.time() - t0,
@@ -3634,6 +3641,7 @@ def _run_video_split_task(task_id: str, req_id: str, user_id: Optional[str], pay
                 "model": VIDEO_SPLIT_MODEL_NAME,
                 "segment_count": len(segments),
                 "output_resolution": output_resolution,
+                "include_audio": include_audio,
             },
             {"file": "mem"},
             time.time() - t0,
@@ -3650,10 +3658,12 @@ def video_split_start(req: VideoSplitRequest, request: Request, current_user=Dep
     task_id = uuid.uuid4().hex
     segments = _normalize_video_split_segments(payload.get("segments"))
     output_resolution = _normalize_video_split_resolution(payload.get("output_resolution"))
+    include_audio = _normalize_video_split_include_audio(payload.get("include_audio"))
     if not segments:
         raise HTTPException(status_code=400, detail="至少需要一个有效分段")
     payload["segments"] = segments
     payload["output_resolution"] = output_resolution
+    payload["include_audio"] = include_audio
 
     user_id = str((current_user or {}).get("id") or "").strip()
     _set_video_split_task(

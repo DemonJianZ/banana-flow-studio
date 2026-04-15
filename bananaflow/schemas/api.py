@@ -137,6 +137,7 @@ class VideoSplitRequest(BaseModel):
     video: str
     segments: List[VideoSplitSegmentRequest] = Field(default_factory=list)
     output_resolution: Optional[str] = Field(default="720p")
+    include_audio: Optional[bool] = Field(default=False)
 
 class VideoSplitResponse(BaseModel):
     videos: List[str] = Field(default_factory=list)

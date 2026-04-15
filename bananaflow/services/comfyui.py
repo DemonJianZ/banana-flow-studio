@@ -702,6 +702,7 @@ def _trim_video_segment(
     req_id: str,
     segment_index: int,
     output_resolution: str = "720p",
+    include_audio: bool = False,
 ) -> None:
     start_sec = max(0.0, float(start_sec or 0.0))
     end_sec = max(start_sec, float(end_sec or 0.0))
@@ -717,8 +718,6 @@ def _trim_video_segment(
         f"{duration_sec:.3f}",
         "-map",
         "0:v:0",
-        "-map",
-        "0:a?",
         "-c:v",
         "libx264",
         "-preset",
@@ -726,6 +725,11 @@ def _trim_video_segment(
         "-crf",
         "18",
     ]
+    if include_audio:
+        trim_cmd.extend([
+            "-map",
+            "0:a?",
+        ])
     resolution_text = str(output_resolution or "").strip().lower()
     if resolution_text in {"480p", "720p", "1080p"}:
         target = int(resolution_text[:-1])
@@ -734,9 +738,20 @@ def _trim_video_segment(
             trim_cmd.extend(["-vf", f"scale=-2:{target}"])
         else:
             trim_cmd.extend(["-vf", f"scale={target}:-2"])
+    if include_audio:
+        trim_cmd.extend([
+            "-c:a",
+            "aac",
+        ])
+    else:
+        trim_cmd.extend([
+            "-map",
+            "-0:a",
+            "-an",
+            "-sn",
+            "-dn",
+        ])
     trim_cmd.extend([
-        "-c:a",
-        "aac",
         "-movflags",
         "+faststart",
         output_path,
@@ -750,6 +765,7 @@ def run_video_split_workflow(
     video_input: str,
     segments: List[Dict[str, Any]],
     output_resolution: str = "720p",
+    include_audio: bool = False,
 ) -> tuple[List[bytes], str]:
     if not segments:
         raise ComfyUiError("No video segments provided")
@@ -775,6 +791,7 @@ def run_video_split_workflow(
                 req_id,
                 index,
                 output_resolution=output_resolution,
+                include_audio=include_audio,
             )
             with open(output_path, "rb") as f:
                 payload = f.read()

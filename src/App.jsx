@@ -8,8 +8,6 @@ import PipelineBatchVideo from "./pages/PipelineBatchVideo";
 import PipelineFeatureExtract from "./pages/PipelineFeatureExtract";
 import PipelineBatchWordArt from "./pages/PipelineBatchWordArt";
 import PipelineRmbg from "./pages/PipelineRmbg";
-import PipelinePoseControlVideo from "./pages/PipelinePoseControlVideo";
-import AIChatImagePlayground from "./pages/AIChatImagePlayground";
 import GlobalToast from "./components/GlobalToast";
 
 
@@ -103,22 +101,6 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <PipelineBatchWordArt />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/app/pose-control-video"
-            element={
-              <ProtectedRoute>
-                <PipelinePoseControlVideo />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/app/ai-chat-image"
-            element={
-              <ProtectedRoute>
-                <AIChatImagePlayground />
               </ProtectedRoute>
             }
           />
