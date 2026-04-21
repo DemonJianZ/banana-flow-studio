@@ -1454,10 +1454,15 @@ const AI_CHAT_PART_ENUM_3 = 3;
 const AI_CHAT_PART_ENUM_4 = 4;
 const AI_CHAT_PART_ENUM_5 = 5;
 
-const DEFAULT_AI_MODELS = [
-  { id: "gemini-3-pro-image-preview", name: "Gemini 3 Pro", vendor: "Google", icon: Sparkles },
-  { id: "doubao-seedream-4.5", name: "Doubao 4.5", vendor: "ByteDance", icon: Zap },
-];
+const DEFAULT_AI_MODELS = [];
+const DEPRECATED_IMAGE_MODEL_IDS = new Set([
+  "gemini-3-pro-image-preview",
+  "doubao-seedream-4.5",
+]);
+const DEPRECATED_IMAGE_MODEL_NAMES = new Set([
+  "gemini 3 pro",
+  "doubao 4.5",
+]);
 
 const DEFAULT_VIDEO_MODELS = [];
 const DEPRECATED_VIDEO_MODEL_IDS = new Set([
@@ -1467,7 +1472,7 @@ const DEPRECATED_VIDEO_MODEL_IDS = new Set([
 const VOLC_VIDEO_HD_TEMPLATE_ENUM_1 = 1;
 const VOLC_VIDEO_HD_TEMPLATE_ENUM_2 = 2;
 const DEFAULT_VIDEO_HD_MODEL_ID = "1";
-const DEFAULT_IMAGE_MODEL_ID = DEFAULT_AI_MODELS[0].id;
+const DEFAULT_IMAGE_MODEL_ID = DEFAULT_AI_MODELS[0]?.id || "";
 const DEFAULT_VIDEO_MODEL_ID = DEFAULT_VIDEO_MODELS[0]?.id || "";
 
 const isSeedanceReferenceModeModel = (...values) =>
@@ -1610,6 +1615,16 @@ const getDefaultImageModelId = (options, allowFallback = false) => {
   const preferred = list.find((item) => String(item?.id || "").trim() === "4");
   return preferred?.id || list[0]?.id || (allowFallback ? DEFAULT_IMAGE_MODEL_ID : "");
 };
+
+const isDeprecatedImageModel = (item) => {
+  const id = String(item?.id || item?.value || "").trim().toLowerCase();
+  const name = String(item?.name || item?.label || "").trim().toLowerCase();
+  return DEPRECATED_IMAGE_MODEL_IDS.has(id) || DEPRECATED_IMAGE_MODEL_NAMES.has(name);
+};
+
+const filterDeprecatedImageModels = (items = EMPTY_LIST) =>
+  (Array.isArray(items) ? items : EMPTY_LIST).filter((item) => !isDeprecatedImageModel(item));
+
 const getDefaultLanguageModelId = (options) => {
   const list = Array.isArray(options) ? options : EMPTY_LIST;
   if (!list.length) return "";
@@ -5965,11 +5980,11 @@ const Workbench = () => {
     [aiChatModels.language],
   );
   const imageModelRecords = useMemo(
-    () => (Array.isArray(aiChatModels.image) && aiChatModels.image.length ? aiChatModels.image : EMPTY_LIST),
+    () => filterDeprecatedImageModels(Array.isArray(aiChatModels.image) && aiChatModels.image.length ? aiChatModels.image : EMPTY_LIST),
     [aiChatModels.image],
   );
   const imageModelOptions = useMemo(
-    () => (imageModelRecords.length ? imageModelRecords : DEFAULT_AI_MODELS),
+    () => (imageModelRecords.length ? imageModelRecords : filterDeprecatedImageModels(DEFAULT_AI_MODELS)),
     [imageModelRecords],
   );
   const videoModelOptions = useMemo(() => {
@@ -6426,9 +6441,30 @@ const Workbench = () => {
           model: defaultVideoModelId,
         },
       };
+  });
+  if (changed) setNodes(nextNodes);
+  }, [defaultVideoModelId, nodes]);
+
+  useEffect(() => {
+    if (!defaultImageModelId) return;
+    let changed = false;
+    const nextNodes = nodes.map((node) => {
+      const isImageNode =
+        node?.type === NODE_TYPES.PROCESSOR &&
+        (node?.data?.mode === "text2img" || node?.data?.mode === "multi_image_generate");
+      if (!isImageNode) return node;
+      if (!isDeprecatedImageModel({ id: node?.data?.model })) return node;
+      changed = true;
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          model: defaultImageModelId,
+        },
+      };
     });
     if (changed) setNodes(nextNodes);
-  }, [defaultVideoModelId, nodes]);
+  }, [defaultImageModelId, nodes]);
 
   useEffect(() => {
     writeAgentDevMode(agentDevMode);
