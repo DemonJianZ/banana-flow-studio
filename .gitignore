@@ -30,3 +30,8 @@ data/ai_chat_tasks.db
 *.njsproj
 *.sln
 *.sw?
+
+.tools/
+node_modules/
+*.log
+__pycache__/

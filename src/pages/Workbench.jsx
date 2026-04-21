@@ -26,7 +26,6 @@ import {
   ChevronDown,
   ChevronUp,
   Info,
-  Settings2,
   History,
   TrendingUp,
   RefreshCw,
@@ -38,6 +37,7 @@ import {
   Sliders,
   Palette,
   Clapperboard,
+  GalleryHorizontal,
   Film,
   WifiOff,
   FileWarning,
@@ -217,6 +217,13 @@ const HITL_FEEDBACK_REASON_OPTIONS = [
   "其他",
 ];
 const EMPTY_LIST = Object.freeze([]);
+const VIDEO_GEN_INPUT_HANDLE_MAIN = "main";
+const VIDEO_GEN_INPUT_HANDLE_LAST_FRAME = "last_frame";
+
+const normalizeConnectionTargetHandle = (handle) =>
+  String(handle || "").trim() === VIDEO_GEN_INPUT_HANDLE_LAST_FRAME
+    ? VIDEO_GEN_INPUT_HANDLE_LAST_FRAME
+    : VIDEO_GEN_INPUT_HANDLE_MAIN;
 
 const LOADING_TIPS = [
   "正在重塑光影氛围...",
@@ -566,17 +573,77 @@ const createDefaultAgentSession = () => ({
 
 const cloneDeep = (obj) => JSON.parse(JSON.stringify(obj));
 
+const MAX_UPLOAD_IMAGE_DIMENSION = 1920;
+const UPLOAD_IMAGE_JPEG_QUALITY = 0.84;
+const MAX_RENDERED_MEDIA_ITEMS_PER_NODE = 24;
+
+const readFileAsDataUrl = (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("文件读取失败"));
+    reader.readAsDataURL(file);
+  });
+
+const shouldCompressImageFile = (file) => {
+  const mime = String(file?.type || "").toLowerCase();
+  if (!mime.startsWith("image/")) return false;
+  if (mime.includes("svg") || mime.includes("gif")) return false;
+  return true;
+};
+
+const compressImageFileToDataUrl = async (file) => {
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.decoding = "async";
+    const loaded = new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = () => reject(new Error("图片解码失败"));
+    });
+    image.src = objectUrl;
+    await loaded;
+
+    const sourceWidth = image.naturalWidth || image.width;
+    const sourceHeight = image.naturalHeight || image.height;
+    if (!sourceWidth || !sourceHeight) return readFileAsDataUrl(file);
+
+    const scale = Math.min(1, MAX_UPLOAD_IMAGE_DIMENSION / Math.max(sourceWidth, sourceHeight));
+    const targetWidth = Math.max(1, Math.round(sourceWidth * scale));
+    const targetHeight = Math.max(1, Math.round(sourceHeight * scale));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    const ctx = canvas.getContext("2d", { alpha: false });
+    if (!ctx) return readFileAsDataUrl(file);
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, targetWidth, targetHeight);
+    ctx.drawImage(image, 0, 0, targetWidth, targetHeight);
+
+    return canvas.toDataURL("image/jpeg", UPLOAD_IMAGE_JPEG_QUALITY);
+  } catch (error) {
+    console.warn("[Workbench] image-compress-fallback", error);
+    return readFileAsDataUrl(file);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+};
+
+const readMediaFileAsDataUrl = (file) => {
+  if (shouldCompressImageFile(file)) return compressImageFileToDataUrl(file);
+  return readFileAsDataUrl(file);
+};
+
 const readFilesAsDataUrls = (files) =>
-  Promise.all(
-    Array.from(files || []).map(
-      (file) =>
-        new Promise((resolve) => {
-          const reader = new FileReader();
-          reader.onloadend = () => resolve(reader.result);
-          reader.readAsDataURL(file);
-        }),
-    ),
-  );
+  Promise.all(Array.from(files || []).map((file) => readMediaFileAsDataUrl(file)));
+
+const cloneCanvasNodeForHistory = (node) => ({
+  ...node,
+  data: { ...(node?.data || {}) },
+});
+
+const cloneCanvasNodeLight = cloneCanvasNodeForHistory;
 
 const IMAGE_FILE_EXT_PATTERN = /\.(?:png|jpe?g|webp|gif|bmp|svg|avif|heic|heif)$/i;
 const VIDEO_FILE_EXT_PATTERN = /\.(?:mp4|webm|mov|m4v|avi|mkv|m3u8)$/i;
@@ -598,6 +665,20 @@ const isVideoFileLike = (file) => {
 };
 
 const isMediaFileLike = (file) => isImageFileLike(file) || isVideoFileLike(file);
+const normalizeInputMediaKind = (value) => (value === "image" || value === "video" ? value : "mixed");
+const getReferenceNodeTitle = (mediaKind = "mixed") => {
+  const normalizedMediaKind = normalizeInputMediaKind(mediaKind);
+  if (normalizedMediaKind === "image") return "图片参考";
+  if (normalizedMediaKind === "video") return "视频参考";
+  return "媒体参考";
+};
+const inferMediaKindFromMediaItems = (items = []) => {
+  const safeItems = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (!safeItems.length) return "mixed";
+  if (safeItems.every((item) => isVideoContent(item))) return "video";
+  if (safeItems.every((item) => !isVideoContent(item))) return "image";
+  return "mixed";
+};
 
 const isEditableElement = (element) => {
   if (!(element instanceof HTMLElement)) return false;
@@ -1378,18 +1459,16 @@ const DEFAULT_AI_MODELS = [
   { id: "doubao-seedream-4.5", name: "Doubao 4.5", vendor: "ByteDance", icon: Zap },
 ];
 
-const DEFAULT_VIDEO_MODELS = [
-  { id: "Doubao-Seedance-1.0-pro", name: "Doubao Seedance 1.0 Pro", vendor: "ByteDance" },
-  { id: "Doubao-Seedance-1.5-pro", name: "Doubao Seedance 1.5 Pro", vendor: "ByteDance" },
-];
-
-const VIDEO_MODEL_1_0 = "Doubao-Seedance-1.0-pro";
-const VIDEO_MODEL_1_5 = "Doubao-Seedance-1.5-pro";
+const DEFAULT_VIDEO_MODELS = [];
+const DEPRECATED_VIDEO_MODEL_IDS = new Set([
+  "Doubao-Seedance-1.0-pro",
+  "Doubao-Seedance-1.5-pro",
+]);
 const VOLC_VIDEO_HD_TEMPLATE_ENUM_1 = 1;
 const VOLC_VIDEO_HD_TEMPLATE_ENUM_2 = 2;
 const DEFAULT_VIDEO_HD_MODEL_ID = "1";
 const DEFAULT_IMAGE_MODEL_ID = DEFAULT_AI_MODELS[0].id;
-const DEFAULT_VIDEO_MODEL_ID = DEFAULT_VIDEO_MODELS[0].id;
+const DEFAULT_VIDEO_MODEL_ID = DEFAULT_VIDEO_MODELS[0]?.id || "";
 
 const isSeedanceReferenceModeModel = (...values) =>
   values.some((value) => {
@@ -1399,9 +1478,19 @@ const isSeedanceReferenceModeModel = (...values) =>
       text.includes("seedance2.0") ||
       text.includes("seedance 2.0") ||
       text.includes("seedance-2.0") ||
-      text.includes("seedance_2.0") ||
-      text === VIDEO_MODEL_1_0.toLowerCase() ||
-      text === VIDEO_MODEL_1_5.toLowerCase()
+      text.includes("seedance_2.0")
+    );
+  });
+
+const isSeedanceOmniReferenceModel = (...values) =>
+  values.some((value) => {
+    const text = String(value || "").trim().toLowerCase();
+    if (!text) return false;
+    return (
+      text.includes("seedance2.0") ||
+      text.includes("seedance 2.0") ||
+      text.includes("seedance-2.0") ||
+      text.includes("seedance_2.0")
     );
   });
 
@@ -1533,13 +1622,14 @@ const getDefaultLanguageModelId = (options) => {
 };
 const getDefaultVideoModelId = (options) => {
   if (!Array.isArray(options) || options.length === 0) return DEFAULT_VIDEO_MODEL_ID;
-  return options.find((item) => item.id === VIDEO_MODEL_1_0)?.id || options[0].id;
+  return options[0]?.id || DEFAULT_VIDEO_MODEL_ID;
 };
 
 const WORKBENCH_AI_CHAT_MODULE_ENUM = "3";
 
 const resolveWorkbenchAIChatPartEnum = ({ mode }) => {
   if (mode === "video_upscale") return AI_CHAT_PART_ENUM_6;
+  if (mode === "text2video") return AI_CHAT_PART_ENUM_204;
   if (mode === "img2video") return AI_CHAT_PART_ENUM_204;
   if (mode === "feature_extract") return AI_CHAT_PART_ENUM_207;
   if (mode === "workflow_swap") return AI_CHAT_PART_ENUM_209;
@@ -1889,6 +1979,16 @@ const TOOL_CARDS = {
     category: "video",
     refRequired: false,
   },
+  text2video: {
+    id: "text2video",
+    name: "文生视频",
+    short: "文生视频",
+    icon: Clapperboard,
+    desc: "直接调用视频模型生成视频",
+    scenario: "纯提示词生成动态视频",
+    category: "video",
+    refRequired: false,
+  },
   local_img2video: {
     id: "local_img2video",
     name: "本地图生视频",
@@ -1930,13 +2030,13 @@ const MULTI_ANGLE_VARIANTS = [
 
 const getProcessorModeDefaults = (mode) => {
   if (mode === "text2img") {
-    return { mode, prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1" } };
+    return { mode, prompt: "", templates: { size: "1k", aspect_ratio: "1:1" } };
   }
   if (mode === "local_text2img") {
     return { mode, prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1" }, model: "comfyui-image-z-image-turbo" };
   }
   if (mode === "multi_image_generate") {
-    return { mode, prompt: "", templates: { size: "1024x1024", note: "" } };
+    return { mode, prompt: "", templates: { size: "1k", note: "" } };
   }
   if (mode === "rmbg") {
     return { mode, prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1" } };
@@ -1983,6 +2083,11 @@ const PROMPT_TEMPLATES = {
     ],
   },
   img2video: {
+    categories: [
+      { name: "画幅比例", key: "ratio", options: ["16:9", "9:16", "3:4", "21:9", "adaptive"] },
+    ],
+  },
+  text2video: {
     categories: [
       { name: "画幅比例", key: "ratio", options: ["16:9", "9:16", "3:4", "21:9", "adaptive"] },
     ],
@@ -2037,6 +2142,20 @@ const checkNodeReady = (node, nodes, connections) => {
   if (node.type === NODE_TYPES.OUTPUT) return true;
 
   const inputConns = connections.filter((c) => c.to === node.id);
+  if (node.type === NODE_TYPES.VIDEO_GEN && node.data.mode === "img2video" && node.data.firstLastFrameOnly) {
+    const mainSourceNodes = inputConns
+      .filter((c) => normalizeConnectionTargetHandle(c.toHandle) !== VIDEO_GEN_INPUT_HANDLE_LAST_FRAME)
+      .map((c) => nodes.find((n) => n.id === c.from))
+      .filter(Boolean);
+    const tailFrameSourceNodes = inputConns
+      .filter((c) => normalizeConnectionTargetHandle(c.toHandle) === VIDEO_GEN_INPUT_HANDLE_LAST_FRAME)
+      .map((c) => nodes.find((n) => n.id === c.from))
+      .filter(Boolean);
+    const hasMainImage = mainSourceNodes.some((n) => (n.data.images?.length || 0) > 0 || (n.data.uploadedImages?.length || 0) > 0);
+    const hasTailFrameImage = tailFrameSourceNodes.some((n) => (n.data.images?.length || 0) > 0 || (n.data.uploadedImages?.length || 0) > 0);
+    const hasPrompt = mainSourceNodes.some((n) => (n.data.text?.length || 0) > 0) || buildCanvasNodePrompt(node).length > 0;
+    return hasMainImage && hasTailFrameImage && hasPrompt;
+  }
   const sourceNodes = inputConns.map((c) => nodes.find((n) => n.id === c.from)).filter(Boolean);
 
   const hasUpstreamImages = sourceNodes.some((n) => (n.data.images?.length || 0) > 0 || (n.data.uploadedImages?.length || 0) > 0);
@@ -2044,7 +2163,7 @@ const checkNodeReady = (node, nodes, connections) => {
   const hasLocalImages = (node.data.uploadedImages?.length || 0) > 0;
   const hasInternalPrompt = buildCanvasNodePrompt(node).length > 0;
 
-  if (node.data.mode === "text2img" || node.data.mode === "local_text2img") return hasUpstreamText || hasInternalPrompt;
+  if (node.data.mode === "text2img" || node.data.mode === "local_text2img" || node.data.mode === "text2video") return hasUpstreamText || hasInternalPrompt;
   if (node.data.mode === "multi_image_generate") return hasUpstreamImages || hasLocalImages;
   if (node.data.mode === "img2video" || node.data.mode === "local_img2video") return hasUpstreamImages;
   return hasUpstreamImages;
@@ -2073,6 +2192,112 @@ const VideoPlayer = ({ src, className, controls = false, autoPlay = true, ...pro
       {...props}
     />
   );
+};
+
+const InlineDropdown = ({
+  value,
+  options = EMPTY_LIST,
+  onChange,
+  placeholder = "请选择",
+  className = "",
+  panelClassName = "",
+  onMouseDown,
+}) => {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const handlePointerDown = (event) => {
+      if (rootRef.current?.contains(event.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener("mousedown", handlePointerDown, true);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown, true);
+    };
+  }, [open]);
+
+  const normalizedOptions = options.map((item) =>
+    typeof item === "object"
+      ? {
+          value: String(item?.value ?? ""),
+          label: String(item?.label ?? item?.value ?? ""),
+        }
+      : {
+          value: String(item ?? ""),
+          label: String(item ?? ""),
+        },
+  );
+  const selectedOption =
+    normalizedOptions.find((item) => String(item.value) === String(value ?? "")) || null;
+
+  return (
+    <div
+      ref={rootRef}
+      className={`relative ${className}`}
+      onMouseDown={(event) => {
+        event.stopPropagation();
+        onMouseDown?.(event);
+      }}
+    >
+      <button
+        type="button"
+        className={`flex h-10 w-full items-center justify-between rounded-[10px] border border-[#E5E7EB] bg-white px-3 text-[12px] text-slate-700 outline-none transition hover:border-slate-300 ${open ? "border-cyan-300 shadow-[0_0_0_4px_rgba(34,211,238,0.12)]" : ""}`}
+        onClick={(event) => {
+          event.stopPropagation();
+          setOpen((prev) => !prev);
+        }}
+      >
+        <span className={`truncate ${selectedOption ? "text-slate-700" : "text-slate-400"}`}>
+          {selectedOption?.label || placeholder}
+        </span>
+        <ChevronDown className={`h-4 w-4 text-slate-400 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+
+      {open ? (
+        <div
+          className={`absolute left-0 right-0 top-full z-40 mt-2 overflow-hidden rounded-[12px] border border-[#E5E7EB] bg-white shadow-[0_8px_24px_rgba(0,0,0,0.08)] animate-in fade-in slide-in-from-top-1 duration-150 ${panelClassName}`}
+        >
+          <div className="max-h-64 overflow-y-auto py-1">
+            {normalizedOptions.map((item) => {
+              const isSelected = String(item.value) === String(value ?? "");
+              return (
+                <button
+                  key={item.value}
+                  type="button"
+                  className={`flex h-9 w-full items-center px-3 text-left text-[12px] transition-colors ${
+                    isSelected
+                      ? "bg-[rgba(59,130,246,0.10)] text-cyan-700"
+                      : "text-slate-700 hover:bg-[#F3F4F6]"
+                  }`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onChange?.(item.value);
+                    setOpen(false);
+                  }}
+                >
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+const getNodeAnchorPosition = (node, nodeElement, direction = "output", handle = VIDEO_GEN_INPUT_HANDLE_MAIN) => {
+  const width = nodeElement?.offsetWidth || (node?.type === NODE_TYPES.TEXT_INPUT ? 320 : 280);
+  const height = nodeElement?.offsetHeight || 160;
+  const isLastFrameHandle = normalizeConnectionTargetHandle(handle) === VIDEO_GEN_INPUT_HANDLE_LAST_FRAME;
+  const lastFrameHandleY = Math.min(height - 24, Math.max(36, height / 2 + 40));
+
+  return {
+    x: direction === "output" ? node.x + width : node.x,
+    y: node.y + (isLastFrameHandle ? lastFrameHandleY : height / 2),
+  };
 };
 
 const ToolIconBtn = ({ icon, onClick, disabled, active, title }) => {
@@ -2266,8 +2491,11 @@ const PropertyPanel = ({
   videoModelOptions = EMPTY_LIST,
   resolveModelParamsForId,
   embedded = false,
+  onRunNode,
+  isReady,
 }) => {
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [expandedParam, setExpandedParam] = useState(null); // "model"|"duration"|"resolution"|"ratio"
   const [promptPolishLoading, setPromptPolishLoading] = useState(false);
   const [promptPolishError, setPromptPolishError] = useState("");
   const [videoParamOptions, setVideoParamOptions] = useState(() => ({
@@ -2313,13 +2541,15 @@ const PropertyPanel = ({
     return false;
   });
 
-  const promptModes = ["text2img", "local_text2img", "multi_image_generate", "feature_extract", "local_img2video"];
+  const promptModes = ["text2img", "local_text2img", "multi_image_generate", "feature_extract", "local_img2video", "text2video"];
   const isSkillProcessor = isProcessor && currentMode.category === "skill";
   const isMultiAnglesSkill = node?.data?.mode === "multi_angleshots";
   const isVideoUpscaleSkill = node?.data?.mode === "video_upscale";
   const isLocalText2Img = node?.data?.mode === "local_text2img";
   const isLocalImg2Video = node?.data?.mode === "local_img2video";
-  const isRemoteImg2Video = isVideoGen && !isLocalImg2Video && node?.data?.mode === "img2video";
+  const isRemoteVideoGen = isVideoGen && !isLocalImg2Video;
+  const isOmniReferenceVideoGen = isVideoGen && Boolean(node?.data?.omniReferenceOnly);
+  const isFirstLastFrameVideoGen = isVideoGen && Boolean(node?.data?.firstLastFrameOnly);
   const isRemoteImageGen =
     isProcessor &&
     !isLocalText2Img &&
@@ -2330,6 +2560,12 @@ const PropertyPanel = ({
     () => videoModelOptions.find((item) => String(item?.id || "").trim() === currentVideoModelId) || null,
     [videoModelOptions, currentVideoModelId]
   );
+  const filteredVideoModelOptions = useMemo(() => {
+    if (!isOmniReferenceVideoGen && !isFirstLastFrameVideoGen) return videoModelOptions;
+    return videoModelOptions.filter((item) =>
+      isSeedanceOmniReferenceModel(item?.id, item?.name, item?.label, item?.remark)
+    );
+  }, [isFirstLastFrameVideoGen, isOmniReferenceVideoGen, videoModelOptions]);
   const supportsReferenceMode = useMemo(
     () =>
       isSeedanceReferenceModeModel(
@@ -2349,8 +2585,12 @@ const PropertyPanel = ({
   }, [node?.id]);
 
   useEffect(() => {
+    setExpandedParam(null);
+  }, [node?.id]);
+
+  useEffect(() => {
     let cancelled = false;
-    if (!isRemoteImg2Video || typeof resolveModelParamsForId !== "function" || !currentVideoModelId) {
+    if (!isRemoteVideoGen || typeof resolveModelParamsForId !== "function" || !currentVideoModelId) {
       return () => {
         cancelled = true;
       };
@@ -2388,7 +2628,7 @@ const PropertyPanel = ({
     return () => {
       cancelled = true;
     };
-  }, [isRemoteImg2Video, resolveModelParamsForId, currentVideoModelId]);
+  }, [isRemoteVideoGen, resolveModelParamsForId, currentVideoModelId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2426,13 +2666,13 @@ const PropertyPanel = ({
 
   const remoteResolutionOptions = useMemo(() => {
     if (videoParamOptions.resolution.length) return videoParamOptions.resolution;
-    return currentVideoModelId === VIDEO_MODEL_1_5 ? ["480p", "720p"] : ["480p", "720p", "1080p"];
-  }, [videoParamOptions.resolution, currentVideoModelId]);
+    return ["480p", "720p", "1080p"];
+  }, [videoParamOptions.resolution]);
 
   const remoteDurationOptions = useMemo(() => {
     if (videoParamOptions.duration.length) return videoParamOptions.duration;
-    return currentVideoModelId === VIDEO_MODEL_1_5 ? ["4", "5", "8", "12"] : ["3", "5", "10"];
-  }, [videoParamOptions.duration, currentVideoModelId]);
+    return ["3", "5", "10"];
+  }, [videoParamOptions.duration]);
 
   const remoteRatioOptions = useMemo(() => {
     if (videoParamOptions.ratio.length) return videoParamOptions.ratio;
@@ -2440,6 +2680,12 @@ const PropertyPanel = ({
   }, [videoParamOptions.ratio]);
 
   const remoteImageTypeOptions = useMemo(() => {
+    if (isOmniReferenceVideoGen) {
+      return [{ value: "4", label: "全能参考" }];
+    }
+    if (isFirstLastFrameVideoGen) {
+      return [{ value: "2", label: "首尾帧" }];
+    }
     if (videoParamOptions.imageType.length) return videoParamOptions.imageType;
     if (supportsReferenceMode) {
       return [
@@ -2448,13 +2694,7 @@ const PropertyPanel = ({
       ];
     }
     return EMPTY_LIST;
-  }, [videoParamOptions.imageType, supportsReferenceMode]);
-  const selectedRemoteImageType = String(node?.data?.templates?.imageType || remoteImageTypeOptions[0]?.value || "").trim();
-  const shouldShowRemoteLastFrameUpload = useMemo(
-    () => isRemoteImg2Video && isFirstLastFrameReferenceSelection(selectedRemoteImageType, remoteImageTypeOptions),
-    [isRemoteImg2Video, selectedRemoteImageType, remoteImageTypeOptions]
-  );
-
+  }, [isFirstLastFrameVideoGen, isOmniReferenceVideoGen, videoParamOptions.imageType, supportsReferenceMode]);
   const remoteImageSizeOptions = useMemo(() => {
     if (imageParamOptions.size.length) return imageParamOptions.size;
     return imageParamLoading || imageParamError ? ["1024x1024", "2k", "4k"] : EMPTY_LIST;
@@ -2469,11 +2709,33 @@ const PropertyPanel = ({
     if (imageParamOptions.taskType.length) return imageParamOptions.taskType;
     return EMPTY_LIST;
   }, [imageParamOptions.taskType]);
-  const embeddedFieldClass =
-    "mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-xs text-slate-700 outline-none transition focus:border-rose-300";
-
+  const compactEmbeddedVideoDurationOptions = useMemo(() => {
+    const normalized = Array.from(new Set(remoteDurationOptions.map((item) => String(item).trim()).filter(Boolean)));
+    const preferred = ["5", "10", "15"];
+    const picked = preferred.filter((item) => normalized.includes(item));
+    for (const item of normalized) {
+      if (picked.includes(item)) continue;
+      picked.push(item);
+      if (picked.length >= 3) break;
+    }
+    return picked
+      .slice(0, 3)
+      .sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0));
+  }, [remoteDurationOptions]);
+  const compactEmbeddedVideoRatioOptions = useMemo(() => {
+    const normalized = Array.from(new Set(remoteRatioOptions.map((item) => String(item).trim()).filter(Boolean)));
+    const preferred = ["16:9", "9:16", "3:4", "1:1"];
+    const picked = preferred.filter((item) => normalized.includes(item));
+    for (const item of normalized) {
+      if (picked.includes(item)) continue;
+      if (String(item).toLowerCase() === "adaptive") continue;
+      picked.push(item);
+      if (picked.length >= 3) break;
+    }
+    return picked.slice(0, 3);
+  }, [remoteRatioOptions]);
   useEffect(() => {
-    if (!isRemoteImg2Video) return;
+    if (!isRemoteVideoGen) return;
     if (!node) return;
     const currentTemplates = node.data.templates || {};
     const nextTemplates = { ...currentTemplates };
@@ -2508,7 +2770,7 @@ const PropertyPanel = ({
     }
 
     if (changed) updateData(node.id, { templates: nextTemplates });
-  }, [isRemoteImg2Video, remoteResolutionOptions, remoteDurationOptions, remoteRatioOptions, remoteImageTypeOptions, node?.data?.templates, node?.id, updateData]);
+  }, [isRemoteVideoGen, remoteResolutionOptions, remoteDurationOptions, remoteRatioOptions, remoteImageTypeOptions, node?.data?.templates, node?.id, updateData]);
 
   useEffect(() => {
     if (!isRemoteImageGen || !node) return;
@@ -2547,29 +2809,20 @@ const PropertyPanel = ({
 
   const effectiveTemplates = useMemo(() => {
     if (!activeTemplates) return activeTemplates;
-    if (!isRemoteImg2Video || !Array.isArray(activeTemplates.categories)) return activeTemplates;
+    if (!isRemoteVideoGen || !Array.isArray(activeTemplates.categories)) return activeTemplates;
     return {
       ...activeTemplates,
       categories: activeTemplates.categories.map((cat) =>
         cat?.key === "ratio" ? { ...cat, options: remoteRatioOptions } : cat,
       ),
     };
-  }, [activeTemplates, isRemoteImg2Video, remoteRatioOptions]);
-
-  const handleRefUpload = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onloadend = () => updateData(node.id, { refImage: reader.result });
-    reader.readAsDataURL(file);
-  };
-
+  }, [activeTemplates, isRemoteVideoGen, remoteRatioOptions]);
 
   const updateTemplateData = (key, value) => {
     // multi_image_generate 的 prompt 更像“主 prompt”
     const newTemplates = { ...(node.data.templates || {}), [key]: value };
     // ✅ img2video：note 就是主提示词（直接覆盖 prompt）
-    if (node.data.mode === "img2video" && key === "note") {
+    if ((node.data.mode === "img2video" || node.data.mode === "text2video") && key === "note") {
       updateData(node.id, { templates: newTemplates, prompt: value });
       return;
     }
@@ -2633,15 +2886,75 @@ const PropertyPanel = ({
     }
   };
 
+  const getEmbeddedVideoOptionBadge = useCallback((label, value = "") => {
+    const text = `${String(label || "")} ${String(value || "")}`.toLowerCase();
+    if (text.includes("vip")) return "VIP";
+    return "";
+  }, []);
+
+  const renderEmbeddedVideoSegmentGroup = useCallback(
+    ({
+      title,
+      options = EMPTY_LIST,
+      selectedValue = "",
+      onSelect,
+      wide = false,
+    }) => (
+      <div className="space-y-2">
+        <div className="text-[10px] font-bold uppercase tracking-[0.1em] text-slate-500">{title}</div>
+        <div className="flex flex-wrap gap-2">
+          {options.map((option) => {
+            const value = String(option?.value ?? "").trim();
+            const label = String(option?.label ?? option?.value ?? "").trim();
+            const description = String(option?.description || "").trim();
+            const badge = String(option?.badge || getEmbeddedVideoOptionBadge(label, value)).trim();
+            const isSelected = String(selectedValue || "").trim() === value;
+
+            return (
+              <button
+                key={`${title}_${value}`}
+                type="button"
+                onClick={() => onSelect?.(value)}
+                className={`relative flex min-h-[36px] items-center justify-center rounded-[10px] border px-3 py-2 text-[11px] font-medium transition-all ${
+                  wide ? "min-w-[132px] flex-1 justify-start text-left" : "min-w-[68px]"
+                } ${
+                  isSelected
+                    ? "border-cyan-200 bg-cyan-50 text-cyan-700"
+                    : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                }`}
+              >
+                {badge ? (
+                  <span className={`absolute right-1.5 top-1.5 rounded-full px-1.5 py-0.5 text-[9px] font-semibold leading-none ${
+                    isSelected ? "bg-cyan-100 text-cyan-700" : "bg-slate-100 text-slate-500"
+                  }`}>
+                    {badge}
+                  </span>
+                ) : null}
+                <span className={`flex min-w-0 ${wide ? "flex-col items-start gap-0.5 pr-7" : "items-center"}`}>
+                  <span className="truncate">{label}</span>
+                  {wide && description ? <span className="truncate text-[10px] text-slate-400">{description}</span> : null}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    ),
+    [getEmbeddedVideoOptionBadge],
+  );
+
   if (!hasConfigNode) return null;
 
   return (
   <div
     className={
       embedded
-        ? "border-b border-slate-200 bg-[linear-gradient(180deg,rgba(248,250,252,0.98),rgba(255,255,255,0.96))] px-4 py-3"
+        ? "nodrag overflow-visible rounded-t-[16px] bg-[linear-gradient(180deg,rgba(248,250,252,0.98),rgba(255,255,255,0.96))] px-4 pt-3 pb-0"
         : "w-80 bg-white border-l border-slate-200 z-40 flex flex-col shadow-[0_24px_48px_rgba(15,23,42,0.08)] shrink-0 h-full min-h-0 overflow-hidden animate-in slide-in-from-right duration-200"
     }
+    onMouseDown={(e) => {
+      if (embedded) e.stopPropagation();
+    }}
   >
     {!embedded && (
       <div className="flex items-center justify-between border-b border-slate-200 p-4">
@@ -2655,9 +2968,9 @@ const PropertyPanel = ({
       </div>
     )}
 
-    <div className={embedded ? "space-y-3" : "flex-1 min-h-0 overflow-y-auto p-4 space-y-4 custom-scrollbar"}>
+    <div className={embedded ? "space-y-1" : "flex-1 min-h-0 overflow-y-auto p-4 space-y-4 custom-scrollbar"}>
       {/* 基础设置 */}
-      <div className="space-y-3">
+      <div className={embedded ? "space-y-1" : "space-y-3"}>
         {!isSkillProcessor && !isEmbeddedVideoConfig && (
           <div className="space-y-2">
             <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">模式选择</div>
@@ -2718,196 +3031,205 @@ const PropertyPanel = ({
           </div>
         )}
 
-        {isEmbeddedVideoConfig && (
-          <div className="grid grid-cols-2 gap-2.5">
-            <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
-              视频模型
-              <select
-                className={embeddedFieldClass}
-                value={String(node.data.model || videoModelOptions[0]?.id || "")}
-                onChange={(e) => {
-                  const nextModel = String(e.target.value || "").trim();
-                  const prevT = node.data.templates || {};
-                  updateData(node.id, {
-                    model: nextModel,
-                    templates: {
-                      ...prevT,
-                      generate_audio_new: prevT.generate_audio_new ?? true,
-                    },
-                  });
-                }}
-              >
-                {videoModelOptions.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
-            </label>
+        {isEmbeddedVideoConfig && (() => {
+          const selectedModel = filteredVideoModelOptions.find((m) => String(m.id) === String(node.data.model || "")) || filteredVideoModelOptions[0];
+          const selectedDuration = String(node.data.templates?.duration ?? compactEmbeddedVideoDurationOptions[0] ?? remoteDurationOptions[0] ?? "").trim();
+          const selectedResolution = String(node.data.templates?.resolution || remoteResolutionOptions[0] || "").trim();
+          const selectedRatio = String(node.data.templates?.ratio || compactEmbeddedVideoRatioOptions[0] || remoteRatioOptions[0] || "").trim();
 
-            <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
-              视频时长
-              <select
-                className={embeddedFieldClass}
-                value={String(node.data.templates?.duration ?? remoteDurationOptions[0] ?? "")}
-                onChange={(e) =>
-                  updateData(node.id, {
-                    templates: { ...(node.data.templates || {}), duration: String(e.target.value || "").trim() },
-                  })
-                }
-              >
-                {remoteDurationOptions.map((sec) => {
-                  const secText = String(sec).trim();
-                  return (
-                    <option key={secText} value={secText}>
-                      {secText}秒
-                    </option>
-                  );
-                })}
-              </select>
-            </label>
+          const paramRowClass = "flex items-center justify-between rounded-[10px] border border-slate-200 bg-white px-3 py-2 text-xs cursor-pointer hover:border-slate-300 transition-colors";
+          const paramLabelClass = "text-[10px] font-medium text-slate-400 uppercase tracking-[0.08em]";
+          const paramValueClass = "text-[11px] font-semibold text-slate-700 flex items-center gap-1";
 
-            <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
-              分辨率
-              <select
-                className={embeddedFieldClass}
-                value={String(node.data.templates?.resolution || remoteResolutionOptions[0] || "")}
-                onChange={(e) =>
-                  updateData(node.id, {
-                    templates: { ...(node.data.templates || {}), resolution: String(e.target.value || "").trim() },
-                  })
-                }
-              >
-                {remoteResolutionOptions.map((value) => {
-                  const text = String(value).trim();
-                  return (
-                    <option key={text} value={text}>
-                      {text.toUpperCase()}
-                    </option>
-                  );
-                })}
-              </select>
-            </label>
-
-            <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
-              比例
-              <select
-                className={embeddedFieldClass}
-                value={String(node.data.templates?.ratio || remoteRatioOptions[0] || "")}
-                onChange={(e) =>
-                  updateData(node.id, {
-                    templates: { ...(node.data.templates || {}), ratio: String(e.target.value || "").trim() },
-                  })
-                }
-              >
-                {remoteRatioOptions.map((value) => {
-                  const text = String(value).trim();
-                  return (
-                    <option key={text} value={text}>
-                      {text}
-                    </option>
-                  );
-                })}
-              </select>
-            </label>
-
-            {remoteImageTypeOptions.length > 0 ? (
-              <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                参考模式
-                <select
-                  className={embeddedFieldClass}
-                  value={String(node.data.templates?.imageType || remoteImageTypeOptions[0]?.value || "")}
-                  onChange={(e) =>
-                    updateData(node.id, {
-                      templates: { ...(node.data.templates || {}), imageType: String(e.target.value || "").trim() },
-                    })
-                  }
-                >
-                  {remoteImageTypeOptions.map((item) => {
-                    const value = String(item?.value || "").trim();
-                    const label = String(item?.label || value).trim();
+          const renderParamPopup = (key) => {
+            if (key === "model") {
+              return (
+                <div className="flex flex-wrap gap-1.5">
+                  {filteredVideoModelOptions.map((item) => {
+                    const isSel = String(item.id) === String(node.data.model || filteredVideoModelOptions[0]?.id || "");
                     return (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
+                      <button
+                        key={item.id}
+                        type="button"
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const prevT = node.data.templates || {};
+                          updateData(node.id, { model: item.id, templates: { ...prevT, generate_audio_new: prevT.generate_audio_new ?? true } });
+                          setExpandedParam(null);
+                        }}
+                        className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-[999px] border px-3 py-1.5 text-[11px] transition-colors ${
+                          isSel
+                            ? "border-cyan-200 bg-cyan-50 text-cyan-700 font-semibold"
+                            : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                        }`}
+                      >
+                        <span className={`h-2 w-2 shrink-0 rounded-full ${isSel ? "bg-cyan-400" : "bg-slate-300"}`} />
+                        <span className="max-w-[140px] truncate">{item.name}</span>
+                      </button>
                     );
                   })}
-                </select>
-              </label>
-            ) : (
-              <div />
-            )}
+                </div>
+              );
+            }
 
-            <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
-              生成数量
-              <select
-                className={embeddedFieldClass}
-                value={String(node.data.batchSize || 1)}
-                onChange={(e) => updateData(node.id, { batchSize: parseInt(String(e.target.value || "1"), 10) || 1 })}
+            if (key === "duration") {
+              return (
+                <div className="flex flex-wrap gap-1.5">
+                  {remoteDurationOptions.map((item) => {
+                    const val = String(item).trim();
+                    const isSel = val === selectedDuration;
+                    return (
+                      <button
+                        key={val}
+                        type="button"
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          updateData(node.id, { templates: { ...(node.data.templates || {}), duration: val } });
+                          setExpandedParam(null);
+                        }}
+                        className={`rounded-[999px] border px-3 py-1.5 text-[11px] transition-colors ${
+                          isSel ? "border-cyan-200 bg-cyan-50 text-cyan-700 font-semibold" : "border-slate-200 text-slate-600 hover:border-slate-300"
+                        }`}
+                      >
+                        {val}秒
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            }
+
+            if (key === "resolution") {
+              return (
+                <div className="flex flex-wrap gap-1.5">
+                  {remoteResolutionOptions.map((item) => {
+                    const val = String(item).trim();
+                    const isSel = val === selectedResolution;
+                    return (
+                      <button
+                        key={val}
+                        type="button"
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          updateData(node.id, { templates: { ...(node.data.templates || {}), resolution: val } });
+                          setExpandedParam(null);
+                        }}
+                        className={`rounded-[999px] border px-3 py-1.5 text-[11px] transition-colors ${
+                          isSel ? "border-cyan-200 bg-cyan-50 text-cyan-700 font-semibold" : "border-slate-200 text-slate-600 hover:border-slate-300"
+                        }`}
+                      >
+                        {val.toUpperCase()}
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            }
+
+            if (key === "ratio") {
+              return (
+                <div className="flex flex-wrap gap-1.5">
+                  {remoteRatioOptions.map((item) => {
+                    const val = String(item).trim();
+                    const isSel = val === selectedRatio;
+                    return (
+                      <button
+                        key={val}
+                        type="button"
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          updateData(node.id, { templates: { ...(node.data.templates || {}), ratio: val } });
+                          setExpandedParam(null);
+                        }}
+                        className={`rounded-[999px] border px-3 py-1.5 text-[11px] transition-colors ${
+                          isSel ? "border-cyan-200 bg-cyan-50 text-cyan-700 font-semibold" : "border-slate-200 text-slate-600 hover:border-slate-300"
+                        }`}
+                      >
+                        {val}
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            }
+
+            return null;
+          };
+
+          const renderParamRow = (key, label, displayValue) => {
+            const isOpen = expandedParam === key;
+            return (
+              <div
+                key={key}
+                className="relative"
+                onMouseEnter={() => setExpandedParam(key)}
+                onMouseLeave={() => setExpandedParam((current) => (current === key ? null : current))}
               >
-                {[1, 2, 3, 4].map((count) => (
-                  <option key={count} value={count}>
-                    {count} 次
-                  </option>
-                ))}
-              </select>
-            </label>
+                <button
+                  type="button"
+                  className={paramRowClass}
+                  style={{ width: "100%" }}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <span className={paramLabelClass}>{label}</span>
+                  <span className={paramValueClass}>
+                    {displayValue}
+                    <ChevronRight className={`w-3 h-3 text-slate-400 transition-transform ${isOpen ? "translate-x-0.5 text-slate-500" : ""}`} />
+                  </span>
+                </button>
+                {isOpen ? (
+                  <div
+                    className="absolute left-[calc(100%-1px)] top-1/2 z-[140] w-max max-w-[320px] -translate-y-1/2 rounded-[14px] border border-slate-200 bg-white px-3 py-3 shadow-[0_20px_40px_rgba(15,23,42,0.22)]"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-400">{label}</div>
+                    {renderParamPopup(key)}
+                  </div>
+                ) : null}
+              </div>
+            );
+          };
 
-            {videoParamLoading ? <div className="col-span-2 text-[10px] text-slate-500">参数加载中...</div> : null}
-            {videoParamError ? <div className="col-span-2 text-[10px] text-amber-400">{videoParamError}</div> : null}
-          </div>
-        )}
+          return (
+            <div className="relative space-y-1.5">
+              {/* 模型 */}
+              {renderParamRow("model", "模型", selectedModel?.name || "选择模型")}
 
-{shouldShowRemoteLastFrameUpload && (
-  <div className="space-y-1">
-    <div className="flex justify-between items-center">
-      <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">尾帧参考图</div>
-      <span className="text-[9px] text-slate-500 bg-slate-100 border border-slate-200 px-1.5 rounded">可选</span>
-    </div>
+              {/* 时长 */}
+              {renderParamRow("duration", "时长", selectedDuration ? `${selectedDuration}秒` : "-")}
 
-    <div
-      className={`relative w-full rounded border border-dashed bg-slate-50 flex items-center justify-center group transition-colors ${
-        node.data.refImage ? `h-32 border-rose-300/60` : `h-24 border-slate-300 hover:border-rose-400`
-      }`}
-    >
-      {node.data.refImage ? (
-        <>
-          <img
-            src={node.data.refImage}
-            className="w-full h-full object-cover rounded opacity-90 hover:opacity-100 transition-opacity"
-            alt=""
-          />
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              updateData(node.id, { refImage: null });
-            }}
-            className="absolute top-1 right-1 bg-white/90 rounded-full border border-slate-200 p-1.5 hover:bg-red-50 z-20 transition-colors"
-            title="移除尾帧"
-          >
-            <X className="w-3 h-3 text-slate-600" />
-          </button>
-        </>
-      ) : (
-        <div className="flex flex-col items-center text-slate-500 text-center px-4 cursor-pointer relative">
-          <ImagePlus className="w-6 h-6 mb-2 text-slate-600" />
-          <span className="text-[11px] font-medium text-slate-400">点击上传尾帧</span>
-          <span className="text-[9px] text-slate-600 mt-1">用于引导结尾画面（可不传）</span>
-          <input
-            type="file"
-            accept="image/*"
-            className="absolute inset-0 opacity-0 cursor-pointer"
-            onChange={handleRefUpload}
-          />
-        </div>
-      )}
-    </div>
-  </div>
-)}
+              {/* 分辨率 */}
+              {renderParamRow("resolution", "分辨率", selectedResolution ? selectedResolution.toUpperCase() : "-")}
+
+              {/* 比例 */}
+              {renderParamRow("ratio", "比例", selectedRatio || "-")}
+
+              {videoParamLoading ? <div className="text-[10px] text-slate-500">参数加载中...</div> : null}
+              {videoParamError ? <div className="text-[10px] text-amber-400">{videoParamError}</div> : null}
+
+              {/* 运行按钮 */}
+              <button
+                type="button"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => { e.stopPropagation(); onRunNode?.(node.id); }}
+                disabled={!isReady || node.data.status === "loading"}
+                className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-[10px] border border-cyan-500 bg-cyan-500 px-4 text-[12px] font-semibold text-white shadow-[0_8px_20px_rgba(6,182,212,0.2)] transition hover:bg-cyan-600 hover:border-cyan-600 disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300 disabled:shadow-none"
+              >
+                {node.data.status === "loading" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                {node.data.status === "loading" ? "运行中..." : "运行"}
+              </button>
+            </div>
+          );
+        })()}
         
 
-        {!isSkillProcessor && promptModes.includes(node.data.mode) && (
+        {!isSkillProcessor && promptModes.includes(node.data.mode) && node.data.mode !== "text2video" && (
           <div className="space-y-1">
             <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
               提示词
@@ -3038,7 +3360,7 @@ const PropertyPanel = ({
               </div>
               
               <div className="grid grid-cols-1 gap-2">
-                {videoModelOptions.map((m) => (
+                {filteredVideoModelOptions.map((m) => (
                   <button
                     key={m.id}
                     onClick={() => {
@@ -3135,33 +3457,6 @@ const PropertyPanel = ({
         );
       })}
     </div>
-	  </div>
-	)}
-
-			          {!embedded && isVideoGen && !isLocalImg2Video && remoteImageTypeOptions.length > 0 && (
-	  <div className="space-y-2">
-	    <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">参考模式</div>
-
-	    <div className="grid grid-cols-2 gap-2">
-	      {remoteImageTypeOptions.map((item) => {
-	        const value = String(item?.value || "").trim();
-	        const label = String(item?.label || value).trim();
-	        const fallbackValue = String(remoteImageTypeOptions[0]?.value || "").trim();
-	        const isSel = String(node.data.templates?.imageType || fallbackValue) === value;
-	        return (
-	          <button
-	            key={value}
-	            onClick={() => updateData(node.id, { templates: { ...(node.data.templates || {}), imageType: value } })}
-	            className={`px-2 py-1.5 rounded-md text-[10px] border transition-all ${
-	              isSel ? "bg-rose-50 border-rose-200 text-rose-700" : "bg-white border-slate-200 text-slate-600 hover:border-slate-300"
-	            }`}
-	            type="button"
-	          >
-	            {label}
-	          </button>
-	        );
-	      })}
-	    </div>
 	  </div>
 	)}
 
@@ -3340,7 +3635,7 @@ const PropertyPanel = ({
           ))}
 
           {/* Batch Size */}
-              {!embedded && node.data.mode !== "multi_angleshots" && (
+              {!embedded && node.data.mode !== "multi_angleshots" && !isVideoGen && (
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">生成数量</span>
@@ -3386,7 +3681,10 @@ const NodeComponent = ({
   resolveModelParamsForId,
   onDelete,
   onConnectStart,
-  onConnectEnd,
+  onConnectTargetHover,
+  onConnectTargetLeave,
+  connecting = false,
+  hoveredConnectTarget = null,
   onPreview,
   onContinue,
   isReady,
@@ -3401,8 +3699,10 @@ const NodeComponent = ({
   onRunVideoRmbg,
   onRunVideoLineart,
   onRunVideoSplit,
+  onRunNode,
   shouldAutoOpenUploadPicker = false,
   onAutoOpenUploadPickerHandled,
+  onNodeElementChange,
 }) => {
   const [showCopied, setShowCopied] = useState(false);
   const [compactActiveIndex, setCompactActiveIndex] = useState(0);
@@ -3426,11 +3726,34 @@ const NodeComponent = ({
   const [videoSplitIncludeAudio, setVideoSplitIncludeAudio] = useState(false);
   const [promptPolishLoading, setPromptPolishLoading] = useState(false);
   const [promptPolishError, setPromptPolishError] = useState("");
+  const [inlineImageParamOptions, setInlineImageParamOptions] = useState(() => ({
+    size: EMPTY_LIST,
+    ratio: EMPTY_LIST,
+  }));
+  const [inlineImageParamLoading, setInlineImageParamLoading] = useState(false);
+  const [inlineImageParamError, setInlineImageParamError] = useState("");
+  const [isUploadDropActive, setIsUploadDropActive] = useState(false);
   const nodeRootRef = useRef(null);
   const simpleMediaUploadInputRef = useRef(null);
 
+  useEffect(() => {
+    onNodeElementChange?.(node.id, nodeRootRef.current);
+    return () => {
+      onNodeElementChange?.(node.id, null);
+    };
+  }, [node.id, onNodeElementChange]);
+  const inputMediaKind = normalizeInputMediaKind(node.data.mediaKind);
+  const simpleMediaInputAccept = inputMediaKind === "image" ? "image/*" : inputMediaKind === "video" ? "video/*" : "image/*,video/*";
+  const simpleMediaUploadLabel = inputMediaKind === "image" ? "上传图片" : inputMediaKind === "video" ? "上传视频" : "上传图片/视频";
+  const simpleMediaDropTitle = inputMediaKind === "image" ? "拖拽图片到此，或点击上传" : inputMediaKind === "video" ? "拖拽视频到此，或点击上传" : "拖拽媒体到此，或点击上传";
+  const simpleMediaSupportHint = inputMediaKind === "image" ? "支持 JPG / PNG / WebP / GIF" : inputMediaKind === "video" ? "支持 MP4 / MOV / WebM" : "支持常见图片与视频格式";
+
   const handleFileUpload = (e) => {
-    const files = Array.from(e.target.files || []).filter((file) => isMediaFileLike(file));
+    const files = Array.from(e.target.files || []).filter((file) => {
+      if (inputMediaKind === "image") return isImageFileLike(file);
+      if (inputMediaKind === "video") return isVideoFileLike(file);
+      return isMediaFileLike(file);
+    });
     if (!files.length) return;
 
     readFilesAsDataUrls(files).then((newImages) => {
@@ -3527,7 +3850,21 @@ const NodeComponent = ({
   const isTextInputNode = node.type === NODE_TYPES.TEXT_INPUT;
   const isCompactInput = isInput && !!node.data.compact;
   const isSimpleMediaInputNode = isInput && !isCompactInput;
-  const hideInlineAiResults = isVideoGen && node.data.mode === "img2video";
+  const isInlineText2ImgNode = isProcessor && node.data.mode === "text2img";
+  const isInlineImg2ImgNode = isProcessor && node.data.mode === "multi_image_generate";
+  const isInlineImageGenNode = isInlineText2ImgNode || isInlineImg2ImgNode;
+  const hideInlineAiResults =
+    isInlineText2ImgNode || (isVideoGen && (node.data.mode === "img2video" || node.data.mode === "text2video"));
+  const hasDedicatedLastFrameInput = isVideoGen && node.data.mode === "img2video" && !!node.data.firstLastFrameOnly;
+  const normalizedHoveredConnectHandle = normalizeConnectionTargetHandle(hoveredConnectTarget?.toHandle);
+  const isMainInputTargetHighlighted =
+    connecting &&
+    hoveredConnectTarget?.nodeId === node.id &&
+    normalizedHoveredConnectHandle === VIDEO_GEN_INPUT_HANDLE_MAIN;
+  const isLastFrameTargetHighlighted =
+    connecting &&
+    hoveredConnectTarget?.nodeId === node.id &&
+    normalizedHoveredConnectHandle === VIDEO_GEN_INPUT_HANDLE_LAST_FRAME;
   const compactImages = isCompactInput ? (node.data.images || []) : EMPTY_LIST;
   const compactActiveImage = compactImages[compactActiveIndex] || compactImages[0] || "";
   const compactActiveIsVideo = isVideoContent(compactActiveImage);
@@ -3550,11 +3887,46 @@ const NodeComponent = ({
   const simpleMediaActiveIsVideo = isVideoContent(simpleMediaActiveItem);
   const hasSimpleMediaSelection = isSimpleMediaInputNode && simpleMediaActionIndex >= 0 && !!simpleMediaActiveItem;
   const hasSimpleMediaVideoSelection = hasSimpleMediaSelection && simpleMediaActiveIsVideo;
+  const inlineImageSizeOptions = inlineImageParamOptions.size.length ? inlineImageParamOptions.size : ["1k", "2k", "4k"];
+  const inlineImageRatioOptions = inlineImageParamOptions.ratio.length ? inlineImageParamOptions.ratio : ASPECT_RATIOS.map((item) => item.label);
 
   useEffect(() => {
     if (!shouldAutoOpenUploadPicker || !isSimpleMediaInputNode) return;
     setShowSimpleMediaToolbar(true);
   }, [isSimpleMediaInputNode, shouldAutoOpenUploadPicker]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!isInlineImageGenNode || typeof resolveModelParamsForId !== "function" || !String(node.data.model || "").trim()) {
+      setInlineImageParamOptions({ size: EMPTY_LIST, ratio: EMPTY_LIST });
+      setInlineImageParamLoading(false);
+      setInlineImageParamError("");
+      return () => {
+        cancelled = true;
+      };
+    }
+    setInlineImageParamLoading(true);
+    setInlineImageParamError("");
+    resolveModelParamsForId(String(node.data.model || "").trim())
+      .then((paramList) => {
+        if (cancelled) return;
+        setInlineImageParamOptions({
+          size: listAIChatParamValues(paramList, ["size", "尺寸"]),
+          ratio: listAIChatParamValues(paramList, ["ratio", "比例", "宽高比"]),
+        });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setInlineImageParamError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setInlineImageParamLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isInlineImageGenNode, node.data.model, resolveModelParamsForId]);
 
   useEffect(() => {
     if (!shouldAutoOpenUploadPicker || !isSimpleMediaInputNode || !showSimpleMediaToolbar) return;
@@ -3603,6 +3975,7 @@ const NodeComponent = ({
     setVideoSplitDuration(0);
     setVideoSplitOutputResolution(DEFAULT_VIDEO_SPLIT_OUTPUT_RESOLUTION);
     setVideoSplitIncludeAudio(false);
+    setIsUploadDropActive(false);
     const nextSegments = normalizeVideoSplitSegments([]);
     setVideoSplitSegments(nextSegments);
     setVideoSplitDrafts(buildVideoSplitDrafts(nextSegments));
@@ -3649,6 +4022,12 @@ const NodeComponent = ({
     setVideoSplitSegments(nextSegments);
     setVideoSplitDrafts(buildVideoSplitDrafts(nextSegments));
   }, [showSimpleVideoEditor, simpleMediaActiveItem]);
+
+  useEffect(() => {
+    if (!isSimpleMediaInputNode) {
+      setIsUploadDropActive(false);
+    }
+  }, [isSimpleMediaInputNode]);
 
   const handleCompactThreeViewClick = async () => {
     if (compactActionBusy) return;
@@ -3948,35 +4327,30 @@ const NodeComponent = ({
   } else if (node.data.status === "success") {
     statusColor =
       "border-emerald-200 shadow-[0_24px_60px_rgba(16,185,129,0.08)]";
-  } else if (selected) {
-    statusColor =
-      "border-cyan-300 ring-1 ring-cyan-100 shadow-[0_28px_64px_rgba(6,182,212,0.08)]";
+  }
+  if (selected) {
+    statusColor = `${statusColor} ring-1 ring-cyan-200/90 shadow-[0_28px_64px_rgba(6,182,212,0.12)] ${
+      node.data.status === "error" || node.data.status === "success" ? "" : "border-cyan-300"
+    }`;
   }
 
   let title = "Node";
-  if (isInput) title = node.data.title || (isCompactInput ? "图片编辑区" : "图片/视频上传");
-  if (isOutput) title = node.data.title || (node.data.angleLabel ? `${node.data.angleLabel} 输出 (${node.data.images?.length || 0})` : `输出 (${node.data.images?.length || 0})`);
+  if (isInput) {
+    const mediaKind = normalizeInputMediaKind(node.data.mediaKind);
+    const defaultInputTitle = isCompactInput
+      ? "图片编辑区"
+      : mediaKind === "image"
+      ? getReferenceNodeTitle("image")
+      : mediaKind === "video"
+      ? getReferenceNodeTitle("video")
+      : getReferenceNodeTitle("mixed");
+    title = node.data.title || defaultInputTitle;
+  }
+  if (isOutput) title = node.data.title || (node.data.angleLabel ? `${node.data.angleLabel} 输出` : "输出");
   if (isProcessor) title = node.data.title || TOOL_CARDS[node.data.mode]?.name || "图片生成";
   if (isPostProcessor) title = node.data.title || TOOL_CARDS[node.data.mode]?.name || "后期增强";
   if (isVideoGen) title = node.data.title || TOOL_CARDS[node.data.mode]?.name || "视频生成";
   if (isTextInputNode) title = "提示词";
-
-  const getThemeColor = () => {
-    const modeCard = TOOL_CARDS[node.data.mode] || null;
-    if (isTextInputNode) return { text: "text-amber-300", icon: Clipboard };
-    if (isPostProcessor) return { text: "text-cyan-400", icon: modeCard?.icon || Palette };
-    if (isVideoGen) return { text: "text-rose-400", icon: modeCard?.icon || Film };
-    if (isInput) return { text: "text-blue-400", icon: Upload };
-    if (isOutput) return { text: "text-green-400", icon: Download };
-    if (isProcessor) {
-      if (modeCard?.category === "skill") return { text: "text-amber-300", icon: modeCard.icon };
-      if (modeCard?.category === "enhance") return { text: "text-cyan-300", icon: modeCard.icon };
-      return { text: "text-purple-400", icon: modeCard?.icon || ImagePlus };
-    }
-    return { text: "text-purple-400", icon: ImagePlus };
-  };
-  const theme = getThemeColor();
-  const Icon = theme.icon;
 
   const safeProgressWidth = (() => {
     const total = node.data.total || 0;
@@ -4083,76 +4457,77 @@ const NodeComponent = ({
     );
   };
 
+  const selectedNodeShellClass = selected
+    ? "ring-1 ring-cyan-200/90 shadow-[0_28px_64px_rgba(6,182,212,0.12)]"
+    : "";
+  const showFloatingDeleteButton = !isCompactInput && !isTextInputNode && !isSimpleMediaInputNode && !isInlineImageGenNode && !isOutput && !isVideoGen;
+  const showFloatingRetryButton = !isCompactInput && !isTextInputNode && !isSimpleMediaInputNode && !isInlineImageGenNode && !isOutput && node.data.status === "error";
+  const nodeZIndex = isVideoGen ? 120 : selected ? 20 : undefined;
   const nodeShellClass = isTextInputNode
-    ? `absolute w-[280px] overflow-visible border bg-white shadow-none flex flex-col transition-colors duration-200 ${
-        node.data.status === "error" ? "border-rose-300" : "border-slate-300"
-      }`
+    ? `absolute w-[320px] overflow-visible rounded-[16px] border bg-white shadow-[0_18px_42px_rgba(15,23,42,0.08)] flex flex-col transition-colors duration-200 ${
+        node.data.status === "error" ? "border-rose-300" : selected ? "border-cyan-300" : "border-slate-200"
+      } ${selectedNodeShellClass}`
+    : isOutput
+    ? `absolute w-[280px] overflow-visible rounded-[16px] border bg-white shadow-[0_14px_30px_rgba(15,23,42,0.06)] flex flex-col transition-colors duration-200 ${
+        selected ? "border-cyan-300" : "border-[#E5E7EB]"
+      } ${selectedNodeShellClass}`
+    : isInlineImageGenNode
+    ? `absolute w-[280px] overflow-visible rounded-[16px] border bg-white shadow-[0_14px_30px_rgba(15,23,42,0.06)] flex flex-col transition-colors duration-200 ${
+        selected ? "border-cyan-300" : "border-[#E5E7EB]"
+      } ${selectedNodeShellClass}`
     : isSimpleMediaInputNode
-    ? `absolute w-[280px] overflow-visible border bg-white shadow-none flex flex-col transition-colors duration-200 ${
-        selected ? "border-cyan-400" : "border-slate-300"
-      }`
-    : `absolute ${isCompactInput ? "w-[292px] overflow-visible rounded-[22px] border-slate-200" : "w-[280px] overflow-hidden rounded-[30px]"} border bg-white backdrop-blur-xl shadow-[0_24px_56px_rgba(15,23,42,0.12)] flex flex-col transition-colors transition-shadow duration-200 ${isCompactInput ? "" : "before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:h-14 before:bg-[linear-gradient(180deg,rgba(255,255,255,0.78),rgba(255,255,255,0))]"} ${statusColor}`;
+    ? `absolute w-[280px] overflow-visible rounded-[16px] border bg-white shadow-[0_14px_30px_rgba(15,23,42,0.06)] flex flex-col transition-colors duration-200 ${
+        selected ? "border-cyan-300" : "border-[#E5E7EB]"
+      } ${selectedNodeShellClass}`
+    : `absolute ${isCompactInput ? "w-[292px] overflow-visible rounded-[16px] border-slate-200" : "w-[280px] overflow-visible rounded-[16px]"} border bg-white backdrop-blur-xl shadow-[0_24px_56px_rgba(15,23,42,0.12)] flex flex-col transition-colors transition-shadow duration-200 ${statusColor}`;
 
   return (
     <div
       ref={nodeRootRef}
       className={nodeShellClass}
-      style={{ left: node.x, top: node.y }}
+      style={{ left: node.x, top: node.y, zIndex: nodeZIndex }}
       onMouseDown={onMouseDown}
     >
-      {!isCompactInput && !isTextInputNode && !isSimpleMediaInputNode && (
-        <div
-          className={`relative flex justify-between items-center px-4 py-3.5 border-b border-slate-200 bg-slate-50 handle cursor-grab active:cursor-grabbing ${
-            selected ? "bg-cyan-50" : ""
-          }`}
-        >
-          <div className="flex items-center gap-2 overflow-hidden">
-            <div className="flex h-8 w-8 items-center justify-center rounded-[14px] border border-slate-200 bg-white shadow-[0_6px_18px_rgba(15,23,42,0.06)]">
-              <Icon className={`w-4 h-4 ${theme.text}`} />
-            </div>
-            <span className="font-medium text-[13px] tracking-[0.01em] text-slate-800 truncate select-none">{title}</span>
-            {isReady && (
-              <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.85)]" title="Ready to Run" />
-            )}
-          </div>
-          <div className="flex gap-1">
-            {node.data.status === "error" && (
-              <button
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onRetry?.();
-                }}
-                className="rounded-full border border-rose-200 bg-rose-50 p-1.5 text-rose-600 transition hover:border-rose-300 hover:bg-rose-100"
-                title="重试"
-                type="button"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-              </button>
-            )}
+      {!isCompactInput && (
+        <div className="absolute -top-5 left-0 cursor-grab select-none text-[11px] font-medium tracking-[0.08em] text-slate-500 active:cursor-grabbing">
+          {title}
+        </div>
+      )}
 
-            {isAI && (
-              <div className={`rounded-full border p-1.5 ${selected ? "border-slate-300 bg-slate-100 text-slate-800" : "border-slate-200 bg-white text-slate-500"}`}>
-                <Settings2 className="w-3.5 h-3.5" />
-              </div>
-            )}
+      {showFloatingRetryButton || showFloatingDeleteButton ? (
+        <div className="pointer-events-none absolute right-3 top-3 z-20 flex gap-1">
+          {showFloatingRetryButton ? (
+            <button
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                onRetry?.();
+              }}
+              className="pointer-events-auto rounded-full border border-rose-200 bg-rose-50 p-1.5 text-rose-600 transition hover:border-rose-300 hover:bg-rose-100"
+              title="重试"
+              type="button"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+            </button>
+          ) : null}
 
+          {showFloatingDeleteButton ? (
             <button
               onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => {
                 e.stopPropagation();
                 onDelete?.();
               }}
-              className="rounded-full border border-slate-200 bg-white p-1.5 text-slate-500 transition-colors hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
+              className="pointer-events-auto rounded-full border border-slate-200 bg-white p-1.5 text-slate-500 transition-colors hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
               type="button"
             >
               <X className="w-3.5 h-3.5" />
             </button>
-          </div>
+          ) : null}
         </div>
-      )}
+      ) : null}
 
-      {selected && isVideoGen && node.data.mode === "img2video" && (
+      {isVideoGen && (node.data.mode === "img2video" || node.data.mode === "text2video") && (
         <PropertyPanel
           embedded
           node={node}
@@ -4163,13 +4538,9 @@ const NodeComponent = ({
           imageModelOptions={imageModelOptions}
           videoModelOptions={videoModelOptions}
           resolveModelParamsForId={resolveModelParamsForId}
+          onRunNode={onRunNode}
+          isReady={isReady}
         />
-      )}
-
-      {isTextInputNode && (
-        <div className="absolute -top-5 left-0 cursor-grab select-none text-[11px] font-medium tracking-[0.08em] text-slate-500 active:cursor-grabbing">
-          {title}
-        </div>
       )}
 
       {isSimpleMediaInputNode ? (
@@ -4177,13 +4548,13 @@ const NodeComponent = ({
           ref={simpleMediaUploadInputRef}
           type="file"
           multiple
-          accept="image/*,video/*"
+          accept={simpleMediaInputAccept}
           className="hidden"
           onChange={handleFileUpload}
         />
       ) : null}
 
-	      {isSimpleMediaInputNode && (node.data.images?.length > 0) && (showSimpleMediaToolbar || hasSimpleMediaSelection) && (
+      {isSimpleMediaInputNode && (node.data.images?.length > 0) && (showSimpleMediaToolbar || hasSimpleMediaSelection) && (
 	        <>
 	          <div
 	            className="absolute bottom-full left-1/2 z-30 mb-8 w-max max-w-[calc(100vw-48px)] -translate-x-1/2"
@@ -4197,8 +4568,8 @@ const NodeComponent = ({
                     type="button"
                     className={getMediaToolbarButtonClass({ active: !hasSimpleMediaSelection })}
                     onClick={openSimpleMediaUploadPicker}
-                    title="上传图片/视频"
-                    aria-label="上传图片/视频"
+                    title={simpleMediaUploadLabel}
+                    aria-label={simpleMediaUploadLabel}
                   >
                     <Upload className={mediaToolbarIconClass} />
                     <span>上传</span>
@@ -4247,8 +4618,8 @@ const NodeComponent = ({
 	                    type="button"
 	                    className={getMediaToolbarButtonClass({ active: !hasSimpleMediaSelection })}
 	                    onClick={openSimpleMediaUploadPicker}
-	                    title="上传图片/视频"
-	                    aria-label="上传图片/视频"
+	                    title={simpleMediaUploadLabel}
+	                    aria-label={simpleMediaUploadLabel}
 	                  >
 	                    <Upload className={mediaToolbarIconClass} />
 	                    <span>上传</span>
@@ -4477,7 +4848,7 @@ const NodeComponent = ({
         </button>
       )}
 
-      <div className={`${isCompactInput ? "nodrag space-y-2 p-1.5" : isTextInputNode || isSimpleMediaInputNode ? "p-0" : "space-y-3 p-4"}`}>
+      <div className={`${isCompactInput ? "nodrag space-y-2 p-1.5" : isTextInputNode || isSimpleMediaInputNode ? "p-0" : isInlineImageGenNode ? "space-y-3 p-3" : "space-y-3 p-4"}`}>
         {/* Error */}
         {node.data.status === "error" && !isTextInputNode && !isSimpleMediaInputNode && (
           <div className="rounded-[22px] border border-rose-200 bg-rose-50 px-3 py-2.5 text-xs text-rose-700 flex flex-col gap-2 animate-in fade-in zoom-in-95">
@@ -4504,6 +4875,121 @@ const NodeComponent = ({
         {/* AI nodes */}
         {isAI && (
           <div className="space-y-2">
+            {isInlineImageGenNode ? (
+              <div className="pointer-events-none absolute -top-5 left-0 cursor-grab select-none text-[11px] font-medium tracking-[0.08em] text-slate-500 active:cursor-grabbing">
+                {title}
+              </div>
+            ) : null}
+            {isInlineImageGenNode ? (
+              <>
+                <div className="pointer-events-none absolute right-3 top-3 z-20 flex gap-1">
+                  {node.data.status === "error" ? (
+                    <button
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onRetry?.();
+                      }}
+                      className="pointer-events-auto rounded-full border border-rose-200 bg-rose-50 p-1.5 text-rose-600 transition hover:border-rose-300 hover:bg-rose-100"
+                      title="重试"
+                      type="button"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                    </button>
+                  ) : null}
+                </div>
+                <div className="space-y-3">
+                  <div>
+                    <div className="mb-1.5 px-1 text-[10px] font-medium uppercase tracking-[0.08em] text-slate-400">模型</div>
+                    <InlineDropdown
+                      value={String(node.data.model || "")}
+                      options={imageModelOptions.map((item) => ({ value: item.id, label: item.name }))}
+                      onChange={(nextValue) => updateData(node.id, { model: String(nextValue || "").trim() })}
+                      placeholder="选择模型"
+                    />
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <div className="mb-1.5 px-1 text-[10px] font-medium uppercase tracking-[0.08em] text-slate-400">尺寸</div>
+                      <InlineDropdown
+                        value={String(node.data.templates?.size || "1k")}
+                        options={inlineImageSizeOptions.map((item) => ({ value: item, label: item }))}
+                        onChange={(nextValue) =>
+                          updateData(node.id, {
+                            templates: { ...(node.data.templates || {}), size: String(nextValue || "").trim() },
+                          })
+                        }
+                        placeholder="选择尺寸"
+                      />
+                    </div>
+
+                    <div>
+                      <div className="mb-1.5 px-1 text-[10px] font-medium uppercase tracking-[0.08em] text-slate-400">比例</div>
+                      <InlineDropdown
+                        value={String(node.data.templates?.aspect_ratio || (isInlineImg2ImgNode ? "" : (inlineImageRatioOptions[0] || "1:1")))}
+                        options={[
+                          ...(isInlineImg2ImgNode ? [{ value: "", label: "跟随输入图尺寸" }] : []),
+                          ...inlineImageRatioOptions.map((item) => ({ value: item, label: item })),
+                        ]}
+                        onChange={(nextValue) =>
+                          updateData(node.id, {
+                            templates: (() => {
+                              const nextTemplates = { ...(node.data.templates || {}) };
+                              const resolvedValue = String(nextValue || "").trim();
+                              if (isInlineImg2ImgNode && !resolvedValue) {
+                                delete nextTemplates.aspect_ratio;
+                              } else {
+                                nextTemplates.aspect_ratio = resolvedValue;
+                              }
+                              return nextTemplates;
+                            })(),
+                          })
+                        }
+                        placeholder="选择比例"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="mb-2 flex items-center justify-between px-1 text-[10px] font-medium uppercase tracking-[0.08em] text-slate-400">
+                      <span>生成数量</span>
+                      <span className="rounded-[10px] border border-[#E5E7EB] bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-700">
+                        {node.data.batchSize || 1}
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="1"
+                      max="4"
+                      step="1"
+                      value={node.data.batchSize || 1}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onChange={(e) => updateData(node.id, { batchSize: parseInt(e.target.value, 10) || 1 })}
+                      className="h-3 w-full cursor-pointer appearance-none rounded-full bg-[linear-gradient(90deg,#cbd5e1,#e2e8f0)] accent-cyan-500"
+                    />
+                  </div>
+
+                  {inlineImageParamLoading ? <div className="text-[10px] text-slate-500">参数加载中...</div> : null}
+                  {inlineImageParamError ? <div className="text-[10px] text-amber-500">{inlineImageParamError}</div> : null}
+
+                  <button
+                    type="button"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRunNode?.(node.id);
+                    }}
+                    disabled={!isReady || node.data.status === "loading"}
+                    className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-[10px] border border-cyan-500 bg-cyan-500 px-4 text-[12px] font-semibold text-white shadow-[0_12px_28px_rgba(6,182,212,0.22)] transition hover:bg-cyan-600 hover:border-cyan-600 disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300 disabled:shadow-none"
+                  >
+                    {node.data.status === "loading" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                    {node.data.status === "loading" ? "运行中..." : "运行"}
+                  </button>
+                </div>
+              </>
+            ) : null}
+
             {node.data.status === "loading" && (
               <div className="space-y-1.5 rounded-[22px] border border-slate-200 bg-slate-50 px-3 py-2.5">
                 <div className="flex justify-between text-[10px] text-slate-600">
@@ -4527,17 +5013,7 @@ const NodeComponent = ({
                   renderArtifactThumb(img, i, { mode: node.data.mode, prompt: node.data.prompt, model: node.data.model })
                 )}
               </div>
-            ) : (
-              !hideInlineAiResults &&
-              !["loading", "error"].includes(node.data.status) && (
-                <div className="flex flex-col items-center justify-center rounded-[24px] border border-dashed border-slate-200 bg-slate-50 py-7 text-slate-500">
-                  {isReady ? <Play className="mb-2 h-6 w-6 text-emerald-300/70" /> : <Icon className="mb-2 h-6 w-6 opacity-25" />}
-                  <span className="text-[10px] tracking-[0.03em]">
-                    {isReady ? "准备就绪" : "等待连接..."}
-                  </span>
-                </div>
-              )
-            )}
+            ) : null}
 
             {node.data.status === "success" && (isProcessor || isPostProcessor) && (
               <button
@@ -4561,7 +5037,6 @@ const NodeComponent = ({
                   onIterateImg2Img?.(node.id);
                 }}
                 className="flex w-full items-center justify-center gap-1 rounded-full border border-slate-200 bg-white py-2 text-[10px] text-slate-700 transition-colors hover:border-cyan-300 hover:bg-cyan-50"
-                title="先点缩略图选中你要迭代的产物，再点这里"
               >
                 <ImageIcon className="w-3 h-3" /> 继续图生图 <ArrowRight className="w-3 h-3" />
               </button>
@@ -4796,7 +5271,7 @@ const NodeComponent = ({
 
         {isInput && !isCompactInput && (
           <div
-            className="relative overflow-hidden bg-white"
+            className="relative overflow-hidden rounded-[16px] bg-white"
             onClick={(e) => {
               e.stopPropagation();
               if (!node.data.images?.length) {
@@ -4808,7 +5283,7 @@ const NodeComponent = ({
           >
             {node.data.images?.length > 0 ? (
               <div className="max-h-[520px] overflow-y-auto custom-scrollbar">
-	                {node.data.images.map((img, i) => {
+	                {node.data.images.slice(0, MAX_RENDERED_MEDIA_ITEMS_PER_NODE).map((img, i) => {
 	                  const isActive = activeArtifact?.url === img;
 	                  const isVideoItem = isVideoContent(img);
 	                  const showVideoActions = isVideoItem && simpleMediaActionIndex === i;
@@ -4924,18 +5399,79 @@ const NodeComponent = ({
 	                        </>
                       )}
 
-                    </div>
+	                    </div>
                   );
                 })}
+                {node.data.images.length > MAX_RENDERED_MEDIA_ITEMS_PER_NODE ? (
+                  <div className="border-t border-slate-200 bg-slate-50 px-4 py-3 text-center text-[11px] text-slate-500">
+                    已加载 {node.data.images.length} 个媒体，当前仅渲染前 {MAX_RENDERED_MEDIA_ITEMS_PER_NODE} 个以保持流畅；全部媒体仍会参与运行。
+                  </div>
+                ) : null}
 
               </div>
             ) : (
-              <div
-                className="nodrag flex min-h-[132px] cursor-pointer items-center justify-center px-4 py-8 text-center text-[11px] text-slate-500 transition hover:bg-slate-50 hover:text-slate-700"
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={openSimpleMediaUploadPicker}
-              >
-                点击上传图片/视频
+              <div className="p-3">
+                <div
+                  className={`nodrag relative flex w-full cursor-pointer flex-col items-center justify-center gap-3 overflow-hidden rounded-[16px] border px-5 py-5 text-center transition-all duration-150 ${
+                    isUploadDropActive
+                      ? "border-slate-300 bg-white shadow-[0_12px_30px_rgba(15,23,42,0.06)]"
+                      : "border-[#E5E7EB] bg-[linear-gradient(180deg,#FCFCFD_0%,#F8FAFC_100%)] hover:border-slate-300 hover:bg-white"
+                  }`}
+                  style={{ minHeight: MEDIA_UPLOAD_NODE_EMPTY_HEIGHT }}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={openSimpleMediaUploadPicker}
+                  onDragEnter={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setIsUploadDropActive(true);
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (!isUploadDropActive) setIsUploadDropActive(true);
+                  }}
+                  onDragLeave={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (e.currentTarget.contains(e.relatedTarget)) return;
+                    setIsUploadDropActive(false);
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setIsUploadDropActive(false);
+                    const files = Array.from(e.dataTransfer?.files || []).filter((file) => {
+                      if (inputMediaKind === "image") return isImageFileLike(file);
+                      if (inputMediaKind === "video") return isVideoFileLike(file);
+                      return isMediaFileLike(file);
+                    });
+                    if (!files.length) return;
+                    readFilesAsDataUrls(files).then((newImages) => {
+                      updateData(node.id, {
+                        images: [...(node.data.images || []), ...newImages],
+                      });
+                    });
+                  }}
+                >
+                  <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(148,163,184,0.08),transparent_55%)]" />
+                  <div
+                    className={`relative flex h-11 w-11 items-center justify-center rounded-[14px] border transition-colors ${
+                      isUploadDropActive
+                        ? "border-slate-300 bg-slate-50 text-slate-600"
+                        : "border-slate-200 bg-white text-slate-400"
+                    }`}
+                  >
+                    <Upload className="h-[18px] w-[18px]" />
+                  </div>
+                  <div className="relative flex max-w-[210px] flex-col items-center gap-2.5">
+                    <div className="text-[13px] font-medium leading-5 text-slate-800">
+                      {isUploadDropActive ? "松开即可上传" : simpleMediaDropTitle}
+                    </div>
+                    <div className="text-[11px] leading-5 text-slate-400">
+                      {isUploadDropActive ? "释放文件后会自动添加到当前节点" : simpleMediaSupportHint}
+                    </div>
+                  </div>
+                </div>
               </div>
             )}
           </div>
@@ -4943,53 +5479,61 @@ const NodeComponent = ({
 
         {/* Output */}
         {isOutput && (
-          <div
-            className="relative min-h-[100px] max-h-[200px] overflow-y-auto rounded-[24px] border border-slate-200 bg-white p-1.5 custom-scrollbar nodrag shadow-[0_12px_28px_rgba(15,23,42,0.08)]"
-            onMouseDown={(e) => e.stopPropagation()}
-          >
+          <div className="nodrag flex min-h-[140px] flex-col" onMouseDown={(e) => e.stopPropagation()}>
             {node.data.images?.length > 0 ? (
-              <div className="grid grid-cols-2 gap-1">
-                {node.data.images.map((img, i) => (
-                  <div key={i} className="aspect-square relative">
-                    {renderArtifactThumb(img, i, {
-                      mode: node.data.mode,
-                      prompt: node.data.prompt,
-                      model: node.data.model,
-                    })}
-                  </div>
-                ))}
+              <div className="flex items-center justify-end gap-2 px-3 py-2.5">
+                <div className="flex items-center gap-1">
+                  <button
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      downloadAll();
+                    }}
+                    className="inline-flex h-7 items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 text-[10px] font-medium text-emerald-700 transition hover:border-emerald-300 hover:bg-emerald-100"
+                    type="button"
+                  >
+                    <Download className="h-3 w-3" /> 下载
+                  </button>
+                </div>
               </div>
-            ) : (
-              <div className="flex h-full flex-col items-center justify-center py-5 text-xs text-slate-500">
-                <CheckCircle2 className="h-6 w-6 opacity-25" />
-                <span>结果展示区</span>
-              </div>
-            )}
+            ) : null}
 
-            {node.data.images?.length > 0 && (
-              <button
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  downloadAll();
-                }}
-                className="mt-2 flex w-full items-center justify-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 py-1.5 text-[10px] text-emerald-700 transition hover:border-emerald-300 hover:bg-emerald-100"
-                type="button"
-              >
-                <Download className="w-3 h-3" /> 下载全部
-              </button>
-            )}
+            <div className="custom-scrollbar max-h-[200px] overflow-y-auto p-3">
+              {node.data.images?.length > 0 ? (
+                <div className="grid grid-cols-2 gap-1.5">
+                  {node.data.images.map((img, i) => (
+                    <div key={i} className="relative aspect-square">
+                      {renderArtifactThumb(img, i, {
+                        mode: node.data.mode,
+                        prompt: node.data.prompt,
+                        model: node.data.model,
+                      })}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex min-h-[140px] flex-col items-center justify-center gap-2 px-4 py-6 text-center text-xs text-slate-500">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-slate-300">
+                    <CheckCircle2 className="h-5 w-5" />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="text-[13px] font-medium text-slate-700">暂无输出结果</div>
+                    <div className="leading-5 text-slate-500">运行后将在这里展示内容</div>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
         {/* Text input */}
         {isTextInputNode && (
-          <>
-            <div className="relative">
+          <div className="nodrag space-y-3 p-3">
+            <div className="relative rounded-[12px] border border-[#E5E7EB] bg-[#F9FAFB] p-3 transition-all focus-within:border-cyan-300 focus-within:bg-white focus-within:shadow-[0_0_0_4px_rgba(34,211,238,0.12)]">
               <textarea
-                className="block min-h-[116px] w-full resize-none border-0 bg-transparent px-3 py-3 pr-20 pb-10 text-xs leading-5 text-slate-700 outline-none nodrag placeholder:text-slate-400"
-                rows={3}
-                placeholder="输入提示词..."
+                className="block min-h-[132px] w-full resize-none border-0 bg-transparent px-0 py-0 pb-12 text-[13px] leading-6 text-slate-700 outline-none nodrag placeholder:text-slate-400"
+                rows={5}
+                placeholder="例如：一只戴宇航头盔的橘猫站在雨夜霓虹街头，电影感打光，低机位，浅景深。"
                 value={node.data.text || ""}
                 onChange={(e) => {
                   setPromptPolishError("");
@@ -4997,56 +5541,73 @@ const NodeComponent = ({
                 }}
                 onMouseDown={(e) => e.stopPropagation()}
               />
-
               <button
                 type="button"
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={handlePolishTextInputPrompt}
                 disabled={promptPolishLoading || !String(node.data.text || "").trim() || !apiFetch}
-                className={`nodrag absolute bottom-2 right-10 inline-flex h-7 w-7 items-center justify-center border border-slate-200 bg-white text-slate-500 transition-colors hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-700 disabled:cursor-not-allowed disabled:opacity-40 ${
+                className={`nodrag absolute bottom-3 right-3 inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-[11px] font-medium shadow-sm transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
                   promptPolishLoading
-                    ? "border-cyan-300 bg-cyan-50 text-cyan-700"
-                    : ""
+                    ? "bg-cyan-50 text-cyan-700"
+                    : "bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-cyan-50 hover:text-cyan-700 hover:ring-cyan-200"
                 }`}
                 title="提示词润色"
                 aria-label="提示词润色"
               >
                 {promptPolishLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
-              </button>
-              <button
-                type="button"
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDelete?.();
-                }}
-                className="nodrag absolute bottom-2 right-2 inline-flex h-7 w-7 items-center justify-center border border-slate-200 bg-white text-slate-500 transition-colors hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
-                title="删除提示词组件"
-                aria-label="删除提示词组件"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
+                <span>优化提示词</span>
               </button>
             </div>
-            {promptPolishError && <div className="px-3 pb-2 text-[10px] text-rose-500">{promptPolishError}</div>}
-          </>
+
+            {promptPolishError ? <div className="px-1 text-[10px] text-rose-500">{promptPolishError}</div> : null}
+          </div>
         )}
       </div>
 
       {/* Ports */}
-      <div className={`pointer-events-none absolute ${isTextInputNode ? "top-1/2 -translate-y-1/2" : "top-[58px]"} w-full flex justify-between px-0`}>
+      <div className="pointer-events-none absolute top-1/2 w-full -translate-y-1/2 flex justify-between px-0">
         {node.type !== NODE_TYPES.INPUT && !isTextInputNode && (
-          <div
-            onMouseUp={onConnectEnd}
-            className="pointer-events-auto -ml-1.5 h-3 w-3 cursor-crosshair rounded-full border border-slate-300 bg-white shadow-[0_0_0_2px_rgba(255,255,255,0.9)] transition hover:border-cyan-400 hover:bg-cyan-50 z-20"
-          />
+          <div className="pointer-events-auto relative -translate-x-1/2">
+            <div
+              onMouseEnter={() => onConnectTargetHover?.(VIDEO_GEN_INPUT_HANDLE_MAIN)}
+              onMouseLeave={() => onConnectTargetLeave?.(VIDEO_GEN_INPUT_HANDLE_MAIN)}
+              className={`h-3 w-3 cursor-crosshair rounded-full border bg-white shadow-[0_0_0_2px_rgba(255,255,255,0.9)] transition-transform duration-150 z-20 hover:scale-[1.55] ${
+                isMainInputTargetHighlighted
+                  ? "border-cyan-500 bg-cyan-50 ring-4 ring-cyan-200/80 shadow-[0_0_0_6px_rgba(34,211,238,0.14)]"
+                  : "border-slate-300 hover:border-cyan-400 hover:bg-cyan-50"
+              }`}
+            />
+            {isMainInputTargetHighlighted ? (
+              <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 whitespace-nowrap rounded-full border border-cyan-200 bg-white px-2 py-1 text-[10px] font-medium text-cyan-700 shadow-[0_8px_20px_rgba(15,23,42,0.08)]">
+                松手连接
+              </span>
+            ) : null}
+          </div>
         )}
-        {node.type !== NODE_TYPES.OUTPUT && (
-          <div
-            onMouseDown={onConnectStart}
-            className="pointer-events-auto -mr-1.5 ml-auto h-3 w-3 cursor-crosshair rounded-full border border-slate-300 bg-white shadow-[0_0_0_2px_rgba(255,255,255,0.9)] transition hover:border-cyan-400 hover:bg-cyan-50 z-20"
-          />
-        )}
+        <div
+          onMouseDown={onConnectStart}
+          className="pointer-events-auto ml-auto translate-x-1/2 h-3 w-3 cursor-crosshair rounded-full border border-slate-300 bg-white shadow-[0_0_0_2px_rgba(255,255,255,0.9)] transition-transform duration-150 hover:scale-[1.55] hover:border-cyan-400 hover:bg-cyan-50 z-20"
+        />
       </div>
+      {hasDedicatedLastFrameInput ? (
+        <div className="pointer-events-none absolute inset-y-0 left-0 flex w-full items-center justify-between px-0">
+          <div className="pointer-events-auto relative -translate-x-1/2 translate-y-10">
+            <div
+              onMouseEnter={() => onConnectTargetHover?.(VIDEO_GEN_INPUT_HANDLE_LAST_FRAME)}
+              onMouseLeave={() => onConnectTargetLeave?.(VIDEO_GEN_INPUT_HANDLE_LAST_FRAME)}
+              className={`h-3 w-3 cursor-crosshair rounded-full border bg-white shadow-[0_0_0_2px_rgba(255,255,255,0.9)] transition-transform duration-150 z-20 hover:scale-[1.55] ${
+                isLastFrameTargetHighlighted
+                  ? "border-rose-500 bg-rose-50 ring-4 ring-rose-200/80 shadow-[0_0_0_6px_rgba(251,113,133,0.16)]"
+                  : "border-rose-300 hover:border-rose-400 hover:bg-rose-50"
+              }`}
+              title="连接尾帧"
+            />
+            <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 whitespace-nowrap text-[10px] font-medium text-slate-400">
+              {isLastFrameTargetHighlighted ? "松手连接尾帧" : "尾帧"}
+            </span>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 };
@@ -5077,6 +5638,8 @@ const Workbench = () => {
   const [initialNodePos, setInitialNodePos] = useState({});
   const [selectionBox, setSelectionBox] = useState(null);
   const [connectingSource, setConnectingSource] = useState(null);
+  const [hoveredConnectionId, setHoveredConnectionId] = useState("");
+  const [hoveredConnectTarget, setHoveredConnectTarget] = useState(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const [canvasDropActive, setCanvasDropActive] = useState(false);
   const [canvasDropUploading, setCanvasDropUploading] = useState(null);
@@ -5096,6 +5659,8 @@ const Workbench = () => {
   const [hoveredSidebarItemKey, setHoveredSidebarItemKey] = useState("");
   const [hoveredSidebarPreview, setHoveredSidebarPreview] = useState(null);
   const [sidebarWorkflowMenu, setSidebarWorkflowMenu] = useState(null);
+  const nodeElementMapRef = useRef(new Map());
+  const [sidebarImageCreateMenu, setSidebarImageCreateMenu] = useState(null);
   const [activeSidebarItemKey, setActiveSidebarItemKey] = useState("");
   const [assetLibraryStore, setAssetLibraryStore] = useState(() => loadAssetLibraryStore());
   const [showAssetLibrary, setShowAssetLibrary] = useState(false);
@@ -5103,7 +5668,12 @@ const Workbench = () => {
   const [assetLibraryLoaded, setAssetLibraryLoaded] = useState(false);
   const [expandedAssetWorkIds, setExpandedAssetWorkIds] = useState(new Set());
   const [assetLibraryDetailWorkId, setAssetLibraryDetailWorkId] = useState("");
+  const [editingAssetWorkTitleId, setEditingAssetWorkTitleId] = useState("");
+  const [editingAssetWorkTitleDraft, setEditingAssetWorkTitleDraft] = useState("");
   const [pendingUploadNodeId, setPendingUploadNodeId] = useState("");
+  const [showSidebarUploadMenu, setShowSidebarUploadMenu] = useState(false);
+  const [sidebarVideoCreateMenu, setSidebarVideoCreateMenu] = useState(null);
+  const [assetLibraryPickerMode, setAssetLibraryPickerMode] = useState(false);
   const [canvasId] = useState(() => {
     const saved = localStorage.getItem(CANVAS_KEY);
     return saved || newCanvasId();
@@ -5180,6 +5750,13 @@ const Workbench = () => {
   const agentUploadInputRef = useRef(null);
   const agentComposerRef = useRef(null);
   const workspaceShellRef = useRef(null);
+  const sidebarUploadMenuRef = useRef(null);
+  const sidebarImageUploadInputRef = useRef(null);
+  const sidebarVideoUploadInputRef = useRef(null);
+  const sidebarUploadMenuCloseTimerRef = useRef(null);
+  const sidebarImageCreateMenuCloseTimerRef = useRef(null);
+  const sidebarVideoCreateMenuCloseTimerRef = useRef(null);
+  const sidebarWorkflowMenuCloseTimerRef = useRef(null);
   const assetLibraryRestoredRef = useRef(false);
   const viewportRef = useRef(viewport);
   const promptPolishApplyRef = useRef(null);
@@ -5188,6 +5765,9 @@ const Workbench = () => {
   const rightPanelResizeRef = useRef(null);
   const nodeDragCleanupRef = useRef(null);
   const previewOpenedBySpaceRef = useRef(false);
+  const connectionDragSelectionRef = useRef({ userSelect: "", webkitUserSelect: "" });
+  const dragSelectionStyleRef = useRef({ userSelect: "", webkitUserSelect: "" });
+  const connectionHoverTargetRef = useRef(null);
 
   const agentSessions = agentStore.sessions ?? EMPTY_LIST;
   const isLeftSidebarCollapsed = true;
@@ -5278,6 +5858,51 @@ const Workbench = () => {
     }
   }, [nodes, pendingUploadNodeId]);
 
+  useEffect(() => {
+    if (!showSidebarUploadMenu) return undefined;
+    const handlePointerDown = (event) => {
+      if (sidebarUploadMenuRef.current?.contains(event.target)) return;
+      setShowSidebarUploadMenu(false);
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [showSidebarUploadMenu]);
+
+  useEffect(() => () => {
+    if (sidebarUploadMenuCloseTimerRef.current) {
+      window.clearTimeout(sidebarUploadMenuCloseTimerRef.current);
+    }
+    if (sidebarImageCreateMenuCloseTimerRef.current) {
+      window.clearTimeout(sidebarImageCreateMenuCloseTimerRef.current);
+    }
+    if (sidebarVideoCreateMenuCloseTimerRef.current) {
+      window.clearTimeout(sidebarVideoCreateMenuCloseTimerRef.current);
+    }
+    if (sidebarWorkflowMenuCloseTimerRef.current) {
+      window.clearTimeout(sidebarWorkflowMenuCloseTimerRef.current);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!sidebarImageCreateMenu) return undefined;
+    const handlePointerDown = (event) => {
+      if (event.target.closest("[data-sidebar-image-create-menu='true']")) return;
+      setSidebarImageCreateMenu(null);
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [sidebarImageCreateMenu]);
+
+  useEffect(() => {
+    if (!sidebarVideoCreateMenu) return undefined;
+    const handlePointerDown = (event) => {
+      if (event.target.closest("[data-sidebar-video-create-menu='true']")) return;
+      setSidebarVideoCreateMenu(null);
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [sidebarVideoCreateMenu]);
+
   const openPromptPolishPicker = useCallback(({ title = "AI 润色", sourcePrompt = "", variants = [], onUse }) => {
     const normalizedVariants = normalizePromptPolishVariants({ variants });
     if (!normalizedVariants.length) return;
@@ -5347,10 +5972,10 @@ const Workbench = () => {
     () => (imageModelRecords.length ? imageModelRecords : DEFAULT_AI_MODELS),
     [imageModelRecords],
   );
-  const videoModelOptions = useMemo(
-    () => (Array.isArray(aiChatModels.video) && aiChatModels.video.length ? aiChatModels.video : DEFAULT_VIDEO_MODELS),
-    [aiChatModels.video],
-  );
+  const videoModelOptions = useMemo(() => {
+    const source = Array.isArray(aiChatModels.video) && aiChatModels.video.length ? aiChatModels.video : DEFAULT_VIDEO_MODELS;
+    return source.filter((item) => !DEPRECATED_VIDEO_MODEL_IDS.has(String(item?.id || "").trim()));
+  }, [aiChatModels.video]);
   const defaultLanguageModelId = useMemo(() => getDefaultLanguageModelId(languageModelOptions), [languageModelOptions]);
   const defaultImageModelId = useMemo(() => getDefaultImageModelId(imageModelRecords), [imageModelRecords]);
   const threeViewImageModelId = useMemo(() => {
@@ -5787,6 +6412,25 @@ const Workbench = () => {
   }, [defaultImageModelId, imageModelRecords.length, resolveModelParamsForId, updateApiDebugStatus]);
 
   useEffect(() => {
+    if (!defaultVideoModelId) return;
+    let changed = false;
+    const nextNodes = nodes.map((node) => {
+      if (node?.type !== NODE_TYPES.VIDEO_GEN) return node;
+      const currentModelId = String(node?.data?.model || "").trim();
+      if (!DEPRECATED_VIDEO_MODEL_IDS.has(currentModelId)) return node;
+      changed = true;
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          model: defaultVideoModelId,
+        },
+      };
+    });
+    if (changed) setNodes(nextNodes);
+  }, [defaultVideoModelId, nodes]);
+
+  useEffect(() => {
     writeAgentDevMode(agentDevMode);
   }, [agentDevMode]);
 
@@ -6148,7 +6792,10 @@ const Workbench = () => {
   }, [sidebarWorkflowMenu]);
 
   const pushHistory = useCallback(() => {
-    const s = { nodes: JSON.parse(JSON.stringify(nodes)), connections: JSON.parse(JSON.stringify(connections)) };
+    const s = {
+      nodes: nodes.map(cloneCanvasNodeForHistory),
+      connections: connections.map((connection) => ({ ...connection })),
+    };
     setHistory((p) => {
       const n = p.slice(0, historyStep + 1);
       n.push(s);
@@ -6202,7 +6849,7 @@ const Workbench = () => {
     [pushHistory],
   );
 
-  const saveCurrentCanvasAsWork = useCallback(() => {
+  const saveCanvasToAssetLibrary = useCallback((forceNewWork = false) => {
     if (nodes.length === 0 && connections.length === 0) {
       setRunToast({ message: "当前画布为空，先添加素材或工作流再保存", type: "error" });
       setTimeout(() => setRunToast(null), 2200);
@@ -6217,7 +6864,7 @@ const Workbench = () => {
     const now = Date.now();
     setAssetLibraryStore((prev) => {
       const current = normalizeAssetLibraryStore(prev);
-      const existingWork = (current.works || []).find((item) => item.canvasId === canvasId) || null;
+      const existingWork = forceNewWork ? null : (current.works || []).find((item) => item.canvasId === canvasId) || null;
       const workId = existingWork?.id || `work_${generateId()}`;
       const existingVersions = (current.workVersions || []).filter((item) => item.workId === workId);
       const versionRecord = {
@@ -6288,9 +6935,52 @@ const Workbench = () => {
     });
     setShowAssetLibrary(true);
     setAssetLibraryTab("works");
-    setRunToast({ message: "已保存到作品库，并追加一个新版本", type: "info" });
+    setRunToast({ message: forceNewWork ? "已另存为新作品" : "已保存到作品库，并追加一个新版本", type: "info" });
     setTimeout(() => setRunToast(null), 2200);
   }, [canvasId, connections, nodes, viewport]);
+
+  const saveCurrentCanvasAsWork = useCallback(() => {
+    saveCanvasToAssetLibrary(false);
+  }, [saveCanvasToAssetLibrary]);
+
+  const saveCurrentCanvasAsNewWork = useCallback(() => {
+    saveCanvasToAssetLibrary(true);
+  }, [saveCanvasToAssetLibrary]);
+
+  const beginEditAssetWorkTitle = useCallback((work) => {
+    const workId = String(work?.id || "").trim();
+    if (!workId) return;
+    setEditingAssetWorkTitleId(workId);
+    setEditingAssetWorkTitleDraft(String(work?.title || "").trim() || "未命名作品");
+  }, []);
+
+  const cancelEditAssetWorkTitle = useCallback(() => {
+    setEditingAssetWorkTitleId("");
+    setEditingAssetWorkTitleDraft("");
+  }, []);
+
+  const commitEditAssetWorkTitle = useCallback((workId) => {
+    const normalizedWorkId = String(workId || editingAssetWorkTitleId || "").trim();
+    if (!normalizedWorkId) return;
+    const nextTitle = String(editingAssetWorkTitleDraft || "").trim() || "未命名作品";
+    setAssetLibraryStore((prev) => {
+      const current = normalizeAssetLibraryStore(prev);
+      return {
+        ...current,
+        works: (current.works || []).map((item) =>
+          item.id === normalizedWorkId
+            ? {
+                ...item,
+                title: nextTitle,
+                updatedAt: Date.now(),
+              }
+            : item,
+        ),
+      };
+    });
+    setEditingAssetWorkTitleId("");
+    setEditingAssetWorkTitleDraft("");
+  }, [editingAssetWorkTitleDraft, editingAssetWorkTitleId]);
 
   const removeAssetLibraryItem = useCallback((kind, id) => {
     setAssetLibraryStore((prev) => {
@@ -6319,6 +7009,31 @@ const Workbench = () => {
     setSelectedNodeIds(new Set());
     setSelectedConnectionIds(new Set());
   };
+
+  const deleteConnectionById = useCallback((connectionId) => {
+    if (!connectionId) return;
+    pushHistory();
+    setConnections((prev) => prev.filter((conn) => conn.id !== connectionId));
+    setHoveredConnectionId((prev) => (prev === connectionId ? "" : prev));
+    setSelectedConnectionIds((prev) => {
+      const next = new Set(prev);
+      next.delete(connectionId);
+      return next;
+    });
+  }, [pushHistory]);
+
+  const handleConnectionClick = useCallback((event, connectionId) => {
+    event.stopPropagation();
+    const shouldAppend = event.shiftKey || event.ctrlKey || event.metaKey;
+    setSelectedNodeIds(new Set());
+    setSelectedConnectionIds((prev) => {
+      if (!shouldAppend) return new Set([connectionId]);
+      const next = new Set(prev);
+      if (next.has(connectionId)) next.delete(connectionId);
+      else next.add(connectionId);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     const kd = (e) => {
@@ -6439,6 +7154,7 @@ const Workbench = () => {
       return;
     }
     if (e.button === 0 && !isSpacePressed && !e.altKey && !e.metaKey) {
+      e.preventDefault();
       const appendSelection = e.shiftKey || e.ctrlKey;
       if (!appendSelection) {
         setSelectedNodeIds(new Set());
@@ -6470,6 +7186,7 @@ const handleNodeMouseDown = (e, nid) => {
     return;
   }
 
+  e.preventDefault();
   setInteractionMode("dragging_node");
   setDragStart({ x: e.clientX, y: e.clientY });
 
@@ -6586,12 +7303,45 @@ const handleNodeMouseDown = (e, nid) => {
     };
   }, [interactionMode, handleMouseMove, handleMouseUp]);
 
+  useEffect(() => {
+    const shouldDisableSelection = interactionMode === "selecting" || interactionMode === "dragging_node";
+    const bodyStyle = document.body?.style;
+
+    if (!shouldDisableSelection) {
+      if (bodyStyle) {
+        bodyStyle.userSelect = dragSelectionStyleRef.current.userSelect;
+        bodyStyle.webkitUserSelect = dragSelectionStyleRef.current.webkitUserSelect;
+      }
+      return undefined;
+    }
+
+    if (bodyStyle) {
+      dragSelectionStyleRef.current = {
+        userSelect: bodyStyle.userSelect,
+        webkitUserSelect: bodyStyle.webkitUserSelect,
+      };
+      bodyStyle.userSelect = "none";
+      bodyStyle.webkitUserSelect = "none";
+    }
+
+    return () => {
+      if (bodyStyle) {
+        bodyStyle.userSelect = dragSelectionStyleRef.current.userSelect;
+        bodyStyle.webkitUserSelect = dragSelectionStyleRef.current.webkitUserSelect;
+      }
+    };
+  }, [interactionMode]);
+
   const getCursor = () => (interactionMode === "panning" || isSpacePressed ? "grab" : interactionMode === "dragging_node" ? "grabbing" : "default");
 
-  const createMediaUploadNodeAt = useCallback((point, mediaItems) => {
+  const createMediaUploadNodeAt = useCallback((point, mediaItems, mediaKind = "mixed") => {
     const safeMediaItems = Array.isArray(mediaItems) ? mediaItems.filter(Boolean) : [];
     if (!safeMediaItems.length) return;
     const position = getMediaUploadNodePosition(point);
+    const normalizedMediaKind =
+      normalizeInputMediaKind(mediaKind) === "mixed"
+        ? inferMediaKindFromMediaItems(safeMediaItems)
+        : normalizeInputMediaKind(mediaKind);
 
     pushHistory();
     const nodeId = generateId();
@@ -6602,7 +7352,8 @@ const handleNodeMouseDown = (e, nid) => {
       y: position.y,
       data: {
         images: safeMediaItems,
-        title: "图片/视频上传",
+        mediaKind: normalizedMediaKind,
+        title: getReferenceNodeTitle(normalizedMediaKind),
       },
     };
 
@@ -6619,6 +7370,35 @@ const handleNodeMouseDown = (e, nid) => {
     return screenToCanvas(centerX, centerY);
   }, [screenToCanvas]);
 
+  const handleSidebarMediaUpload = useCallback(
+    async (event, mediaKind = "mixed") => {
+      const normalizedMediaKind = normalizeInputMediaKind(mediaKind);
+      const files = Array.from(event.target.files || []).filter((file) => {
+        if (normalizedMediaKind === "image") return isImageFileLike(file);
+        if (normalizedMediaKind === "video") return isVideoFileLike(file);
+        return isMediaFileLike(file);
+      });
+      if (!files.length) {
+        event.target.value = "";
+        return;
+      }
+      try {
+        const mediaItems = await readFilesAsDataUrls(files);
+        createMediaUploadNodeAt(getCanvasViewportCenterPoint(), mediaItems, normalizedMediaKind);
+        const imageCount = files.filter((file) => isImageFileLike(file)).length;
+        const videoCount = files.length - imageCount;
+        setRunToast({
+          message: `已添加到画布：${files.length} 个文件${imageCount ? ` · ${imageCount} 张图片` : ""}${videoCount ? ` · ${videoCount} 个视频` : ""}`,
+          type: "info",
+        });
+        setTimeout(() => setRunToast(null), 2200);
+      } finally {
+        event.target.value = "";
+      }
+    },
+    [createMediaUploadNodeAt, getCanvasViewportCenterPoint],
+  );
+
   const getCanvasPastePoint = useCallback(() => {
     const hoverPoint = canvasHoverClientRef.current;
     if (hoverPoint) {
@@ -6631,8 +7411,9 @@ const handleNodeMouseDown = (e, nid) => {
     (asset) => {
       const url = String(asset?.url || "").trim();
       if (!url) return;
-      createMediaUploadNodeAt(getCanvasViewportCenterPoint(), [url]);
+      createMediaUploadNodeAt(getCanvasViewportCenterPoint(), [url], isVideoContent(url) ? "video" : "image");
       setShowAssetLibrary(false);
+      setAssetLibraryPickerMode(false);
       setRunToast({ message: "已将素材放回画布", type: "info" });
       setTimeout(() => setRunToast(null), 2200);
       setAssetLibraryStore((prev) => {
@@ -6708,7 +7489,11 @@ const handleNodeMouseDown = (e, nid) => {
     });
     try {
       const droppedMediaItems = await readFilesAsDataUrls(files);
-      createMediaUploadNodeAt(point, droppedMediaItems);
+      createMediaUploadNodeAt(
+        point,
+        droppedMediaItems,
+        imageCount === files.length ? "image" : videoCount === files.length ? "video" : "mixed",
+      );
     } finally {
       setCanvasDropUploading(null);
     }
@@ -6741,7 +7526,7 @@ const handleNodeMouseDown = (e, nid) => {
 
       try {
         const pastedMediaItems = await readFilesAsDataUrls(mediaFiles);
-        createMediaUploadNodeAt(point, pastedMediaItems);
+        createMediaUploadNodeAt(point, pastedMediaItems, mediaFiles.every((file) => isImageFileLike(file)) ? "image" : mediaFiles.every((file) => isVideoFileLike(file)) ? "video" : "mixed");
         setRunToast({
           message: `已粘贴到画布：${mediaFiles.length} 个文件${imageCount ? ` · ${imageCount} 张图片` : ""}${videoCount ? ` · ${videoCount} 个视频` : ""}`,
           type: "info",
@@ -6769,7 +7554,7 @@ const handleNodeMouseDown = (e, nid) => {
     const c = screenToCanvas(cx, cy);
 
     const d = {
-      [NODE_TYPES.INPUT]: { images: [] },
+      [NODE_TYPES.INPUT]: { images: [], mediaKind: "image", title: getReferenceNodeTitle("image") },
       [NODE_TYPES.TEXT_INPUT]: { text: "" },
       [NODE_TYPES.PROCESSOR]: {
         ...getProcessorModeDefaults(modePreset || "multi_image_generate"),
@@ -6809,9 +7594,8 @@ const handleNodeMouseDown = (e, nid) => {
     if (selectedNodeIds.size === 1) {
       const sourceId = Array.from(selectedNodeIds)[0];
       const sourceNode = nodes.find((n) => n.id === sourceId);
-      const canOutput = sourceNode?.type !== NODE_TYPES.OUTPUT;
       const canInput = t !== NODE_TYPES.INPUT && t !== NODE_TYPES.TEXT_INPUT;
-      if (sourceNode && canOutput && canInput) {
+      if (sourceNode && canInput) {
         newConnection = { id: generateId(), from: sourceId, to: id };
         newNode.x = sourceNode.x + 350;
         newNode.y = sourceNode.y;
@@ -6824,49 +7608,175 @@ const handleNodeMouseDown = (e, nid) => {
     return id;
   };
 
+  const appendTemplateGraph = useCallback(
+    (templateNodes, templateConnections, options = {}) => {
+      const safeTemplateNodes = Array.isArray(templateNodes) ? templateNodes.filter(Boolean) : [];
+      const safeTemplateConnections = Array.isArray(templateConnections) ? templateConnections.filter(Boolean) : [];
+      if (!safeTemplateNodes.length) return;
+
+      pushHistory();
+
+      const baseNodes = Array.isArray(nodesRef.current) ? nodesRef.current : [];
+      const baseConnections = Array.isArray(connectionsRef.current) ? connectionsRef.current : [];
+      const templateMinX = Math.min(...safeTemplateNodes.map((node) => Number(node.x) || 0));
+      const templateMaxX = Math.max(...safeTemplateNodes.map((node) => Number(node.x) || 0));
+      const templateMinY = Math.min(...safeTemplateNodes.map((node) => Number(node.y) || 0));
+      const templateMaxY = Math.max(...safeTemplateNodes.map((node) => Number(node.y) || 0));
+      const templateWidth = Math.max(0, templateMaxX - templateMinX);
+      const templateHeight = Math.max(0, templateMaxY - templateMinY);
+
+      let offsetX = 0;
+      let offsetY = 0;
+
+      if (baseNodes.length > 0) {
+        const baseMaxX = Math.max(...baseNodes.map((node) => Number(node.x) || 0));
+        const baseMinY = Math.min(...baseNodes.map((node) => Number(node.y) || 0));
+        const baseMaxY = Math.max(...baseNodes.map((node) => Number(node.y) || 0));
+        const targetLeft = baseMaxX + 360;
+        const availableHeight = Math.max(0, baseMaxY - baseMinY);
+        const targetTop = baseMinY + Math.max(0, (availableHeight - templateHeight) / 2);
+        offsetX = targetLeft - templateMinX;
+        offsetY = targetTop - templateMinY;
+      } else if (options.alignToViewportCenter) {
+        const center = getCanvasViewportCenterPoint();
+        offsetX = center.x - (templateMinX + templateWidth / 2);
+        offsetY = center.y - (templateMinY + templateHeight / 2);
+      }
+
+      const nextNodes = safeTemplateNodes.map((node) => ({
+        ...node,
+        x: (Number(node.x) || 0) + offsetX,
+        y: (Number(node.y) || 0) + offsetY,
+      }));
+
+      setNodes([...baseNodes, ...nextNodes]);
+      setConnections([...baseConnections, ...safeTemplateConnections]);
+      setSelectedNodeIds(new Set(nextNodes.map((node) => node.id)));
+      setSelectedConnectionIds(new Set());
+      setActiveNodeId(nextNodes[0]?.id || null);
+    },
+    [getCanvasViewportCenterPoint, pushHistory],
+  );
+
   const createText2ImgTemplate = () => {
-    pushHistory();
     const n1 = { id: generateId(), type: NODE_TYPES.TEXT_INPUT, x: 100, y: 200, data: { text: "赛博朋克风格的未来城市街道，霓虹灯光" } };
-    const n2 = { id: generateId(), type: NODE_TYPES.PROCESSOR, x: 500, y: 200, data: { mode: "text2img", prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1" }, batchSize: 1, status: "idle", model: defaultImageModelId } };
+    const n2 = { id: generateId(), type: NODE_TYPES.PROCESSOR, x: 500, y: 200, data: { mode: "text2img", prompt: "", templates: { size: "1k", aspect_ratio: "1:1" }, batchSize: 1, status: "idle", model: defaultImageModelId } };
     const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
-    setNodes([n1, n2, n3]);
-    setConnections([
+    appendTemplateGraph([n1, n2, n3], [
       { id: generateId(), from: n1.id, to: n2.id },
       { id: generateId(), from: n2.id, to: n3.id },
-    ]);
-    setViewport({ x: 0, y: 0, zoom: 1 });
+    ], { alignToViewportCenter: true });
   };
 
   const createImg2ImgTemplate = () => {
-    pushHistory();
     const n0 = { id: generateId(), type: NODE_TYPES.TEXT_INPUT, x: 100, y: 100, data: { text: "保持原图构图，转为水彩风格" } };
-    const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 350, data: { images: [] } };
-    const n2 = { id: generateId(), type: NODE_TYPES.PROCESSOR, x: 500, y: 200, data: { mode: "multi_image_generate", prompt: "", templates: { size: "1024x1024", note: "" }, batchSize: 1, uploadedImages: [], status: "idle", model: defaultImageModelId } };
+    const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 350, data: { images: [], mediaKind: "image", title: getReferenceNodeTitle("image") } };
+    const n2 = { id: generateId(), type: NODE_TYPES.PROCESSOR, x: 500, y: 200, data: { mode: "multi_image_generate", prompt: "", templates: { size: "1k", note: "" }, batchSize: 1, uploadedImages: [], status: "idle", model: defaultImageModelId } };
     const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
-    setNodes([n0, n1, n2, n3]);
-    setConnections([
+    appendTemplateGraph([n0, n1, n2, n3], [
       { id: generateId(), from: n0.id, to: n2.id },
       { id: generateId(), from: n1.id, to: n2.id },
       { id: generateId(), from: n2.id, to: n3.id },
-    ]);
-    setViewport({ x: 0, y: 0, zoom: 1 });
+    ], { alignToViewportCenter: true });
+  };
+
+  const createMultiImg2ImgTemplate = () => {
+    const n0 = { id: generateId(), type: NODE_TYPES.TEXT_INPUT, x: 100, y: 710, data: { text: "融合三张参考图的主体特征与风格，生成统一新画面" } };
+    const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 20, data: { images: [], mediaKind: "image", title: `${getReferenceNodeTitle("image")} 1` } };
+    const n2 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 250, data: { images: [], mediaKind: "image", title: `${getReferenceNodeTitle("image")} 2` } };
+    const n3 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 480, data: { images: [], mediaKind: "image", title: `${getReferenceNodeTitle("image")} 3` } };
+    const n4 = { id: generateId(), type: NODE_TYPES.PROCESSOR, x: 500, y: 360, data: { mode: "multi_image_generate", prompt: "", templates: { size: "1k", note: "" }, batchSize: 1, uploadedImages: [], status: "idle", model: defaultImageModelId } };
+    const n5 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 360, data: { images: [] } };
+    appendTemplateGraph([n0, n1, n2, n3, n4, n5], [
+      { id: generateId(), from: n0.id, to: n4.id },
+      { id: generateId(), from: n1.id, to: n4.id },
+      { id: generateId(), from: n2.id, to: n4.id },
+      { id: generateId(), from: n3.id, to: n4.id },
+      { id: generateId(), from: n4.id, to: n5.id },
+    ], { alignToViewportCenter: true });
   };
 
   const createImg2VideoTemplate = () => {
-    pushHistory();
-    const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 200, data: { images: [] } };
+    const n0 = { id: generateId(), type: NODE_TYPES.TEXT_INPUT, x: 100, y: 80, data: { text: "让参考图中的主体自然运动，镜头平稳推进，动作连贯" } };
+    const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 320, data: { images: [], mediaKind: "image", title: getReferenceNodeTitle("image") } };
     const n2 = { id: generateId(), type: NODE_TYPES.VIDEO_GEN, x: 500, y: 200, data: { mode: "img2video",model: defaultVideoModelId, prompt: "", templates: { motion: "标准(Standard)", camera: "推近(Zoom In)", duration: 5, resolution: "1080p", ratio: "", note: "" ,generate_audio_new: true,}, batchSize: 1, status: "idle", refImage: null } };
     const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
-    setNodes([n1, n2, n3]);
-    setConnections([
+    appendTemplateGraph([n0, n1, n2, n3], [
+      { id: generateId(), from: n0.id, to: n2.id },
       { id: generateId(), from: n1.id, to: n2.id },
       { id: generateId(), from: n2.id, to: n3.id },
-    ]);
-    setViewport({ x: 0, y: 0, zoom: 1 });
+    ], { alignToViewportCenter: true });
+  };
+
+  const createText2VideoTemplate = () => {
+    const n0 = { id: generateId(), type: NODE_TYPES.TEXT_INPUT, x: 100, y: 120, data: { text: "未来城市街头，镜头缓慢推进，霓虹灯闪烁，人物自然行走" } };
+    const n1 = { id: generateId(), type: NODE_TYPES.VIDEO_GEN, x: 500, y: 120, data: { mode: "text2video", model: defaultVideoModelId, prompt: "", templates: { motion: "标准(Standard)", camera: "推近(Zoom In)", duration: 5, resolution: "1080p", ratio: "", note: "", generate_audio_new: true }, batchSize: 1, status: "idle", refImage: null } };
+    const n2 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 120, data: { images: [] } };
+    appendTemplateGraph([n0, n1, n2], [
+      { id: generateId(), from: n0.id, to: n1.id },
+      { id: generateId(), from: n1.id, to: n2.id },
+    ], { alignToViewportCenter: true });
+  };
+
+  const createFirstLastFrameVideoTemplate = () => {
+    const n0 = { id: generateId(), type: NODE_TYPES.TEXT_INPUT, x: 100, y: 220, data: { text: "让首尾画面自然衔接，形成平滑的镜头运动" } };
+    const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 20, data: { images: [], mediaKind: "image", title: "图片参考（首帧）" } };
+    const n2 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 430, data: { images: [], mediaKind: "image", title: "图片参考（尾帧）" } };
+    const firstLastModelId =
+      videoModelOptions.find((item) => isSeedanceOmniReferenceModel(item?.id, item?.name, item?.label, item?.remark))?.id ||
+      defaultVideoModelId;
+    const n3 = { id: generateId(), type: NODE_TYPES.VIDEO_GEN, x: 500, y: 220, data: { title: "首尾帧生视频", mode: "img2video", model: firstLastModelId, prompt: "", templates: { motion: "标准(Standard)", camera: "固定镜头(Fixed)", duration: 5, resolution: "1080p", ratio: "", note: "", imageType: "2", generate_audio_new: true }, batchSize: 1, status: "idle", refImage: null, firstLastFrameOnly: true } };
+    const n4 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 220, data: { images: [] } };
+    appendTemplateGraph([n0, n1, n2, n3, n4], [
+      { id: generateId(), from: n0.id, to: n3.id },
+      { id: generateId(), from: n1.id, to: n3.id },
+      { id: generateId(), from: n2.id, to: n3.id, toHandle: VIDEO_GEN_INPUT_HANDLE_LAST_FRAME },
+      { id: generateId(), from: n3.id, to: n4.id },
+    ], { alignToViewportCenter: true });
+  };
+
+  const createOmniReferenceVideoTemplate = () => {
+    const n0 = { id: generateId(), type: NODE_TYPES.TEXT_INPUT, x: 100, y: 200, data: { text: "综合参考图中的主体、风格和镜头语言，生成自然视频" } };
+    const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 20, data: { images: [], mediaKind: "image", title: getReferenceNodeTitle("image") } };
+    const n2 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 380, data: { images: [], mediaKind: "video", title: getReferenceNodeTitle("video") } };
+    const omniModelId =
+      videoModelOptions.find((item) => isSeedanceOmniReferenceModel(item?.id, item?.name, item?.label, item?.remark))?.id ||
+      defaultVideoModelId;
+    const n3 = { id: generateId(), type: NODE_TYPES.VIDEO_GEN, x: 500, y: 200, data: { title: "全能生视频", mode: "img2video", model: omniModelId, prompt: "", templates: { motion: "标准(Standard)", camera: "推近(Zoom In)", duration: 5, resolution: "1080p", ratio: "", note: "", imageType: "4", generate_audio_new: true }, batchSize: 1, status: "idle", refImage: null, omniReferenceOnly: true } };
+    const n4 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
+    appendTemplateGraph([n0, n1, n2, n3, n4], [
+      { id: generateId(), from: n0.id, to: n3.id },
+      { id: generateId(), from: n1.id, to: n3.id },
+      { id: generateId(), from: n2.id, to: n3.id },
+      { id: generateId(), from: n3.id, to: n4.id },
+    ], { alignToViewportCenter: true });
+  };
+
+  const createVideo2VideoTemplate = () => {
+    const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 200, data: { images: [], mediaKind: "video", title: getReferenceNodeTitle("video") } };
+    const n2 = {
+      id: generateId(),
+      type: NODE_TYPES.PROCESSOR,
+      x: 500,
+      y: 200,
+      data: {
+        mode: "video_upscale",
+        prompt: "视频画质增强",
+        templates: { template_enum: VOLC_VIDEO_HD_TEMPLATE_ENUM_1 },
+        batchSize: 1,
+        status: "idle",
+        refImage: null,
+        model: DEFAULT_VIDEO_HD_MODEL_ID,
+      },
+    };
+    const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
+    appendTemplateGraph([n1, n2, n3], [
+      { id: generateId(), from: n1.id, to: n2.id },
+      { id: generateId(), from: n2.id, to: n3.id },
+    ], { alignToViewportCenter: true });
   };
 
   const createVideoUpscaleTemplate = () => {
-    pushHistory();
     const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 200, data: { images: [] } };
     const n2 = {
       id: generateId(),
@@ -6884,12 +7794,10 @@ const handleNodeMouseDown = (e, nid) => {
       },
     };
     const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
-    setNodes([n1, n2, n3]);
-    setConnections([
+    appendTemplateGraph([n1, n2, n3], [
       { id: generateId(), from: n1.id, to: n2.id },
       { id: generateId(), from: n2.id, to: n3.id },
-    ]);
-    setViewport({ x: 0, y: 0, zoom: 1 });
+    ], { alignToViewportCenter: true });
   };
 
   const createConnectedVideoNode = (sourceNodeId) => {
@@ -7060,7 +7968,7 @@ const handleNodeMouseDown = (e, nid) => {
         type: NODE_TYPES.INPUT,
         x: baseX,
         y: baseY,
-        data: { images: [picked] },
+        data: { images: [picked], mediaKind: "image", title: getReferenceNodeTitle("image") },
       };
 
       const img2imgNode = {
@@ -7071,7 +7979,7 @@ const handleNodeMouseDown = (e, nid) => {
         data: {
           mode: "multi_image_generate",
           prompt: "",
-          templates: { size: "1024x1024", note: "" },
+          templates: { size: "1k", note: "" },
           batchSize: 1,
           uploadedImages: [],
           status: "idle",
@@ -9075,18 +9983,102 @@ const handleNodeMouseDown = (e, nid) => {
   const updateNodeData = (id, d) => setNodes((p) => p.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...d } } : n)));
 
   const startConnection = (e, nid) => {
+    e.preventDefault();
     e.stopPropagation();
+    connectionHoverTargetRef.current = null;
+    setHoveredConnectTarget(null);
     const r = e.currentTarget.getBoundingClientRect();
     setConnectingSource({ nodeId: nid, x: r.left + r.width / 2, y: r.top + r.height / 2 });
   };
 
-  const completeConnection = (e, tid) => {
-    e.stopPropagation();
-    if (connectingSource && connectingSource.nodeId !== tid && !connections.find((c) => c.from === connectingSource.nodeId && c.to === tid)) {
-      setConnections([...connections, { id: generateId(), from: connectingSource.nodeId, to: tid }]);
+  const completeConnection = useCallback((tid, toHandle = VIDEO_GEN_INPUT_HANDLE_MAIN) => {
+    const normalizedToHandle = normalizeConnectionTargetHandle(toHandle);
+    if (
+      connectingSource &&
+      connectingSource.nodeId !== tid &&
+      !connectionsRef.current.find(
+        (c) =>
+          c.from === connectingSource.nodeId &&
+          c.to === tid &&
+          normalizeConnectionTargetHandle(c.toHandle) === normalizedToHandle,
+      )
+    ) {
+      setConnections((prev) => [
+        ...prev,
+        { id: generateId(), from: connectingSource.nodeId, to: tid, toHandle: normalizedToHandle },
+      ]);
     }
+    connectionHoverTargetRef.current = null;
+    setHoveredConnectTarget(null);
     setConnectingSource(null);
-  };
+  }, [connectingSource]);
+
+  const handleConnectionTargetHover = useCallback((tid, toHandle = VIDEO_GEN_INPUT_HANDLE_MAIN) => {
+    if (!connectingSource) return;
+    const nextTarget = {
+      nodeId: tid,
+      toHandle: normalizeConnectionTargetHandle(toHandle),
+    };
+    connectionHoverTargetRef.current = nextTarget;
+    setHoveredConnectTarget(nextTarget);
+  }, [connectingSource]);
+
+  const handleConnectionTargetLeave = useCallback((tid, toHandle = VIDEO_GEN_INPUT_HANDLE_MAIN) => {
+    const normalizedToHandle = normalizeConnectionTargetHandle(toHandle);
+    if (
+      connectionHoverTargetRef.current?.nodeId === tid &&
+      normalizeConnectionTargetHandle(connectionHoverTargetRef.current?.toHandle) === normalizedToHandle
+    ) {
+      connectionHoverTargetRef.current = null;
+      setHoveredConnectTarget(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!connectingSource) {
+      const bodyStyle = document.body?.style;
+      if (bodyStyle) {
+        bodyStyle.userSelect = connectionDragSelectionRef.current.userSelect;
+        bodyStyle.webkitUserSelect = connectionDragSelectionRef.current.webkitUserSelect;
+      }
+      return undefined;
+    }
+
+    const bodyStyle = document.body?.style;
+    if (bodyStyle) {
+      connectionDragSelectionRef.current = {
+        userSelect: bodyStyle.userSelect,
+        webkitUserSelect: bodyStyle.webkitUserSelect,
+      };
+      bodyStyle.userSelect = "none";
+      bodyStyle.webkitUserSelect = "none";
+    }
+
+    const cleanupConnectionDrag = () => {
+      const hoverTarget = connectionHoverTargetRef.current;
+      if (hoverTarget?.nodeId) {
+        completeConnection(hoverTarget.nodeId, hoverTarget.toHandle);
+        return;
+      }
+      connectionHoverTargetRef.current = null;
+      setHoveredConnectTarget(null);
+      setConnectingSource(null);
+    };
+
+    window.addEventListener("mouseup", cleanupConnectionDrag);
+    window.addEventListener("pointerup", cleanupConnectionDrag);
+    window.addEventListener("blur", cleanupConnectionDrag);
+
+    return () => {
+      window.removeEventListener("mouseup", cleanupConnectionDrag);
+      window.removeEventListener("pointerup", cleanupConnectionDrag);
+      window.removeEventListener("blur", cleanupConnectionDrag);
+      if (bodyStyle) {
+        bodyStyle.userSelect = connectionDragSelectionRef.current.userSelect;
+        bodyStyle.webkitUserSelect = connectionDragSelectionRef.current.webkitUserSelect;
+      }
+    };
+  }, [completeConnection, connectingSource]);
 
   const fetchHistoryAndStats = async () => {
     try {
@@ -9248,8 +10240,7 @@ const handleNodeMouseDown = (e, nid) => {
     const baseNodes = nodesRef.current;
     const baseConnections = connectionsRef.current;
 
-    const clone = (obj) => (typeof structuredClone === "function" ? structuredClone(obj) : JSON.parse(JSON.stringify(obj)));
-    const runtimeNodes = new Map(baseNodes.map((n) => [n.id, clone(n)]));
+    const runtimeNodes = new Map(baseNodes.map((n) => [n.id, cloneCanvasNodeLight(n)]));
 
     const applyNodeUpdate = (id, patch) => {
       const cur = runtimeNodes.get(id);
@@ -9331,7 +10322,7 @@ const handleNodeMouseDown = (e, nid) => {
           const next = [...prev];
           requiredConnections.forEach((conn) => {
             if (!next.some((c) => c.from === conn.from && c.to === conn.to)) {
-              next.push({ id: generateId(), from: conn.from, to: conn.to });
+              next.push({ id: generateId(), from: conn.from, to: conn.to, ...(conn.toHandle ? { toHandle: conn.toHandle } : {}) });
             }
           });
           return next;
@@ -9391,7 +10382,14 @@ const handleNodeMouseDown = (e, nid) => {
         if (!procNode) continue;
 
         const incomingConns = baseConnections.filter((c) => c.to === procNode.id);
-        const sourceNodes = incomingConns.map((c) => runtimeNodes.get(c.from)).filter(Boolean);
+        const primaryIncomingConns = incomingConns.filter(
+          (c) => normalizeConnectionTargetHandle(c.toHandle) !== VIDEO_GEN_INPUT_HANDLE_LAST_FRAME,
+        );
+        const lastFrameIncomingConns = incomingConns.filter(
+          (c) => normalizeConnectionTargetHandle(c.toHandle) === VIDEO_GEN_INPUT_HANDLE_LAST_FRAME,
+        );
+        const sourceNodes = primaryIncomingConns.map((c) => runtimeNodes.get(c.from)).filter(Boolean);
+        const lastFrameSourceNodes = lastFrameIncomingConns.map((c) => runtimeNodes.get(c.from)).filter(Boolean);
 
         const outputConn = baseConnections.find((c) => c.from === procNode.id);
         const targetOutput = outputConn ? runtimeNodes.get(outputConn.to) : null;
@@ -9401,6 +10399,7 @@ const handleNodeMouseDown = (e, nid) => {
         let inputImages = [];
         let sourceText = "";
         const sourceNodeMediaGroups = [];
+        const lastFrameImages = [];
 
         sourceNodes.forEach((sn) => {
           const snImages = sn.data.images || [];
@@ -9410,6 +10409,9 @@ const handleNodeMouseDown = (e, nid) => {
           inputImages.push(...snImages, ...snUploads);
           if (sn.data.text) sourceText += sn.data.text + " ";
         });
+        lastFrameSourceNodes.forEach((sn) => {
+          lastFrameImages.push(...(sn.data.images || []), ...(sn.data.uploadedImages || []));
+        });
         sourceText = sourceText.trim();
 
         const shouldAggregateMultiSourceImg2Video =
@@ -9417,7 +10419,8 @@ const handleNodeMouseDown = (e, nid) => {
         const needsSingle =
           procNode.data.mode === "multi_image_generate" ||
           procNode.data.mode === "text2img" ||
-          procNode.data.mode === "local_text2img";
+          procNode.data.mode === "local_text2img" ||
+          procNode.data.mode === "text2video";
         const effectiveInputCount = needsSingle || shouldAggregateMultiSourceImg2Video ? 1 : inputImages.length;
 
         if (effectiveInputCount === 0 && !needsSingle) {
@@ -9624,6 +10627,7 @@ const handleNodeMouseDown = (e, nid) => {
                 }
               } else if (
                 procNode.type === NODE_TYPES.VIDEO_GEN ||
+                procNode.data.mode === "text2video" ||
                 procNode.data.mode === "img2video" ||
                 procNode.data.mode === "local_img2video"
               ) {
@@ -9639,7 +10643,7 @@ const handleNodeMouseDown = (e, nid) => {
 
                 const payload = {
                   model: procNode.data.model || defaultVideoModelId,
-                  image: shouldAggregateMultiSourceImg2Video ? aggregatedPrimaryImage : inputImages[i],
+                  image: procNode.data.mode === "text2video" ? "" : (shouldAggregateMultiSourceImg2Video ? aggregatedPrimaryImage : inputImages[i]),
                   prompt: buildCanvasNodePrompt(procNode, sourceText) || "natural motion",
                   duration: durationInt,
                   fps: 24,
@@ -9651,7 +10655,7 @@ const handleNodeMouseDown = (e, nid) => {
                     ? { ratio: String(procNode.data.templates?.ratio || "").trim() }
                     : {}),
                 };
-                if (procNode.data.mode === "local_img2video") {
+                  if (procNode.data.mode === "local_img2video") {
                   const resp = await apiFetch(`/api/local/img2video`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -9663,24 +10667,24 @@ const handleNodeMouseDown = (e, nid) => {
                 } else {
                   updateApiDebugStatus("aiChatImage", {
                     status: "loading",
-                    message: `POST /api/ai_chat_image_via_curl part=${resolveWorkbenchAIChatPartEnum({ mode: "img2video" })}`,
+                    message: `POST /api/ai_chat_image_via_curl part=${resolveWorkbenchAIChatPartEnum({ mode: procNode.data.mode === "text2video" ? "text2video" : "img2video" })}`,
                   });
                   let effectiveLastFrameImage = null;
                   try {
                     const modelId = String(payload.model || "").trim();
-                    if (!modelId) throw new Error("缺少图生视频模型ID");
+                    if (!modelId) throw new Error(procNode.data.mode === "text2video" ? "缺少文生视频模型ID" : "缺少图生视频模型ID");
                     const paramList = await resolveModelParamsForId(modelId);
                     const resolvedParamPayload = buildAIChatParamPayload(paramList);
                     const selectedResolution = String(payload.resolution || "").trim();
                     const selectedRatio = String(procNode.data.templates?.ratio || "").trim();
                     const selectedDuration = String(durationInt || "").trim();
-                    const selectedImageType = String(procNode.data.templates?.imageType || "").trim();
+                    const selectedImageType = procNode.data.mode === "text2video" ? "" : String(procNode.data.templates?.imageType || "").trim();
                     const imageTypeOptions = listAIChatParamChoiceOptions(
                       paramList,
                       ["imagetype", "image_type", "模式", "参考模式", "参考类型"]
                     );
                     effectiveLastFrameImage = isFirstLastFrameReferenceSelection(selectedImageType, imageTypeOptions)
-                      ? procNode.data.refImage || null
+                      ? (lastFrameImages[0] || procNode.data.refImage || null)
                       : null;
                     const matchedResolutionId = findAIChatParamValueId(paramList, ["resolution", "分辨率", "清晰度"], selectedResolution);
                     const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比", "画幅", "aspect"], selectedRatio);
@@ -9713,13 +10717,15 @@ const handleNodeMouseDown = (e, nid) => {
                       resolvedParamPayload.ai_video_param_image_type_id = matchedImageTypeId;
                     }
                     const authorizationInfo = resolveMemberAuthorizationInfo();
-                    const imagesPayload = [payload.image, ...aggregatedReferenceImages, effectiveLastFrameImage].filter(Boolean);
+                    const imagesPayload = procNode.data.mode === "text2video"
+                      ? EMPTY_LIST
+                      : [payload.image, ...aggregatedReferenceImages, effectiveLastFrameImage].filter(Boolean);
                     const proxyPayload = {
                       ...(agentDevMode ? { endpoint: "http://192.168.20.12:16313/ai/aiChat" } : {}),
                       authorization: authorizationInfo?.value || "",
                       history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
                       module_enum: WORKBENCH_AI_CHAT_MODULE_ENUM,
-                      part_enum: String(resolveWorkbenchAIChatPartEnum({ mode: "img2video" })),
+                      part_enum: String(resolveWorkbenchAIChatPartEnum({ mode: procNode.data.mode === "text2video" ? "text2video" : "img2video" })),
                       ai_chat_session_id: aiChatSessionIdRef.current || "",
                       ai_chat_model_id: modelId,
                       message: payload.prompt || "natural motion",
@@ -9776,11 +10782,11 @@ const handleNodeMouseDown = (e, nid) => {
                     if (!resultUrl && doneErrMsg) throw new Error(`AI Chat 返回错误：${doneErrMsg}`);
                     if (!resultUrl) {
                       const summary = summarizeAIChatResponse(proxyData);
-                      throw new Error(`aiChat 图生视频未返回可解析URL${summary ? ` | 响应摘要: ${summary}` : ""}`);
+                      throw new Error(`${procNode.data.mode === "text2video" ? "aiChat 文生视频" : "aiChat 图生视频"}未返回可解析URL${summary ? ` | 响应摘要: ${summary}` : ""}`);
                     }
                     updateApiDebugStatus("aiChatImage", {
                       status: "success",
-                      message: `part=${resolveWorkbenchAIChatPartEnum({ mode: "img2video" })} model=${modelId} params=${Object.keys(resolvedParamPayload).length}`,
+                      message: `part=${resolveWorkbenchAIChatPartEnum({ mode: procNode.data.mode === "text2video" ? "text2video" : "img2video" })} model=${modelId} params=${Object.keys(resolvedParamPayload).length}`,
                     });
                   } catch (proxyError) {
                     pushApiDebugDetail("aiChatImage", {
@@ -9797,8 +10803,11 @@ const handleNodeMouseDown = (e, nid) => {
                     }
                     updateApiDebugStatus("aiChatImage", {
                       status: "loading",
-                      message: "img2video 代理失败，回退 /api/img2video",
+                      message: procNode.data.mode === "text2video" ? "text2video 代理失败" : "img2video 代理失败，回退 /api/img2video",
                     });
+                    if (procNode.data.mode === "text2video") {
+                      throw new Error(`text2video 代理失败: ${proxyErrorMsg}`);
+                    }
                     if (shouldAggregateMultiSourceImg2Video && aggregatedReferenceImages.length) {
                       throw new Error(`img2video 代理失败: ${proxyErrorMsg}; 多输入节点聚合模式不支持回退 /api/img2video`);
                     }
@@ -10231,31 +11240,107 @@ const handleNodeMouseDown = (e, nid) => {
     ],
   );
 
+  const handleNodeElementChange = useCallback((nodeId, element) => {
+    if (!nodeId) return;
+    if (element) {
+      nodeElementMapRef.current.set(nodeId, element);
+    } else {
+      nodeElementMapRef.current.delete(nodeId);
+    }
+  }, []);
+
   const renderConnections = () =>
     connections.map((conn) => {
       const fromNode = nodes.find((n) => n.id === conn.from);
       const toNode = nodes.find((n) => n.id === conn.to);
       if (!fromNode || !toNode) return null;
 
-      const x1 = fromNode.x + 280;
-      const y1 = fromNode.y + 58;
-      const x2 = toNode.x;
-      const y2 = toNode.y + 58;
+      const fromAnchor = getNodeAnchorPosition(
+        fromNode,
+        nodeElementMapRef.current.get(fromNode.id),
+        "output",
+      );
+      const toAnchor = getNodeAnchorPosition(
+        toNode,
+        nodeElementMapRef.current.get(toNode.id),
+        "input",
+        conn.toHandle,
+      );
+      const x1 = fromAnchor.x;
+      const y1 = fromAnchor.y;
+      const x2 = toAnchor.x;
+      const y2 = toAnchor.y;
 
       const cp1x = x1 + (x2 - x1) / 2;
       const cp2x = x2 - (x2 - x1) / 2;
       const path = `M ${x1} ${y1} C ${cp1x} ${y1}, ${cp2x} ${y2}, ${x2} ${y2}`;
+      const isSelected = selectedConnectionIds.has(conn.id);
+      const isHovered = hoveredConnectionId === conn.id;
+      const isInteractive = isSelected || isHovered;
+      const t = 0.5;
+      const invT = 1 - t;
+      const midX =
+        invT * invT * invT * x1 +
+        3 * invT * invT * t * cp1x +
+        3 * invT * t * t * cp2x +
+        t * t * t * x2;
+      const midY =
+        invT * invT * invT * y1 +
+        3 * invT * invT * t * y1 +
+        3 * invT * t * t * y2 +
+        t * t * t * y2;
 
       return (
-        <g key={conn.id}>
-          <path d={path} stroke="transparent" strokeWidth="10" fill="none" className="cursor-pointer" />
+        <g
+          key={conn.id}
+          onMouseEnter={() => setHoveredConnectionId(conn.id)}
+          onMouseLeave={() => setHoveredConnectionId((prev) => (prev === conn.id ? "" : prev))}
+        >
           <path
             d={path}
-            stroke={selectedConnectionIds.has(conn.id) ? "#67e8f9" : "rgba(100,116,139,0.72)"}
-            strokeWidth="2.2"
+            stroke="transparent"
+            strokeWidth="16"
+            fill="none"
+            className="cursor-pointer"
+            onMouseDown={(event) => {
+              event.stopPropagation();
+            }}
+            onClick={(event) => handleConnectionClick(event, conn.id)}
+          />
+          <path
+            d={path}
+            stroke={isInteractive ? "#22d3ee" : "rgba(100,116,139,0.72)"}
+            strokeWidth={isInteractive ? "3" : "2.2"}
             fill="none"
             className="transition-colors duration-200"
           />
+          {isInteractive ? (
+            <g
+              className="cursor-pointer"
+              onMouseDown={(event) => {
+                event.stopPropagation();
+              }}
+              onClick={(event) => {
+                event.stopPropagation();
+                deleteConnectionById(conn.id);
+              }}
+            >
+              <circle
+                cx={midX}
+                cy={midY}
+                r="10"
+                fill="white"
+                stroke="#fda4af"
+                strokeWidth="1.5"
+              />
+              <path
+                d={`M ${midX - 3.5} ${midY - 3.5} L ${midX + 3.5} ${midY + 3.5} M ${midX + 3.5} ${midY - 3.5} L ${midX - 3.5} ${midY + 3.5}`}
+                stroke="#e11d48"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+              />
+            </g>
+          ) : null}
           {isRunning && (
             <circle r="3.5" fill="#67e8f9">
               <animateMotion dur="1.5s" repeatCount="indefinite" path={path} />
@@ -10270,11 +11355,39 @@ const handleNodeMouseDown = (e, nid) => {
     const n = nodes.find((nn) => nn.id === connectingSource.nodeId);
     if (!n) return null;
 
-    const x1 = n.x + 280,
-      y1 = n.y + 58;
-    const target = screenToCanvas(mousePos.x, mousePos.y);
+    const sourceAnchor = getNodeAnchorPosition(
+      n,
+      nodeElementMapRef.current.get(n.id),
+      "output",
+    );
+    const x1 = sourceAnchor.x,
+      y1 = sourceAnchor.y;
+    const hoverTargetNode = hoveredConnectTarget?.nodeId ? nodes.find((nn) => nn.id === hoveredConnectTarget.nodeId) : null;
+    const hoverTargetAnchor = hoverTargetNode
+      ? getNodeAnchorPosition(
+          hoverTargetNode,
+          nodeElementMapRef.current.get(hoverTargetNode.id),
+          "input",
+          hoveredConnectTarget?.toHandle,
+        )
+      : null;
+    const target = hoverTargetAnchor || screenToCanvas(mousePos.x, mousePos.y);
     const path = `M ${x1} ${y1} C ${x1 + (target.x - x1) / 2} ${y1}, ${target.x - (target.x - x1) / 2} ${target.y}, ${target.x} ${target.y}`;
-    return <path d={path} stroke="#fbbf24" strokeWidth={2 / viewport.zoom} strokeDasharray="5,5" fill="none" />;
+    return (
+      <>
+        <path d={path} stroke="#fbbf24" strokeWidth={2 / viewport.zoom} strokeDasharray="5,5" fill="none" />
+        {hoverTargetAnchor ? (
+          <circle
+            cx={hoverTargetAnchor.x}
+            cy={hoverTargetAnchor.y}
+            r={8 / viewport.zoom}
+            fill="rgba(34,211,238,0.14)"
+            stroke="#22d3ee"
+            strokeWidth={1.6 / viewport.zoom}
+          />
+        ) : null}
+      </>
+    );
   };
 
   const renderSidebarContent = (onAction) => {
@@ -10295,34 +11408,20 @@ const handleNodeMouseDown = (e, nid) => {
           {
             id: "node_image_generate",
             icon: ImagePlus,
-            label: "图片生成",
-            desc: "背景/手势/生成",
+            label: "图片创作",
+            desc: "文生图 / 图生图 / 多图生图",
             color: "text-purple-400",
             bg: "bg-purple-500/10",
-            onClick: () =>
-              handleAnchorActionClick({
-                partEnum: AI_CHAT_PART_ENUM_203,
-                modelId: defaultImageModelId,
-                to: "node_image_generate",
-                debugLabel: "图片生成",
-                action: () => addNode(NODE_TYPES.PROCESSOR),
-              }),
+            onClick: () => {},
           },
           {
             id: "node_video_generate",
             icon: Film,
-            label: "视频生成",
-            desc: "图生视频/动效",
+            label: "视频创作",
+            desc: "文生视频 / 图生视频 / 首尾帧 / 全能参考",
             color: "text-rose-400",
             bg: "bg-rose-500/10",
-            onClick: () =>
-              handleAnchorActionClick({
-                partEnum: AI_CHAT_PART_ENUM_204,
-                modelId: defaultVideoModelId,
-                to: "node_video_generate",
-                debugLabel: "视频生成",
-                action: () => addNode(NODE_TYPES.VIDEO_GEN),
-              }),
+            onClick: () => {},
           },
           {
             id: "node_output",
@@ -10351,19 +11450,7 @@ const handleNodeMouseDown = (e, nid) => {
             desc: "三合一换图 / 批量动图 / 批量花字",
             color: "text-purple-300",
             bg: "bg-purple-500/10",
-            onClick: (event) => {
-              const target = event?.currentTarget;
-              if (!target || !workspaceShellRef.current) return;
-              const itemRect = target.getBoundingClientRect();
-              const shellRect = workspaceShellRef.current.getBoundingClientRect();
-              setSidebarWorkflowMenu((prev) =>
-                prev
-                  ? null
-                  : {
-                      top: itemRect.top - shellRect.top + itemRect.height / 2,
-                    },
-              );
-            },
+            onClick: () => {},
           },
         ],
       },
@@ -10398,6 +11485,33 @@ const handleNodeMouseDown = (e, nid) => {
                 if (isHovering && target && workspaceShellRef.current) {
                   const itemRect = target.getBoundingClientRect();
                   const shellRect = workspaceShellRef.current.getBoundingClientRect();
+                  if (item.id === "node_image_generate") {
+                    if (sidebarImageCreateMenuCloseTimerRef.current) {
+                      window.clearTimeout(sidebarImageCreateMenuCloseTimerRef.current);
+                      sidebarImageCreateMenuCloseTimerRef.current = null;
+                    }
+                    setSidebarImageCreateMenu({
+                      top: itemRect.top - shellRect.top + itemRect.height / 2,
+                    });
+                  }
+                  if (item.id === "node_video_generate") {
+                    if (sidebarVideoCreateMenuCloseTimerRef.current) {
+                      window.clearTimeout(sidebarVideoCreateMenuCloseTimerRef.current);
+                      sidebarVideoCreateMenuCloseTimerRef.current = null;
+                    }
+                    setSidebarVideoCreateMenu({
+                      top: itemRect.top - shellRect.top + itemRect.height / 2,
+                    });
+                  }
+                  if (item.id === "workflow_bundle") {
+                    if (sidebarWorkflowMenuCloseTimerRef.current) {
+                      window.clearTimeout(sidebarWorkflowMenuCloseTimerRef.current);
+                      sidebarWorkflowMenuCloseTimerRef.current = null;
+                    }
+                    setSidebarWorkflowMenu({
+                      top: itemRect.top - shellRect.top + itemRect.height / 2,
+                    });
+                  }
                   setHoveredSidebarPreview({
                     ...item,
                     active: activeSidebarItemKey === item.id,
@@ -10405,10 +11519,38 @@ const handleNodeMouseDown = (e, nid) => {
                   });
                   return;
                 }
+                if (item.id === "node_image_generate") {
+                  if (sidebarImageCreateMenuCloseTimerRef.current) {
+                    window.clearTimeout(sidebarImageCreateMenuCloseTimerRef.current);
+                  }
+                  sidebarImageCreateMenuCloseTimerRef.current = window.setTimeout(() => {
+                    setSidebarImageCreateMenu(null);
+                    sidebarImageCreateMenuCloseTimerRef.current = null;
+                  }, 140);
+                }
+                if (item.id === "node_video_generate") {
+                  if (sidebarVideoCreateMenuCloseTimerRef.current) {
+                    window.clearTimeout(sidebarVideoCreateMenuCloseTimerRef.current);
+                  }
+                  sidebarVideoCreateMenuCloseTimerRef.current = window.setTimeout(() => {
+                    setSidebarVideoCreateMenu(null);
+                    sidebarVideoCreateMenuCloseTimerRef.current = null;
+                  }, 140);
+                }
+                if (item.id === "workflow_bundle") {
+                  if (sidebarWorkflowMenuCloseTimerRef.current) {
+                    window.clearTimeout(sidebarWorkflowMenuCloseTimerRef.current);
+                  }
+                  sidebarWorkflowMenuCloseTimerRef.current = window.setTimeout(() => {
+                    setSidebarWorkflowMenu(null);
+                    sidebarWorkflowMenuCloseTimerRef.current = null;
+                  }, 140);
+                }
                 setHoveredSidebarPreview(null);
               }}
               onClick={(event) => {
                 setActiveSidebarItemKey(item.id);
+                if (item.id === "node_image_generate" || item.id === "node_video_generate" || item.id === "workflow_bundle") return;
                 safeInvoke(() => item.onClick?.(event), item.label || "侧栏操作");
                 onAction?.();
               }}
@@ -10893,6 +12035,7 @@ const handleNodeMouseDown = (e, nid) => {
           onMouseDown={() => {
             setShowAssetLibrary(false);
             setAssetLibraryDetailWorkId("");
+            setAssetLibraryPickerMode(false);
           }}
         >
           <div
@@ -10914,6 +12057,7 @@ const handleNodeMouseDown = (e, nid) => {
                 onClick={() => {
                   setShowAssetLibrary(false);
                   setAssetLibraryDetailWorkId("");
+                  setAssetLibraryPickerMode(false);
                 }}
                 className="rounded-full p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-900"
                 aria-label="关闭资产库"
@@ -10968,19 +12112,30 @@ const handleNodeMouseDown = (e, nid) => {
               >
                 素材 {assetLibraryAssets.length}
               </button>
-              <button
-                type="button"
-                onClick={saveCurrentCanvasAsWork}
-                disabled={nodes.length === 0 && connections.length === 0}
-                className={`ml-auto inline-flex items-center gap-1 rounded-full px-2.5 py-1.5 text-[10px] transition-colors ${
-                  nodes.length === 0 && connections.length === 0
-                    ? "cursor-not-allowed border border-slate-200 bg-white text-slate-300"
-                    : "border border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:bg-slate-100 hover:text-slate-700"
-                }`}
-              >
-                <Save className="h-3.5 w-3.5" />
-                保存当前作品
-              </button>
+              <div className="group relative ml-auto">
+                <button
+                  type="button"
+                  onClick={saveCurrentCanvasAsWork}
+                  disabled={nodes.length === 0 && connections.length === 0}
+                  className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1.5 text-[10px] transition-colors ${
+                    nodes.length === 0 && connections.length === 0
+                      ? "cursor-not-allowed border border-slate-200 bg-white text-slate-300"
+                      : "border border-cyan-200 bg-cyan-50 text-cyan-700 hover:bg-cyan-100 hover:text-cyan-800"
+                  }`}
+                >
+                  <Save className="h-3.5 w-3.5" />
+                  保存作品
+                </button>
+                {nodes.length === 0 && connections.length === 0 ? null : (
+                  <button
+                    type="button"
+                    className="pointer-events-none absolute right-0 top-[calc(100%-1px)] z-20 w-max rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[10px] text-slate-600 opacity-0 shadow-[0_16px_32px_rgba(15,23,42,0.12)] transition-all hover:border-cyan-200 hover:bg-cyan-50 hover:text-cyan-700 group-hover:pointer-events-auto group-hover:opacity-100"
+                    onClick={saveCurrentCanvasAsNewWork}
+                  >
+                    另存作品
+                  </button>
+                )}
+              </div>
             </div>
             <div className="relative min-h-0 flex-1 overflow-y-auto bg-slate-50/70 p-4 custom-scrollbar">
               {assetLibraryDetailWork ? (
@@ -11005,25 +12160,11 @@ const handleNodeMouseDown = (e, nid) => {
                         <div className="mt-3 text-[12px] leading-6 text-slate-500">
                           {assetLibraryDetailWork.summary || assetLibraryDetailDigest?.summary || "暂无摘要"}
                         </div>
-                        <div className="mt-4 flex flex-wrap gap-1.5 text-[10px] text-slate-400">
-                          <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">
-                            最近更新 {formatAssetLibraryTime(assetLibraryDetailWork.updatedAt || assetLibraryDetailWork.createdAt)}
-                          </span>
-                          <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">
-                            {assetLibraryDetailWork.versionCount || assetLibraryDetailVersions.length || 1} 个版本
-                          </span>
-                          <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">
-                            {assetLibraryDetailAssets.length} 个素材
-                          </span>
-                          <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">
-                            {assetLibraryDetailWork.nodeCount || assetLibraryDetailDigest?.nodeCount || 0} 节点
-                          </span>
-                        </div>
-                        <div className="mt-5 flex items-center justify-between gap-3">
+                        <div className="mt-5 flex flex-wrap items-center gap-3">
                           <button
                             type="button"
                             onClick={() => restoreSnapshotToCanvas(assetLibraryDetailSnapshot, "已恢复作品到画布")}
-                            className="inline-flex items-center gap-1.5 rounded-full bg-slate-900 px-4 py-2 text-[11px] font-medium text-white transition-colors hover:bg-slate-800"
+                            className="inline-flex min-w-[112px] items-center justify-center gap-1.5 rounded-full bg-slate-900 px-5 py-2 text-[11px] font-medium text-white transition-colors hover:bg-slate-800"
                           >
                             <FolderOpen className="h-3.5 w-3.5" />
                             继续创作
@@ -11035,51 +12176,13 @@ const handleNodeMouseDown = (e, nid) => {
                               removeAssetLibraryItem("works", assetLibraryDetailWork.id);
                               setAssetLibraryDetailWorkId("");
                             }}
-                            className="inline-flex items-center gap-1 rounded-full px-1 py-1 text-[10px] text-slate-400 transition-colors hover:text-rose-600"
+                            className="inline-flex min-w-[112px] items-center justify-center gap-1.5 rounded-full border border-slate-200 bg-white px-5 py-2 text-[11px] text-slate-500 transition-colors hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                             删除作品
                           </button>
                         </div>
                       </div>
-                    </div>
-                  </div>
-
-                  <div className="overflow-hidden rounded-[22px] border border-slate-200 bg-white shadow-[0_8px_18px_rgba(15,23,42,0.04)]">
-                    <div className="border-b border-slate-200 px-4 py-3">
-                      <div className="text-[13px] font-semibold text-slate-800">版本历史</div>
-                      <div className="mt-1 text-[11px] text-slate-500">每次保存作品都会在这里保留一个可恢复版本。</div>
-                    </div>
-                    <div className="space-y-1 p-3">
-                      {assetLibraryDetailVersions.length === 0 ? (
-                        <div className="rounded-[18px] border border-dashed border-slate-200 bg-slate-50 px-3 py-6 text-center text-[11px] text-slate-500">
-                          这份作品暂时没有可展示的版本记录。
-                        </div>
-                      ) : null}
-                      {assetLibraryDetailVersions.map((version) => {
-                        const versionDigest = buildSnapshotDigest(version.snapshot);
-                        return (
-                          <div key={version.id} className="flex items-center gap-3 rounded-[16px] px-2 py-2 transition-colors hover:bg-slate-50">
-                            <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-slate-300" />
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-2 text-[11px] text-slate-700">
-                                <span className="font-medium">版本 {version.versionIndex || 1}</span>
-                                <span className="text-slate-400">{formatAssetLibraryTime(version.createdAt)}</span>
-                              </div>
-                              <div className="mt-1 truncate text-[10px] text-slate-400">
-                                {version.summary || versionDigest.summary}
-                              </div>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => restoreSnapshotToCanvas(version.snapshot, `已恢复版本 ${version.versionIndex || 1} 到画布`)}
-                              className="inline-flex shrink-0 items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[10px] text-slate-500 transition-colors hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700"
-                            >
-                              恢复
-                            </button>
-                          </div>
-                        );
-                      })}
                     </div>
                   </div>
 
@@ -11120,7 +12223,7 @@ const handleNodeMouseDown = (e, nid) => {
                               className="inline-flex w-full items-center justify-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[10px] text-slate-500 transition-colors hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700"
                             >
                               <FolderOpen className="h-3 w-3" />
-                              放回画布
+                              {assetLibraryPickerMode ? "选择素材" : "放回画布"}
                             </button>
                           </div>
                         </div>
@@ -11145,7 +12248,11 @@ const handleNodeMouseDown = (e, nid) => {
                     const imageCount = digest.mediaItems.filter((media) => media.kind === "image").length;
                     const videoCount = digest.mediaItems.filter((media) => media.kind === "video").length;
                     return (
-                      <div key={item.id} className="overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-[0_10px_24px_rgba(15,23,42,0.05)]">
+                      <div
+                        key={item.id}
+                        className="cursor-pointer overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-[0_10px_24px_rgba(15,23,42,0.05)] transition-all hover:border-slate-300 hover:shadow-[0_16px_32px_rgba(15,23,42,0.08)]"
+                        onClick={() => setAssetLibraryDetailWorkId(item.id)}
+                      >
                         <div className="flex gap-3 p-3">
                           <div className="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-[18px] border border-slate-200 bg-slate-100">
                             {item.coverUrl ? (
@@ -11206,11 +12313,13 @@ const handleNodeMouseDown = (e, nid) => {
                     const latestVersion = versions[0] || null;
                     const latestSnapshot = latestVersion?.snapshot || item.snapshot;
                     const digest = buildSnapshotDigest(latestSnapshot);
-                    const imageCount = digest.mediaItems.filter((media) => media.kind === "image").length;
-                    const videoCount = digest.mediaItems.filter((media) => media.kind === "video").length;
                     const isExpanded = expandedAssetWorkIds.has(item.id);
                     return (
-                      <div key={item.id} className="overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-[0_10px_24px_rgba(15,23,42,0.05)]">
+                      <div
+                        key={item.id}
+                        className="cursor-pointer overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-[0_10px_24px_rgba(15,23,42,0.05)] transition-all hover:border-slate-300 hover:shadow-[0_16px_32px_rgba(15,23,42,0.08)]"
+                        onClick={() => setAssetLibraryDetailWorkId(item.id)}
+                      >
                         <div className="flex gap-3 p-3">
                           <div className="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-[18px] border border-slate-200 bg-slate-100">
                             {item.coverUrl ? (
@@ -11224,21 +12333,54 @@ const handleNodeMouseDown = (e, nid) => {
                             )}
                           </div>
                           <div className="min-w-0 flex-1">
-                            <div className="truncate text-[15px] font-semibold tracking-[-0.01em] text-slate-950">{item.title || "未命名作品"}</div>
+                            {editingAssetWorkTitleId === item.id ? (
+                              <input
+                                type="text"
+                                value={editingAssetWorkTitleDraft}
+                                autoFocus
+                                className="block w-full rounded-[10px] border border-cyan-200 bg-cyan-50/70 px-2 py-1 text-[15px] font-semibold tracking-[-0.01em] text-slate-950 outline-none ring-2 ring-cyan-100"
+                                onChange={(e) => setEditingAssetWorkTitleDraft(e.target.value)}
+                                onBlur={(e) => {
+                                  if (e.currentTarget.dataset.cancelled === "true") return;
+                                  commitEditAssetWorkTitle(item.id);
+                                }}
+                                onMouseDown={(e) => e.stopPropagation()}
+                                onClick={(e) => e.stopPropagation()}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    commitEditAssetWorkTitle(item.id);
+                                  }
+                                  if (e.key === "Escape") {
+                                    e.preventDefault();
+                                    e.currentTarget.dataset.cancelled = "true";
+                                    cancelEditAssetWorkTitle();
+                                  }
+                                }}
+                              />
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  beginEditAssetWorkTitle(item);
+                                }}
+                                className="block max-w-full truncate rounded-[10px] px-1 py-0.5 text-left text-[15px] font-semibold tracking-[-0.01em] text-slate-950 transition-colors hover:bg-cyan-50 hover:text-cyan-700"
+                                title="点击编辑标题"
+                              >
+                                {item.title || "未命名作品"}
+                              </button>
+                            )}
                             <div className="mt-1 text-[11px] leading-5 text-slate-500">{item.summary || digest.summary}</div>
-                            <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] text-slate-400">
-                              <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">{formatAssetLibraryTime(item.updatedAt || item.createdAt)}</span>
-                              <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">{item.versionCount || versions.length || 1} 个版本</span>
-                              <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">{item.nodeCount || digest.nodeCount} 节点</span>
-                              {imageCount > 0 ? <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">{imageCount} 图</span> : null}
-                              {videoCount > 0 ? <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5">{videoCount} 视频</span> : null}
-                            </div>
                           </div>
                         </div>
                         <div className="flex items-center gap-2 border-t border-slate-200 px-3 py-2.5">
                           <button
                             type="button"
-                            onClick={() => restoreSnapshotToCanvas(latestSnapshot, "已恢复作品到画布")}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              restoreSnapshotToCanvas(latestSnapshot, "已恢复作品到画布");
+                            }}
                             className="inline-flex items-center gap-1.5 rounded-full bg-slate-900 px-3.5 py-1.5 text-[11px] font-medium text-white transition-colors hover:bg-slate-800"
                           >
                             <FolderOpen className="h-3.5 w-3.5" />
@@ -11246,22 +12388,15 @@ const handleNodeMouseDown = (e, nid) => {
                           </button>
                           <button
                             type="button"
-                            onClick={() => setAssetLibraryDetailWorkId(item.id)}
-                            className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] text-slate-500 transition-colors hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700"
-                          >
-                            <Info className="h-3.5 w-3.5" />
-                            查看详情
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
+                            onClick={(e) => {
+                              e.stopPropagation();
                               setExpandedAssetWorkIds((prev) => {
                                 const next = new Set(prev);
                                 if (next.has(item.id)) next.delete(item.id);
                                 else next.add(item.id);
                                 return next;
-                              })
-                            }
+                              });
+                            }}
                             className="inline-flex items-center gap-1.5 rounded-full px-1 py-1.5 text-[11px] text-slate-500 transition-colors hover:text-slate-700"
                           >
                             <History className="h-3.5 w-3.5" />
@@ -11270,7 +12405,8 @@ const handleNodeMouseDown = (e, nid) => {
                           </button>
                           <button
                             type="button"
-                            onClick={() => {
+                            onClick={(e) => {
+                              e.stopPropagation();
                               if (!window.confirm("确认删除这份作品吗？")) return;
                               removeAssetLibraryItem("works", item.id);
                             }}
@@ -11295,11 +12431,14 @@ const handleNodeMouseDown = (e, nid) => {
                                       {version.summary || buildSnapshotDigest(version.snapshot).summary}
                                     </div>
                                   </div>
-                                  <button
-                                    type="button"
-                                    onClick={() => restoreSnapshotToCanvas(version.snapshot, `已恢复版本 ${version.versionIndex || 1} 到画布`)}
-                                    className="inline-flex shrink-0 items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[10px] text-slate-500 transition-colors hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700"
-                                  >
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                restoreSnapshotToCanvas(version.snapshot, `已恢复版本 ${version.versionIndex || 1} 到画布`);
+                              }}
+                              className="inline-flex shrink-0 items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[10px] text-slate-500 transition-colors hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700"
+                            >
                                     恢复
                                   </button>
                                 </div>
@@ -11351,7 +12490,7 @@ const handleNodeMouseDown = (e, nid) => {
                           className="inline-flex items-center gap-1.5 rounded-full bg-slate-900 px-3.5 py-1.5 text-[11px] font-medium text-white transition-colors hover:bg-slate-800"
                         >
                           <FolderOpen className="h-3.5 w-3.5" />
-                          放回画布
+                          {assetLibraryPickerMode ? "选择素材" : "放回画布"}
                         </button>
                       </div>
                     </div>
@@ -11407,19 +12546,54 @@ const handleNodeMouseDown = (e, nid) => {
       ) : null}
 
       <div ref={workspaceShellRef} className="flex-1 flex relative min-h-0 overflow-hidden">
+        <input
+          ref={sidebarImageUploadInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          className="hidden"
+          onChange={(event) => {
+            void handleSidebarMediaUpload(event, "image");
+          }}
+        />
+        <input
+          ref={sidebarVideoUploadInputRef}
+          type="file"
+          accept="video/*"
+          multiple
+          className="hidden"
+          onChange={(event) => {
+            void handleSidebarMediaUpload(event, "video");
+          }}
+        />
         {/* Sidebar */}
         <div className="absolute left-4 top-1/2 z-40 flex -translate-y-1/2 shrink-0 flex-col items-center gap-2">
-          <div className="shrink-0" style={{ width: leftSidebarWidth }}>
+          <div
+            ref={sidebarUploadMenuRef}
+            className="relative shrink-0"
+            style={{ width: leftSidebarWidth }}
+            onMouseEnter={() => {
+              if (sidebarUploadMenuCloseTimerRef.current) {
+                window.clearTimeout(sidebarUploadMenuCloseTimerRef.current);
+                sidebarUploadMenuCloseTimerRef.current = null;
+              }
+              setActiveSidebarItemKey("node_upload");
+              setShowSidebarUploadMenu(true);
+            }}
+            onMouseLeave={() => {
+              if (sidebarUploadMenuCloseTimerRef.current) {
+                window.clearTimeout(sidebarUploadMenuCloseTimerRef.current);
+              }
+              sidebarUploadMenuCloseTimerRef.current = window.setTimeout(() => {
+                setShowSidebarUploadMenu(false);
+                sidebarUploadMenuCloseTimerRef.current = null;
+              }, 140);
+            }}
+          >
             <div className="mx-auto flex w-full rounded-[32px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.96)] p-1.5 shadow-[0_4px_16px_rgba(0,0,0,0.06)] backdrop-blur-xl">
               <button
                 type="button"
-                onClick={() => {
-                  setActiveSidebarItemKey("node_upload");
-                  safeInvoke(() => {
-                    const nextNodeId = addNode(NODE_TYPES.INPUT);
-                    if (nextNodeId) setPendingUploadNodeId(nextNodeId);
-                  }, "图片/视频上传");
-                }}
+                onClick={() => {}}
                 className="animate-bf-breathe flex h-11 w-full scale-[1.05] items-center justify-center rounded-[24px] border border-[#B9E975] bg-[linear-gradient(135deg,#A7E163_0%,#8FD14F_100%)] text-[#1F2937] transition-all duration-200 ease-in-out hover:scale-[1.075] hover:brightness-[1.02]"
                 style={{
                   boxShadow: "0 0 0 4px rgba(163,230,53,0.15), 0 8px 20px rgba(0,0,0,0.12)",
@@ -11430,6 +12604,64 @@ const handleNodeMouseDown = (e, nid) => {
                 <Upload className="h-[18px] w-[18px]" strokeWidth={2.2} />
               </button>
             </div>
+            {showSidebarUploadMenu ? (
+              <div
+                className="absolute left-[calc(100%+14px)] top-1/2 z-[58] w-48 -translate-y-1/2 rounded-[24px] border border-slate-200 bg-[rgba(255,255,255,0.98)] p-2 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
+                onMouseEnter={() => {
+                  if (sidebarUploadMenuCloseTimerRef.current) {
+                    window.clearTimeout(sidebarUploadMenuCloseTimerRef.current);
+                    sidebarUploadMenuCloseTimerRef.current = null;
+                  }
+                  setShowSidebarUploadMenu(true);
+                }}
+                onMouseLeave={() => {
+                  if (sidebarUploadMenuCloseTimerRef.current) {
+                    window.clearTimeout(sidebarUploadMenuCloseTimerRef.current);
+                  }
+                  sidebarUploadMenuCloseTimerRef.current = window.setTimeout(() => {
+                    setShowSidebarUploadMenu(false);
+                    sidebarUploadMenuCloseTimerRef.current = null;
+                  }, 140);
+                }}
+              >
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left text-[12px] text-slate-700 transition-colors hover:bg-slate-50"
+                  onClick={() => {
+                    setShowSidebarUploadMenu(false);
+                    sidebarImageUploadInputRef.current?.click();
+                  }}
+                >
+                  <ImageIcon className="h-4 w-4 text-slate-500" />
+                  <span>上传图片</span>
+                </button>
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left text-[12px] text-slate-700 transition-colors hover:bg-slate-50"
+                  onClick={() => {
+                    setShowSidebarUploadMenu(false);
+                    sidebarVideoUploadInputRef.current?.click();
+                  }}
+                >
+                  <Film className="h-4 w-4 text-slate-500" />
+                  <span>上传视频</span>
+                </button>
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left text-[12px] text-slate-700 transition-colors hover:bg-slate-50"
+                  onClick={() => {
+                    setShowSidebarUploadMenu(false);
+                    setAssetLibraryPickerMode(true);
+                    setAssetLibraryTab("assets");
+                    setAssetLibraryDetailWorkId("");
+                    setShowAssetLibrary(true);
+                  }}
+                >
+                  <FolderOpen className="h-4 w-4 text-slate-500" />
+                  <span>从资产库选择</span>
+                </button>
+              </div>
+            ) : null}
           </div>
           <div
             className="flex h-auto flex-col items-center rounded-[32px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.9)] px-2 py-2.5 shadow-[0_4px_16px_rgba(0,0,0,0.06)] backdrop-blur-xl select-none"
@@ -11566,7 +12798,6 @@ const handleNodeMouseDown = (e, nid) => {
                 <div className="mt-1.5 text-[11px] leading-5 text-slate-400 whitespace-normal break-words">
                   {hoveredSidebarPreview.desc}
                 </div>
-                <div className="mt-2 text-[10px] text-slate-500">点击后会直接创建对应组件或进入对应工作流。</div>
               </div>
             </div>
           </div>
@@ -11577,6 +12808,21 @@ const handleNodeMouseDown = (e, nid) => {
             data-sidebar-workflow-menu="true"
             className="absolute z-[58] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.98)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
             style={{ left: leftSidebarWidth + 18, top: sidebarWorkflowMenu.top }}
+            onMouseEnter={() => {
+              if (sidebarWorkflowMenuCloseTimerRef.current) {
+                window.clearTimeout(sidebarWorkflowMenuCloseTimerRef.current);
+                sidebarWorkflowMenuCloseTimerRef.current = null;
+              }
+            }}
+            onMouseLeave={() => {
+              if (sidebarWorkflowMenuCloseTimerRef.current) {
+                window.clearTimeout(sidebarWorkflowMenuCloseTimerRef.current);
+              }
+              sidebarWorkflowMenuCloseTimerRef.current = window.setTimeout(() => {
+                setSidebarWorkflowMenu(null);
+                sidebarWorkflowMenuCloseTimerRef.current = null;
+              }, 140);
+            }}
           >
             <div className="mb-2 px-1 text-[11px] font-medium text-slate-500">选择工作流</div>
             <div className="space-y-1.5">
@@ -11665,6 +12911,192 @@ const handleNodeMouseDown = (e, nid) => {
           </div>
         ) : null}
 
+        {sidebarImageCreateMenu ? (
+          <div
+            data-sidebar-image-create-menu="true"
+            className="absolute z-[58] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.98)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
+            style={{ left: leftSidebarWidth + 18, top: sidebarImageCreateMenu.top }}
+            onMouseEnter={() => {
+              if (sidebarImageCreateMenuCloseTimerRef.current) {
+                window.clearTimeout(sidebarImageCreateMenuCloseTimerRef.current);
+                sidebarImageCreateMenuCloseTimerRef.current = null;
+              }
+            }}
+            onMouseLeave={() => {
+              if (sidebarImageCreateMenuCloseTimerRef.current) {
+                window.clearTimeout(sidebarImageCreateMenuCloseTimerRef.current);
+              }
+              sidebarImageCreateMenuCloseTimerRef.current = window.setTimeout(() => {
+                setSidebarImageCreateMenu(null);
+                sidebarImageCreateMenuCloseTimerRef.current = null;
+              }, 140);
+            }}
+          >
+            <div className="mb-2 px-1 text-[11px] font-medium text-slate-500">选择创作方式</div>
+            <div className="space-y-1.5">
+              <button
+                type="button"
+                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
+                onClick={() => {
+                  setSidebarImageCreateMenu(null);
+                  safeInvoke(
+                    () =>
+                      handleAnchorActionClick({
+                        partEnum: AI_CHAT_PART_ENUM_203,
+                        modelId: defaultImageModelId,
+                        to: "node_image_generate_text2img",
+                        debugLabel: "文生图",
+                        action: () => createText2ImgTemplate(),
+                      }),
+                    "文生图",
+                  );
+                }}
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
+                  <ImagePlus className="h-[18px] w-[18px]" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-medium text-slate-800">文生图</div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">从提示词直接生成图片</div>
+                </div>
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
+                onClick={() => {
+                  setSidebarImageCreateMenu(null);
+                  safeInvoke(
+                    () =>
+                      handleAnchorActionClick({
+                        partEnum: AI_CHAT_PART_ENUM_203,
+                        modelId: defaultImageModelId,
+                        to: "node_image_generate_img2img",
+                        debugLabel: "图生图",
+                        action: () => createImg2ImgTemplate(),
+                      }),
+                    "图生图",
+                  );
+                }}
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
+                  <Images className="h-[18px] w-[18px]" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-medium text-slate-800">图生图</div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">基于单张参考图继续创作</div>
+                </div>
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
+                onClick={() => {
+                  setSidebarImageCreateMenu(null);
+                  safeInvoke(createMultiImg2ImgTemplate, "多图生图");
+                }}
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
+                  <Layers className="h-[18px] w-[18px]" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-medium text-slate-800">多图生图</div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">多参考图联合生成与重绘</div>
+                </div>
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {sidebarVideoCreateMenu ? (
+          <div
+            data-sidebar-video-create-menu="true"
+            className="absolute z-[58] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.98)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
+            style={{ left: leftSidebarWidth + 18, top: sidebarVideoCreateMenu.top }}
+            onMouseEnter={() => {
+              if (sidebarVideoCreateMenuCloseTimerRef.current) {
+                window.clearTimeout(sidebarVideoCreateMenuCloseTimerRef.current);
+                sidebarVideoCreateMenuCloseTimerRef.current = null;
+              }
+            }}
+            onMouseLeave={() => {
+              if (sidebarVideoCreateMenuCloseTimerRef.current) {
+                window.clearTimeout(sidebarVideoCreateMenuCloseTimerRef.current);
+              }
+              sidebarVideoCreateMenuCloseTimerRef.current = window.setTimeout(() => {
+                setSidebarVideoCreateMenu(null);
+                sidebarVideoCreateMenuCloseTimerRef.current = null;
+              }, 140);
+            }}
+          >
+            <div className="mb-2 px-1 text-[11px] font-medium text-slate-500">选择创作方式</div>
+            <div className="space-y-1.5">
+              <button
+                type="button"
+                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
+                onClick={() => {
+                  setSidebarVideoCreateMenu(null);
+                  safeInvoke(createText2VideoTemplate, "文生视频");
+                }}
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
+                  <Clapperboard className="h-[18px] w-[18px]" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-medium text-slate-800">文生视频</div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">直接用提示词生成视频</div>
+                </div>
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
+                onClick={() => {
+                  setSidebarVideoCreateMenu(null);
+                  safeInvoke(createImg2VideoTemplate, "图生视频");
+                }}
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
+                  <ImagePlus className="h-[18px] w-[18px]" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-medium text-slate-800">图生视频</div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">单张图片生成视频</div>
+                </div>
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
+                onClick={() => {
+                  setSidebarVideoCreateMenu(null);
+                  safeInvoke(createFirstLastFrameVideoTemplate, "首尾帧生视频");
+                }}
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
+                  <GalleryHorizontal className="h-[18px] w-[18px]" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-medium text-slate-800">首尾帧生视频</div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">首帧和尾帧共同约束视频过程</div>
+                </div>
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
+                onClick={() => {
+                  setSidebarVideoCreateMenu(null);
+                  safeInvoke(createOmniReferenceVideoTemplate, "全能生视频");
+                }}
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
+                  <Sparkles className="h-[18px] w-[18px]" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-medium text-slate-800">全能生视频</div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">多参考图联合驱动视频生成</div>
+                </div>
+              </button>
+            </div>
+          </div>
+        ) : null}
+
         {/* Canvas */}
         <div
           ref={canvasRef}
@@ -11707,67 +13139,6 @@ const handleNodeMouseDown = (e, nid) => {
 	          ) : null}
 
 	          {nodes.length === 0 && !hasAgentResultCards ? (
-	            <div className="absolute inset-x-0 top-6 z-20 flex justify-center px-6 pointer-events-none">
-	              <div
-	                className="pointer-events-auto flex w-full max-w-4xl items-center justify-center gap-3 px-2 py-2"
-	                onMouseDown={(e) => e.stopPropagation()}
-              >
-                <button
-                  onClick={() => safeInvoke(createText2ImgTemplate, "打开文生图模板")}
-                  className="group flex min-w-[170px] items-center gap-3 rounded-[20px] border border-slate-200 bg-white px-4 py-3 text-left shadow-[0_10px_24px_rgba(15,23,42,0.06)] transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:bg-slate-50"
-                >
-                  <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-slate-100 ring-1 ring-slate-200 transition-colors group-hover:bg-slate-200">
-                    <Wand2 className="h-5 w-5 text-slate-700" />
-                  </div>
-                  <div>
-                    <div className="text-sm font-semibold text-slate-800">文生图</div>
-                    <div className="mt-0.5 text-[11px] leading-5 text-slate-500">从文字快速起图</div>
-                  </div>
-                </button>
-
-                <button
-                  onClick={() => safeInvoke(createImg2ImgTemplate, "打开图生图模板")}
-                  className="group flex min-w-[170px] items-center gap-3 rounded-[20px] border border-slate-200 bg-white px-4 py-3 text-left shadow-[0_10px_24px_rgba(15,23,42,0.06)] transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:bg-slate-50"
-                >
-                  <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-slate-100 ring-1 ring-slate-200 transition-colors group-hover:bg-slate-200">
-                    <Images className="h-5 w-5 text-slate-700" />
-                  </div>
-                  <div>
-                    <div className="text-sm font-semibold text-slate-800">图生图</div>
-                    <div className="mt-0.5 text-[11px] leading-5 text-slate-500">基于现有素材重绘</div>
-                  </div>
-                </button>
-
-                <button
-                  onClick={() => safeInvoke(createImg2VideoTemplate, "打开图生视频模板")}
-                  className="group flex min-w-[170px] items-center gap-3 rounded-[20px] border border-slate-200 bg-white px-4 py-3 text-left shadow-[0_10px_24px_rgba(15,23,42,0.06)] transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:bg-slate-50"
-                >
-                  <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-slate-100 ring-1 ring-slate-200 transition-colors group-hover:bg-slate-200">
-                    <Clapperboard className="h-5 w-5 text-slate-700" />
-                  </div>
-                  <div>
-                    <div className="text-sm font-semibold text-slate-800">图生视频</div>
-                    <div className="mt-0.5 text-[11px] leading-5 text-slate-500">从单图生成视频流程</div>
-                  </div>
-                </button>
-
-                <button
-                  onClick={() => safeInvoke(createVideoUpscaleTemplate, "打开视频超清模板")}
-                  className="group flex min-w-[170px] items-center gap-3 rounded-[20px] border border-slate-200 bg-white px-4 py-3 text-left shadow-[0_10px_24px_rgba(15,23,42,0.06)] transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:bg-slate-50"
-                >
-                  <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-slate-100 ring-1 ring-slate-200 transition-colors group-hover:bg-slate-200">
-                    <TrendingUp className="h-5 w-5 text-slate-700" />
-                  </div>
-                  <div>
-                    <div className="text-sm font-semibold text-slate-800">视频超清</div>
-                    <div className="mt-0.5 text-[11px] leading-5 text-slate-500">上传视频后直接做画质增强</div>
-                  </div>
-                </button>
-	              </div>
-	            </div>
-	          ) : null}
-
-	          {nodes.length === 0 && !hasAgentResultCards ? (
 	            <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
 	              <div className="flex items-center gap-4 text-[11px] tracking-[0.16em] text-slate-400/75">
 	                <div className="h-px w-14 bg-[linear-gradient(90deg,rgba(148,163,184,0),rgba(148,163,184,0.45),rgba(148,163,184,0))]" />
@@ -11779,23 +13150,44 @@ const handleNodeMouseDown = (e, nid) => {
 
 	          {/* Controls */}
           <div
-            className="absolute bottom-6 z-50 flex gap-2 select-none"
-            style={{ left: leftSidebarWidth + 28 }}
+            className="absolute bottom-6 right-6 z-50 flex gap-2 select-none"
           >
-            <button
-              type="button"
-              onClick={saveCurrentCanvasAsWork}
-              disabled={nodes.length === 0 && connections.length === 0}
-              className={`relative inline-flex items-center gap-1.5 rounded-[16px] px-3 py-2 text-[11px] shadow-[0_18px_36px_rgba(15,23,42,0.08)] transition-colors ${
-                nodes.length === 0 && connections.length === 0
-                  ? "cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400"
-                  : "border border-cyan-200 bg-cyan-50 text-cyan-700 hover:bg-cyan-100 hover:text-cyan-800"
-              }`}
-              title="保存当前作品"
-            >
-              <Save className="h-3.5 w-3.5" />
-              保存作品
-            </button>
+            <div className="group relative">
+              <button
+                type="button"
+                disabled={nodes.length === 0 && connections.length === 0}
+                className={`relative inline-flex h-9 w-9 items-center justify-center rounded-[16px] shadow-[0_18px_36px_rgba(15,23,42,0.08)] transition-colors ${
+                  nodes.length === 0 && connections.length === 0
+                    ? "cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400"
+                    : "border border-cyan-200 bg-cyan-50 text-cyan-700 hover:bg-cyan-100 hover:text-cyan-800"
+                }`}
+                title="保存作品"
+              >
+                <Save className="h-3.5 w-3.5" />
+              </button>
+              {nodes.length === 0 && connections.length === 0 ? null : (
+                <div className="pointer-events-none absolute bottom-[calc(100%-1px)] right-0 z-50 flex w-max gap-1 rounded-[18px] border border-slate-200 bg-white p-1 opacity-0 shadow-[0_18px_36px_rgba(15,23,42,0.14)] transition-all group-hover:pointer-events-auto group-hover:opacity-100">
+                  <button
+                    type="button"
+                    onClick={saveCurrentCanvasAsWork}
+                    className="inline-flex items-center gap-1.5 rounded-[14px] px-3 py-2 text-[11px] text-slate-700 transition-colors hover:bg-cyan-50 hover:text-cyan-700"
+                    title="保存为当前作品的新版本"
+                  >
+                    <Save className="h-3.5 w-3.5" />
+                    保存作品
+                  </button>
+                  <button
+                    type="button"
+                    onClick={saveCurrentCanvasAsNewWork}
+                    className="inline-flex items-center gap-1.5 rounded-[14px] px-3 py-2 text-[11px] text-slate-700 transition-colors hover:bg-cyan-50 hover:text-cyan-700"
+                    title="另存为新作品"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    另存作品
+                  </button>
+                </div>
+              )}
+            </div>
             <button
               type="button"
               onClick={() => setShowAssetLibrary(true)}
@@ -11851,7 +13243,7 @@ const handleNodeMouseDown = (e, nid) => {
 	            ) : null}
 
 	            {nodes.map((n) => (
-	              <NodeComponent
+              <NodeComponent
                 key={n.id}
                 node={n}
                 selected={selectedNodeIds.has(n.id)}
@@ -11868,11 +13260,14 @@ const handleNodeMouseDown = (e, nid) => {
                   pushHistory();
                   startConnection(e, n.id);
                 }}
-                onConnectEnd={(e) => {
-                  e.stopPropagation();
-                  pushHistory();
-                  completeConnection(e, n.id);
+                onConnectTargetHover={(toHandle) => {
+                  handleConnectionTargetHover(n.id, toHandle);
                 }}
+                onConnectTargetLeave={(toHandle) => {
+                  handleConnectionTargetLeave(n.id, toHandle);
+                }}
+                connecting={!!connectingSource}
+                hoveredConnectTarget={hoveredConnectTarget}
                 onPreview={setPreviewImage}
                 onContinue={createConnectedVideoNode}
                 onRetry={() => executeFlow(new Set([n.id]))}
@@ -11887,10 +13282,12 @@ const handleNodeMouseDown = (e, nid) => {
                 onRunVideoRmbg={runVideoRmbg}
                 onRunVideoLineart={runVideoLineart}
                 onRunVideoSplit={runVideoSplit}
+                onRunNode={(nodeId) => executeFlow(new Set([nodeId]))}
                 shouldAutoOpenUploadPicker={pendingUploadNodeId === n.id}
                 onAutoOpenUploadPickerHandled={(nodeId) => {
                   setPendingUploadNodeId((prev) => (prev === nodeId ? "" : prev));
                 }}
+                onNodeElementChange={handleNodeElementChange}
               />
             ))}
 
@@ -12405,7 +13802,9 @@ const handleNodeMouseDown = (e, nid) => {
 	        <PropertyPanel
 	          node={(() => {
 	            const activeNode = activeNodeId ? nodes.find((n) => n.id === activeNodeId) : null;
-	            return activeNode?.type === NODE_TYPES.VIDEO_GEN && activeNode?.data?.mode === "img2video" ? null : activeNode;
+	            if (activeNode?.type === NODE_TYPES.VIDEO_GEN && (activeNode?.data?.mode === "img2video" || activeNode?.data?.mode === "text2video")) return null;
+	            if (activeNode?.type === NODE_TYPES.PROCESSOR && (activeNode?.data?.mode === "text2img" || activeNode?.data?.mode === "multi_image_generate")) return null;
+	            return activeNode;
 	          })()}
 	          updateData={updateNodeData}
 	          onClose={() => setActiveNodeId(null)}
