@@ -11594,13 +11594,19 @@ const handleNodeMouseDown = (e, nid) => {
           continue;
         }
 
+        const shouldAutoUseImg2ImgForImageCreation =
+          procNode.type === NODE_TYPES.PROCESSOR &&
+          procNode.data.mode === "text2img" &&
+          procNode.data.title === "图像创作" &&
+          inputImages.length > 0;
+        const effectiveProcMode = shouldAutoUseImg2ImgForImageCreation ? "multi_image_generate" : procNode.data.mode;
         const shouldAggregateMultiSourceImg2Video =
-          procNode.data.mode === "img2video" && sourceNodeMediaGroups.length > 1;
+          effectiveProcMode === "img2video" && sourceNodeMediaGroups.length > 1;
         const needsSingle =
-          procNode.data.mode === "multi_image_generate" ||
-          procNode.data.mode === "text2img" ||
-          procNode.data.mode === "local_text2img" ||
-          procNode.data.mode === "text2video";
+          effectiveProcMode === "multi_image_generate" ||
+          effectiveProcMode === "text2img" ||
+          effectiveProcMode === "local_text2img" ||
+          effectiveProcMode === "text2video";
         const effectiveInputCount = needsSingle || shouldAggregateMultiSourceImg2Video ? 1 : inputImages.length;
 
         if (effectiveInputCount === 0 && !needsSingle) {
@@ -11622,11 +11628,11 @@ const handleNodeMouseDown = (e, nid) => {
             try {
               let resultUrl = null;
 
-              if (procNode.data.mode === "text2img" || procNode.data.mode === "local_text2img") {
+              if (effectiveProcMode === "text2img" || effectiveProcMode === "local_text2img") {
                 const promptToUse = sourceText || buildCanvasNodePrompt(procNode);
                 if (!promptToUse?.trim()) throw new Error("缺少输入文本提示词");
 
-                if (procNode.data.mode === "local_text2img") {
+                if (effectiveProcMode === "local_text2img") {
                   const resp = await runApiFetch(`/api/local/text2img`, {
                     method: "POST",
                     skipAuth: true,
@@ -12017,7 +12023,7 @@ const handleNodeMouseDown = (e, nid) => {
                     }
                   }
                 }
-              } else if (procNode.data.mode === "multi_image_generate") {
+              } else if (effectiveProcMode === "multi_image_generate") {
                 const promptToUse = sourceText || buildCanvasNodePrompt(procNode);
                 if (!promptToUse?.trim()) throw new Error("缺少图生图提示词");
                 if (!Array.isArray(inputImages) || !inputImages.length) throw new Error("缺少图生图输入图片");
