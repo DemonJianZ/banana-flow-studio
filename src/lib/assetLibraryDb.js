@@ -8,6 +8,7 @@ const createEmptyAssetLibraryStore = () => ({
   works: [],
   workVersions: [],
   assets: [],
+  personas: [],
 });
 
 const openDb = () =>
@@ -67,6 +68,7 @@ export async function loadAssetLibraryDbStore() {
           works: Array.isArray(value.works) ? value.works : [],
           workVersions: Array.isArray(value.workVersions) ? value.workVersions : [],
           assets: Array.isArray(value.assets) ? value.assets : [],
+          personas: Array.isArray(value.personas) ? value.personas : [],
         });
       };
     });
@@ -83,6 +85,7 @@ export async function saveAssetLibraryDbStore(storeValue) {
           works: Array.isArray(storeValue.works) ? storeValue.works : [],
           workVersions: Array.isArray(storeValue.workVersions) ? storeValue.workVersions : [],
           assets: Array.isArray(storeValue.assets) ? storeValue.assets : [],
+          personas: Array.isArray(storeValue.personas) ? storeValue.personas : [],
         }
       : createEmptyAssetLibraryStore();
   await withStore("readwrite", (store, resolve, reject) => {
@@ -94,11 +97,21 @@ export async function saveAssetLibraryDbStore(storeValue) {
 
 export async function migrateAssetLibraryLocalStorage(getLegacyStore) {
   const current = await loadAssetLibraryDbStore();
-  if ((current.drafts && current.drafts.length > 0) || (current.works && current.works.length > 0)) {
+  if (
+    (current.drafts && current.drafts.length > 0) ||
+    (current.works && current.works.length > 0) ||
+    (current.assets && current.assets.length > 0) ||
+    (current.personas && current.personas.length > 0)
+  ) {
     return current;
   }
   const legacy = typeof getLegacyStore === "function" ? getLegacyStore() : createEmptyAssetLibraryStore();
-  if ((legacy.drafts && legacy.drafts.length > 0) || (legacy.works && legacy.works.length > 0)) {
+  if (
+    (legacy.drafts && legacy.drafts.length > 0) ||
+    (legacy.works && legacy.works.length > 0) ||
+    (legacy.assets && legacy.assets.length > 0) ||
+    (legacy.personas && legacy.personas.length > 0)
+  ) {
     await saveAssetLibraryDbStore(legacy);
     return legacy;
   }

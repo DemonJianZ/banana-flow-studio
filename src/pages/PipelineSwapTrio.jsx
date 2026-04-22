@@ -20,6 +20,7 @@ import { resolveMemberAuthorizationInfo, submitAIChatImageTask, viewAIChatModelP
 import { downloadMedia } from "../lib/downloadMedia";
 import { AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2 } from "../config";
 import { findAIChatModelIdByKeywords } from "../lib/aiChatModelResolver";
+import "../styles/pipelineDayTheme.css";
 
 const SWAP_MODE_META = {
   face: {
@@ -898,7 +899,7 @@ const PipelineSwapTrio = () => {
   }, [handleGenerateMotion, motionTargets]);
 
   return (
-    <div className="min-h-screen bg-slate-950 text-white flex flex-col">
+    <div className="pipeline-day-theme min-h-screen bg-slate-950 text-white flex flex-col">
       <header className="px-4 sm:px-6 py-4 border-b border-slate-800 bg-slate-900/60">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex items-center gap-3">

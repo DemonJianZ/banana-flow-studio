@@ -16,6 +16,7 @@ import { Link } from "../router";
 import { useAuth } from "../auth/AuthProvider";
 import AiChatAnchorStatusCard from "../components/AiChatAnchorStatusCard";
 import { downloadMedia } from "../lib/downloadMedia";
+import "../styles/pipelineDayTheme.css";
 
 const DEFAULT_COPY_TEXT = "";
 // Keep defaults in sync with bananaflow/workflows/textoverlay.json.
@@ -487,7 +488,7 @@ const PipelineBatchWordArt = () => {
   }, [handleGenerateMotion, motionTargets]);
 
   return (
-    <div className="min-h-screen bg-slate-950 text-white flex flex-col">
+    <div className="pipeline-day-theme min-h-screen bg-slate-950 text-white flex flex-col">
       <header className="px-4 sm:px-6 py-4 border-b border-slate-800 bg-slate-900/60">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex items-center gap-3">

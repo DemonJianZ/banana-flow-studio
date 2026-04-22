@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
-    "test": "node --test src/tests",
+    "test": "node --test src/tests/*.test.js",
     "lint": "eslint .",
     "preview": "vite preview"
   },

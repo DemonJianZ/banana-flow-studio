@@ -1,4 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import { createPortal } from "react-dom";
 import {
   Upload,
   Image as ImageIcon,
@@ -37,7 +38,6 @@ import {
   Sliders,
   Palette,
   Clapperboard,
-  GalleryHorizontal,
   Film,
   WifiOff,
   FileWarning,
@@ -119,6 +119,7 @@ import { AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2 } from "../config";
 import { findAIChatModelIdByKeywords } from "../lib/aiChatModelResolver";
 import { downloadMedia } from "../lib/downloadMedia";
 import { isVideoContent } from "../lib/mediaType.js";
+import { buildRoleProfileStructuredOutput } from "../lib/roleProfileStructurer.js";
 
 const PreferencesPanel = React.lazy(() => import("../components/agent-canvas/PreferencesPanel"));
 
@@ -224,6 +225,12 @@ const normalizeConnectionTargetHandle = (handle) =>
   String(handle || "").trim() === VIDEO_GEN_INPUT_HANDLE_LAST_FRAME
     ? VIDEO_GEN_INPUT_HANDLE_LAST_FRAME
     : VIDEO_GEN_INPUT_HANDLE_MAIN;
+
+const isAbortLikeError = (error) => {
+  const name = String(error?.name || "").toLowerCase();
+  const message = String(error?.message || error || "").toLowerCase();
+  return name === "aborterror" || message.includes("aborted") || message.includes("已取消");
+};
 
 const LOADING_TIPS = [
   "正在重塑光影氛围...",
@@ -680,6 +687,260 @@ const inferMediaKindFromMediaItems = (items = []) => {
   return "mixed";
 };
 
+const getActivePersonaMentionQuery = (text, caretIndex) => {
+  const beforeCaret = String(text || "").slice(0, Math.max(0, Number(caretIndex) || 0));
+  const match = /(^|[\s，。,.!?;；：:（(【\[])\@([^\s@，。,.!?;；：:）)】\]]*)$/.exec(beforeCaret);
+  if (!match) return null;
+  return {
+    start: beforeCaret.length - match[2].length - 1,
+    query: match[2],
+  };
+};
+
+const renderPersonaMentionText = (text, personaNames = EMPTY_LIST) => {
+  const value = String(text || "");
+  if (!value) return null;
+  const names = Array.from(new Set((personaNames || []).map((name) => String(name || "").trim()).filter(Boolean)))
+    .sort((a, b) => b.length - a.length);
+  if (!names.length) return value;
+
+  const parts = [];
+  let index = 0;
+  while (index < value.length) {
+    const matchedName = names.find((name) => value.startsWith(`@${name}`, index));
+    if (!matchedName) {
+      parts.push(value[index]);
+      index += 1;
+      continue;
+    }
+    const mentionText = `@${matchedName}`;
+    parts.push(
+      <span
+        key={`${index}_${matchedName}`}
+        className="rounded-[6px] bg-cyan-100 px-1 font-semibold text-cyan-700 ring-1 ring-cyan-200/70"
+      >
+        {mentionText}
+      </span>,
+    );
+    index += mentionText.length;
+  }
+  return parts;
+};
+
+const PersonaMentionTextarea = React.forwardRef(({
+  value,
+  onChange,
+  personas = EMPTY_LIST,
+  wrapperClassName = "",
+  className = "",
+  overlayClassName = "",
+  popupClassName = "",
+  onKeyDown,
+  onScroll,
+  ...props
+}, forwardedRef) => {
+  const innerRef = useRef(null);
+  const overlayRef = useRef(null);
+  const [mentionState, setMentionState] = useState(null);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [popupPosition, setPopupPosition] = useState(null);
+  const personaNames = useMemo(
+    () => Array.from(new Set((personas || []).map((item) => String(item?.name || item?.title || "").trim()).filter(Boolean))),
+    [personas],
+  );
+  const suggestions = useMemo(() => {
+    if (!mentionState) return EMPTY_LIST;
+    const query = String(mentionState.query || "").trim().toLowerCase();
+    const filtered = personaNames.filter((name) => !query || name.toLowerCase().includes(query));
+    return filtered.slice(0, 8);
+  }, [mentionState, personaNames]);
+
+  const setTextareaRef = useCallback(
+    (element) => {
+      innerRef.current = element;
+      if (typeof forwardedRef === "function") {
+        forwardedRef(element);
+      } else if (forwardedRef) {
+        forwardedRef.current = element;
+      }
+    },
+    [forwardedRef],
+  );
+
+  const refreshMentionState = useCallback(
+    (nextValue, caretIndex) => {
+      if (!personaNames.length) {
+        setMentionState(null);
+        return;
+      }
+      const nextState = getActivePersonaMentionQuery(nextValue, caretIndex);
+      setMentionState(nextState);
+      setActiveIndex(0);
+    },
+    [personaNames],
+  );
+
+  const emitChange = useCallback(
+    (nextValue) => {
+      if (typeof onChange !== "function") return;
+      onChange({ target: { value: nextValue }, currentTarget: { value: nextValue } });
+    },
+    [onChange],
+  );
+
+  const insertMention = useCallback(
+    (name) => {
+      const textarea = innerRef.current;
+      if (!textarea || !mentionState) return;
+      const safeValue = String(value || "");
+      const selectionEnd = textarea.selectionEnd ?? safeValue.length;
+      const nextText = `${safeValue.slice(0, mentionState.start)}@${name} ${safeValue.slice(selectionEnd)}`;
+      const nextCaret = mentionState.start + name.length + 2;
+      emitChange(nextText);
+      setMentionState(null);
+      window.requestAnimationFrame(() => {
+        textarea.focus();
+        textarea.setSelectionRange(nextCaret, nextCaret);
+      });
+    },
+    [emitChange, mentionState, value],
+  );
+
+  const syncOverlayScroll = useCallback((event) => {
+    if (overlayRef.current) {
+      overlayRef.current.scrollTop = event.currentTarget.scrollTop;
+      overlayRef.current.scrollLeft = event.currentTarget.scrollLeft;
+    }
+    onScroll?.(event);
+  }, [onScroll]);
+
+  const updatePopupPosition = useCallback(() => {
+    const textarea = innerRef.current;
+    if (!textarea || !mentionState || suggestions.length === 0 || typeof window === "undefined") {
+      setPopupPosition(null);
+      return;
+    }
+    const rect = textarea.getBoundingClientRect();
+    const width = Math.min(280, Math.max(180, rect.width || 220));
+    const estimatedHeight = Math.min(340, 34 + suggestions.length * 38);
+    const gap = 8;
+    const viewportWidth = window.innerWidth || 0;
+    const viewportHeight = window.innerHeight || 0;
+    const left = Math.min(Math.max(12, rect.left), Math.max(12, viewportWidth - width - 12));
+    const bottomTop = rect.bottom + gap;
+    const top = bottomTop + estimatedHeight <= viewportHeight - 12
+      ? bottomTop
+      : Math.max(12, rect.top - estimatedHeight - gap);
+    setPopupPosition({ left, top, width });
+  }, [mentionState, suggestions.length]);
+
+  useEffect(() => {
+    updatePopupPosition();
+  }, [updatePopupPosition, value]);
+
+  useEffect(() => {
+    if (!mentionState || suggestions.length === 0) return undefined;
+    window.addEventListener("resize", updatePopupPosition);
+    window.addEventListener("scroll", updatePopupPosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePopupPosition);
+      window.removeEventListener("scroll", updatePopupPosition, true);
+    };
+  }, [mentionState, suggestions.length, updatePopupPosition]);
+
+  const popup =
+    mentionState && suggestions.length > 0 && popupPosition && typeof document !== "undefined"
+      ? createPortal(
+          <div
+            className={`fixed rounded-[16px] border border-slate-200 bg-white p-1.5 shadow-[0_20px_44px_rgba(15,23,42,0.2)] ${popupClassName}`}
+            style={{
+              left: popupPosition.left,
+              top: popupPosition.top,
+              width: popupPosition.width,
+              zIndex: 9999,
+            }}
+          >
+            <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-400">选择人物</div>
+            {suggestions.map((name, index) => (
+              <button
+                key={name}
+                type="button"
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  insertMention(name);
+                }}
+                className={`flex w-full items-center justify-between rounded-[12px] px-3 py-2 text-left text-[12px] transition-colors ${
+                  index === activeIndex ? "bg-cyan-50 text-cyan-700" : "text-slate-700 hover:bg-slate-50"
+                }`}
+              >
+                <span className="truncate">@{name}</span>
+                {index === activeIndex ? <span className="text-[10px] text-cyan-500">Enter</span> : null}
+              </button>
+            ))}
+          </div>,
+          document.body,
+        )
+      : null;
+
+  return (
+    <div className={`relative ${wrapperClassName}`}>
+      <div
+        ref={overlayRef}
+        aria-hidden="true"
+        className={`pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words text-slate-700 ${overlayClassName}`}
+      >
+        {renderPersonaMentionText(value, personaNames)}
+      </div>
+      <textarea
+        {...props}
+        ref={setTextareaRef}
+        value={value}
+        onChange={(event) => {
+          onChange?.(event);
+          refreshMentionState(event.target.value, event.target.selectionStart);
+        }}
+        onClick={(event) => refreshMentionState(event.currentTarget.value, event.currentTarget.selectionStart)}
+        onKeyUp={(event) => {
+          if (["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(event.key)) return;
+          refreshMentionState(event.currentTarget.value, event.currentTarget.selectionStart);
+        }}
+        onScroll={syncOverlayScroll}
+        onBlur={() => {
+          window.setTimeout(() => setMentionState(null), 120);
+        }}
+        onKeyDown={(event) => {
+          if (mentionState && suggestions.length > 0) {
+            if (event.key === "ArrowDown") {
+              event.preventDefault();
+              setActiveIndex((current) => (current + 1) % suggestions.length);
+              return;
+            }
+            if (event.key === "ArrowUp") {
+              event.preventDefault();
+              setActiveIndex((current) => (current - 1 + suggestions.length) % suggestions.length);
+              return;
+            }
+            if (event.key === "Enter" || event.key === "Tab") {
+              event.preventDefault();
+              insertMention(suggestions[activeIndex] || suggestions[0]);
+              return;
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              setMentionState(null);
+              return;
+            }
+          }
+          onKeyDown?.(event);
+        }}
+        className={`relative text-transparent caret-slate-800 selection:bg-cyan-100 ${className}`}
+      />
+      {popup}
+    </div>
+  );
+});
+PersonaMentionTextarea.displayName = "PersonaMentionTextarea";
+
 const isEditableElement = (element) => {
   if (!(element instanceof HTMLElement)) return false;
   if (element.isContentEditable) return true;
@@ -852,6 +1113,33 @@ const normalizeAssetLibraryAsset = (item) => ({
   usageCount: Number(item?.usageCount ?? item?.usage_count ?? 0) || 0,
 });
 
+const normalizeAssetLibraryPersona = (item) => {
+  const now = Date.now();
+  return {
+    id: String(item?.id || "").trim(),
+    name: String(item?.name || item?.title || "").trim(),
+    description: String(item?.description || item?.summary || "").trim(),
+    referenceImage: String(item?.referenceImage || item?.reference_image || item?.coverUrl || item?.cover_url || "").trim(),
+    voiceDescription: String(item?.voiceDescription || item?.voice_description || "").trim(),
+    relationshipNetwork: String(item?.relationshipNetwork || item?.relationship_network || "").trim(),
+    createdAt: Number(item?.createdAt ?? item?.created_at ?? 0) || now,
+    updatedAt: Number(item?.updatedAt ?? item?.updated_at ?? 0) || now,
+  };
+};
+
+const buildPersonaInputNodeText = (persona) => {
+  const name = String(persona?.name || "").trim();
+  const description = String(persona?.description || "").trim();
+  const voiceDescription = String(persona?.voiceDescription || "").trim();
+  const relationshipNetwork = String(persona?.relationshipNetwork || "").trim();
+  const parts = [];
+  if (name) parts.push(`人物名称：${name}`);
+  if (description) parts.push(`人物设定：${description}`);
+  if (voiceDescription) parts.push(`音色描述：${voiceDescription}`);
+  if (relationshipNetwork) parts.push(`关系网络：${relationshipNetwork}`);
+  return parts.join("\n");
+};
+
 const buildAssetLibraryAssetsFromSnapshot = (snapshot, meta = {}) => {
   const timestamp = Number(meta?.createdAt ?? Date.now()) || Date.now();
   return getSnapshotMediaItems(snapshot).map((item) => ({
@@ -911,6 +1199,7 @@ const normalizeAssetLibraryStore = (store) => {
   let works = rawWorks.map(normalizeAssetLibraryWork);
   let workVersions = Array.isArray(store?.workVersions) ? store.workVersions.map(normalizeAssetLibraryWorkVersion) : [];
   let assets = Array.isArray(store?.assets) ? store.assets.map(normalizeAssetLibraryAsset) : [];
+  let personas = Array.isArray(store?.personas) ? store.personas.map(normalizeAssetLibraryPersona) : [];
 
   if (workVersions.length === 0) {
     const generatedVersions = [];
@@ -978,12 +1267,16 @@ const normalizeAssetLibraryStore = (store) => {
     ...work,
     versionCount: work.versionCount || versionCountByWorkId.get(work.id) || 0,
   }));
+  personas = personas
+    .filter((item) => item.id)
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 
   return {
     drafts,
     works,
     workVersions: workVersions.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)),
     assets,
+    personas,
   };
 };
 
@@ -1442,6 +1735,8 @@ const extractAIChatDoneError = (resp) => {
 const NODE_TYPES = {
   INPUT: "input",
   TEXT_INPUT: "text_input",
+  ROLE_INPUT: "role_input",
+  ROLE_STRUCTURER: "role_structurer",
   PROCESSOR: "processor",
   POST_PROCESSOR: "post_processor",
   VIDEO_GEN: "video_gen",
@@ -2154,6 +2449,15 @@ const getDownstreamNodes = (startNodeIds, nodes, connections) => {
 const checkNodeReady = (node, nodes, connections) => {
   if (node.type === NODE_TYPES.INPUT) return (node.data.images?.length || 0) > 0;
   if (node.type === NODE_TYPES.TEXT_INPUT) return (node.data.text?.length || 0) > 0;
+  if (node.type === NODE_TYPES.ROLE_INPUT) return Boolean(node.data.personaId || node.data.referenceImage || node.data.text);
+  if (node.type === NODE_TYPES.ROLE_STRUCTURER) {
+    return Boolean(
+      String(node.data.roleName || "").trim() ||
+        String(node.data.characterSetting || "").trim() ||
+        String(node.data.relationshipNetwork || "").trim() ||
+        String(node.data.worldviewBackground || "").trim()
+    );
+  }
   if (node.type === NODE_TYPES.OUTPUT) return true;
 
   const inputConns = connections.filter((c) => c.to === node.id);
@@ -2162,14 +2466,9 @@ const checkNodeReady = (node, nodes, connections) => {
       .filter((c) => normalizeConnectionTargetHandle(c.toHandle) !== VIDEO_GEN_INPUT_HANDLE_LAST_FRAME)
       .map((c) => nodes.find((n) => n.id === c.from))
       .filter(Boolean);
-    const tailFrameSourceNodes = inputConns
-      .filter((c) => normalizeConnectionTargetHandle(c.toHandle) === VIDEO_GEN_INPUT_HANDLE_LAST_FRAME)
-      .map((c) => nodes.find((n) => n.id === c.from))
-      .filter(Boolean);
     const hasMainImage = mainSourceNodes.some((n) => (n.data.images?.length || 0) > 0 || (n.data.uploadedImages?.length || 0) > 0);
-    const hasTailFrameImage = tailFrameSourceNodes.some((n) => (n.data.images?.length || 0) > 0 || (n.data.uploadedImages?.length || 0) > 0);
     const hasPrompt = mainSourceNodes.some((n) => (n.data.text?.length || 0) > 0) || buildCanvasNodePrompt(node).length > 0;
-    return hasMainImage && hasTailFrameImage && hasPrompt;
+    return hasMainImage && hasPrompt;
   }
   const sourceNodes = inputConns.map((c) => nodes.find((n) => n.id === c.from)).filter(Boolean);
 
@@ -2360,7 +2659,6 @@ const SidebarBtn = ({
       onClick={(event) => onClick?.(event)}
       onMouseEnter={(event) => onHoverChange?.(true, event.currentTarget)}
       onMouseLeave={() => onHoverChange?.(false)}
-      title={[label, desc].filter(Boolean).join(" · ")}
       aria-label={label}
       data-sidebar-workflow-trigger={menuTrigger ? "true" : undefined}
       className={`group relative flex items-center justify-center rounded-full border text-left transition-all duration-200 ${
@@ -2505,8 +2803,10 @@ const PropertyPanel = ({
   imageModelOptions = EMPTY_LIST,
   videoModelOptions = EMPTY_LIST,
   resolveModelParamsForId,
+  personaMentionOptions = EMPTY_LIST,
   embedded = false,
   onRunNode,
+  onCancelNode,
   isReady,
 }) => {
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -2528,7 +2828,7 @@ const PropertyPanel = ({
   }));
   const [imageParamLoading, setImageParamLoading] = useState(false);
   const [imageParamError, setImageParamError] = useState("");
-  const hasConfigNode = !!node && ![NODE_TYPES.INPUT, NODE_TYPES.OUTPUT, NODE_TYPES.TEXT_INPUT].includes(node?.type);
+  const hasConfigNode = !!node && ![NODE_TYPES.INPUT, NODE_TYPES.OUTPUT, NODE_TYPES.TEXT_INPUT, NODE_TYPES.ROLE_INPUT, NODE_TYPES.ROLE_STRUCTURER].includes(node?.type);
 
   const isProcessor = node?.type === NODE_TYPES.PROCESSOR;
   const isPostProcessor = node?.type === NODE_TYPES.POST_PROCESSOR;
@@ -2576,11 +2876,11 @@ const PropertyPanel = ({
     [videoModelOptions, currentVideoModelId]
   );
   const filteredVideoModelOptions = useMemo(() => {
-    if (!isOmniReferenceVideoGen && !isFirstLastFrameVideoGen) return videoModelOptions;
+    if (!isOmniReferenceVideoGen) return videoModelOptions;
     return videoModelOptions.filter((item) =>
       isSeedanceOmniReferenceModel(item?.id, item?.name, item?.label, item?.remark)
     );
-  }, [isFirstLastFrameVideoGen, isOmniReferenceVideoGen, videoModelOptions]);
+  }, [isOmniReferenceVideoGen, videoModelOptions]);
   const supportsReferenceMode = useMemo(
     () =>
       isSeedanceReferenceModeModel(
@@ -3239,6 +3539,21 @@ const PropertyPanel = ({
                 {node.data.status === "loading" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                 {node.data.status === "loading" ? "运行中..." : "运行"}
               </button>
+              {node.data.status === "loading" && onCancelNode ? (
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onCancelNode?.();
+                  }}
+                  className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-[10px] border border-rose-200 bg-rose-50 px-4 text-[12px] font-semibold text-rose-600 transition hover:border-rose-300 hover:bg-rose-100 hover:text-rose-700"
+                  title="取消该节点生成"
+                >
+                  <X className="h-4 w-4" />
+                  取消
+                </button>
+              ) : null}
             </div>
           );
         })()}
@@ -3250,8 +3565,11 @@ const PropertyPanel = ({
               提示词
             </div>
             <div className="relative">
-              <textarea
-            className="w-full resize-none rounded border border-slate-200 bg-white p-2 pb-9 pr-10 text-xs text-slate-700 outline-none transition-colors focus:border-slate-300"
+              <PersonaMentionTextarea
+                wrapperClassName="rounded border border-slate-200 bg-white transition-colors focus-within:border-slate-300"
+                className="w-full resize-none rounded bg-transparent p-2 pb-9 pr-10 text-xs leading-5 outline-none placeholder:text-slate-400"
+                overlayClassName="p-2 pb-9 pr-10 text-xs leading-5"
+                personas={personaMentionOptions}
                 rows={3}
                 placeholder={
                   node.data.mode === "relight"
@@ -3694,6 +4012,7 @@ const NodeComponent = ({
   imageModelOptions = EMPTY_LIST,
   videoModelOptions = EMPTY_LIST,
   resolveModelParamsForId,
+  personaMentionOptions = EMPTY_LIST,
   onDelete,
   onConnectStart,
   onConnectTargetHover,
@@ -3714,7 +4033,9 @@ const NodeComponent = ({
   onRunVideoRmbg,
   onRunVideoLineart,
   onRunVideoSplit,
+  onQuickCreateFromText,
   onRunNode,
+  onCancelNode,
   shouldAutoOpenUploadPicker = false,
   onAutoOpenUploadPickerHandled,
   onNodeElementChange,
@@ -3750,6 +4071,7 @@ const NodeComponent = ({
   const [isUploadDropActive, setIsUploadDropActive] = useState(false);
   const nodeRootRef = useRef(null);
   const simpleMediaUploadInputRef = useRef(null);
+  const videoLastFrameInputRef = useRef(null);
 
   useEffect(() => {
     onNodeElementChange?.(node.id, nodeRootRef.current);
@@ -3863,14 +4185,22 @@ const NodeComponent = ({
   const isInput = node.type === NODE_TYPES.INPUT;
   const isOutput = node.type === NODE_TYPES.OUTPUT;
   const isTextInputNode = node.type === NODE_TYPES.TEXT_INPUT;
+  const isRoleInputNode = node.type === NODE_TYPES.ROLE_INPUT;
+  const isRoleStructurerNode = node.type === NODE_TYPES.ROLE_STRUCTURER;
   const isCompactInput = isInput && !!node.data.compact;
   const isSimpleMediaInputNode = isInput && !isCompactInput;
   const isInlineText2ImgNode = isProcessor && node.data.mode === "text2img";
   const isInlineImg2ImgNode = isProcessor && node.data.mode === "multi_image_generate";
   const isInlineImageGenNode = isInlineText2ImgNode || isInlineImg2ImgNode;
+  const isImageCreationNode = isProcessor && node.data.title === "图像创作";
   const hideInlineAiResults =
     isInlineText2ImgNode || (isVideoGen && (node.data.mode === "img2video" || node.data.mode === "text2video"));
-  const hasDedicatedLastFrameInput = isVideoGen && node.data.mode === "img2video" && !!node.data.firstLastFrameOnly;
+  const hasDedicatedLastFrameInput = false;
+  const preferredReferenceVideoModelId =
+    videoModelOptions.find((item) => isSeedanceOmniReferenceModel(item?.id, item?.name, item?.label, item?.remark))?.id ||
+    node.data.model ||
+    "";
+  const fallbackVideoModelId = videoModelOptions[0]?.id || "";
   const normalizedHoveredConnectHandle = normalizeConnectionTargetHandle(hoveredConnectTarget?.toHandle);
   const isMainInputTargetHighlighted =
     connecting &&
@@ -3904,6 +4234,48 @@ const NodeComponent = ({
   const hasSimpleMediaVideoSelection = hasSimpleMediaSelection && simpleMediaActiveIsVideo;
   const inlineImageSizeOptions = inlineImageParamOptions.size.length ? inlineImageParamOptions.size : ["1k", "2k", "4k"];
   const inlineImageRatioOptions = inlineImageParamOptions.ratio.length ? inlineImageParamOptions.ratio : ASPECT_RATIOS.map((item) => item.label);
+
+  const setVideoReferenceMode = useCallback(
+    (mode) => {
+      if (!isVideoGen) return;
+      const isFirstLast = mode === "first_last";
+      updateData(node.id, {
+        mode: "img2video",
+        title: isFirstLast ? "视频创作" : "全能生视频",
+        model: isFirstLast
+          ? (node.data.model || fallbackVideoModelId)
+          : (preferredReferenceVideoModelId || node.data.model || fallbackVideoModelId),
+        templates: {
+          ...(node.data.templates || {}),
+          imageType: isFirstLast ? "2" : "4",
+          camera: isFirstLast ? "固定镜头(Fixed)" : (node.data.templates?.camera || "推近(Zoom In)"),
+          generate_audio_new: node.data.templates?.generate_audio_new ?? true,
+        },
+        firstLastFrameOnly: isFirstLast,
+        omniReferenceOnly: !isFirstLast,
+      });
+    },
+    [fallbackVideoModelId, isVideoGen, node.data.model, node.data.templates, node.id, preferredReferenceVideoModelId, updateData],
+  );
+
+  const handleVideoLastFrameUpload = useCallback(
+    async (event) => {
+      const files = Array.from(event.target.files || []).filter((file) => isImageFileLike(file));
+      if (!files.length) {
+        event.target.value = "";
+        return;
+      }
+      try {
+        const [lastFrameImage] = await readFilesAsDataUrls(files.slice(0, 1));
+        if (lastFrameImage) {
+          updateData(node.id, { lastFrameImage });
+        }
+      } finally {
+        event.target.value = "";
+      }
+    },
+    [node.id, updateData],
+  );
 
   useEffect(() => {
     if (!shouldAutoOpenUploadPicker || !isSimpleMediaInputNode) return;
@@ -4366,6 +4738,7 @@ const NodeComponent = ({
   if (isPostProcessor) title = node.data.title || TOOL_CARDS[node.data.mode]?.name || "后期增强";
   if (isVideoGen) title = node.data.title || TOOL_CARDS[node.data.mode]?.name || "视频生成";
   if (isTextInputNode) title = "提示词";
+  if (isRoleStructurerNode) title = "角色结构化";
 
   const safeProgressWidth = (() => {
     const total = node.data.total || 0;
@@ -4472,14 +4845,38 @@ const NodeComponent = ({
     );
   };
 
+  const runRoleStructurer = () => {
+    const profile = buildRoleProfileStructuredOutput({
+      roleName: node.data.roleName,
+      characterSetting: node.data.characterSetting,
+      relationshipNetwork: node.data.relationshipNetwork,
+      worldviewBackground: node.data.worldviewBackground,
+    });
+    const outputText = JSON.stringify(profile, null, 2);
+    updateData(node.id, {
+      structuredProfile: profile,
+      text: outputText,
+      status: "success",
+      error: "",
+    });
+  };
+
   const selectedNodeShellClass = selected
     ? "ring-1 ring-cyan-200/90 shadow-[0_28px_64px_rgba(6,182,212,0.12)]"
     : "";
-  const showFloatingDeleteButton = !isCompactInput && !isTextInputNode && !isSimpleMediaInputNode && !isInlineImageGenNode && !isOutput && !isVideoGen;
-  const showFloatingRetryButton = !isCompactInput && !isTextInputNode && !isSimpleMediaInputNode && !isInlineImageGenNode && !isOutput && node.data.status === "error";
+  const showFloatingDeleteButton = Boolean(onDelete);
+  const showFloatingRetryButton = !isCompactInput && !isTextInputNode && !isRoleInputNode && !isRoleStructurerNode && !isSimpleMediaInputNode && !isInlineImageGenNode && !isOutput && node.data.status === "error";
   const nodeZIndex = isVideoGen ? 120 : selected ? 20 : undefined;
   const nodeShellClass = isTextInputNode
     ? `absolute w-[320px] overflow-visible rounded-[16px] border bg-white shadow-[0_18px_42px_rgba(15,23,42,0.08)] flex flex-col transition-colors duration-200 ${
+        node.data.status === "error" ? "border-rose-300" : selected ? "border-cyan-300" : "border-slate-200"
+      } ${selectedNodeShellClass}`
+    : isRoleInputNode
+    ? `absolute h-[76px] w-[76px] overflow-visible rounded-full border bg-white shadow-[0_16px_36px_rgba(15,23,42,0.12)] flex items-center justify-center transition-colors duration-200 ${
+        selected ? "border-cyan-300" : "border-white"
+      } ${selectedNodeShellClass}`
+    : isRoleStructurerNode
+    ? `absolute w-[360px] overflow-visible rounded-[22px] border bg-white shadow-[0_18px_42px_rgba(15,23,42,0.08)] flex flex-col transition-colors duration-200 ${
         node.data.status === "error" ? "border-rose-300" : selected ? "border-cyan-300" : "border-slate-200"
       } ${selectedNodeShellClass}`
     : isOutput
@@ -4499,11 +4896,11 @@ const NodeComponent = ({
   return (
     <div
       ref={nodeRootRef}
-      className={nodeShellClass}
+      className={`${nodeShellClass} group/node`}
       style={{ left: node.x, top: node.y, zIndex: nodeZIndex }}
       onMouseDown={onMouseDown}
     >
-      {!isCompactInput && (
+      {!isCompactInput && !isRoleInputNode && (
         <div className="absolute -top-5 left-0 cursor-grab select-none text-[11px] font-medium tracking-[0.08em] text-slate-500 active:cursor-grabbing">
           {title}
         </div>
@@ -4533,8 +4930,9 @@ const NodeComponent = ({
                 e.stopPropagation();
                 onDelete?.();
               }}
-              className="pointer-events-auto rounded-full border border-slate-200 bg-white p-1.5 text-slate-500 transition-colors hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
+              className="pointer-events-none rounded-full border border-slate-200 bg-white p-1.5 text-slate-500 opacity-0 shadow-[0_8px_20px_rgba(15,23,42,0.12)] transition-all duration-150 hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600 group-hover/node:pointer-events-auto group-hover/node:opacity-100"
               type="button"
+              aria-label="删除节点"
             >
               <X className="w-3.5 h-3.5" />
             </button>
@@ -4543,19 +4941,83 @@ const NodeComponent = ({
       ) : null}
 
       {isVideoGen && (node.data.mode === "img2video" || node.data.mode === "text2video") && (
-        <PropertyPanel
-          embedded
-          node={node}
-          updateData={updateData}
-          onClose={() => {}}
-          apiFetch={apiFetch}
-          onOpenPromptPolishPicker={onOpenPromptPolishPicker}
-          imageModelOptions={imageModelOptions}
-          videoModelOptions={videoModelOptions}
-          resolveModelParamsForId={resolveModelParamsForId}
-          onRunNode={onRunNode}
-          isReady={isReady}
-        />
+        <>
+          {node.data.mode === "img2video" ? (
+            <div className="nodrag space-y-2 px-4 pt-3" onMouseDown={(e) => e.stopPropagation()}>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setVideoReferenceMode("first_last")}
+                  className={`rounded-[10px] border px-3 py-2 text-[11px] font-medium transition-colors ${
+                    node.data.firstLastFrameOnly
+                      ? "border-cyan-200 bg-cyan-50 text-cyan-700"
+                      : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                  }`}
+                >
+                  首尾帧参考
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setVideoReferenceMode("omni")}
+                  className={`rounded-[10px] border px-3 py-2 text-[11px] font-medium transition-colors ${
+                    node.data.omniReferenceOnly
+                      ? "border-cyan-200 bg-cyan-50 text-cyan-700"
+                      : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                  }`}
+                >
+                  全能参考
+                </button>
+              </div>
+              {node.data.firstLastFrameOnly ? (
+                <div className="rounded-[12px] border border-slate-200 bg-white p-2">
+                  <input
+                    ref={videoLastFrameInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(event) => {
+                      void handleVideoLastFrameUpload(event);
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => videoLastFrameInputRef.current?.click()}
+                    className="flex min-h-[72px] w-full items-center gap-3 rounded-[10px] border border-dashed border-slate-200 bg-slate-50 px-3 py-2 text-left transition-colors hover:border-cyan-200 hover:bg-cyan-50/60"
+                  >
+                    <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-[10px] border border-slate-200 bg-white">
+                      {node.data.lastFrameImage ? (
+                        <img src={node.data.lastFrameImage} alt="尾帧参考" className="h-full w-full object-cover" />
+                      ) : (
+                        <ImagePlus className="h-5 w-5 text-slate-400" />
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-[11px] font-semibold text-slate-700">
+                        {node.data.lastFrameImage ? "更换尾帧参考" : "上传尾帧参考"}
+                      </div>
+                      <div className="mt-1 text-[10px] leading-4 text-slate-400">尾帧已嵌入当前视频节点内部</div>
+                    </div>
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          <PropertyPanel
+            embedded
+            node={node}
+            updateData={updateData}
+            onClose={() => {}}
+            apiFetch={apiFetch}
+            onOpenPromptPolishPicker={onOpenPromptPolishPicker}
+            imageModelOptions={imageModelOptions}
+            videoModelOptions={videoModelOptions}
+            resolveModelParamsForId={resolveModelParamsForId}
+            personaMentionOptions={personaMentionOptions}
+            onRunNode={onRunNode}
+            onCancelNode={onCancelNode}
+            isReady={isReady}
+          />
+        </>
       )}
 
       {isSimpleMediaInputNode ? (
@@ -4848,7 +5310,7 @@ const NodeComponent = ({
         </>
       )}
 
-      {isCompactInput && (
+      {isCompactInput && !showFloatingDeleteButton && (
         <button
           onMouseDown={(e) => e.stopPropagation()}
           onClick={(e) => {
@@ -4863,9 +5325,98 @@ const NodeComponent = ({
         </button>
       )}
 
-      <div className={`${isCompactInput ? "nodrag space-y-2 p-1.5" : isTextInputNode || isSimpleMediaInputNode ? "p-0" : isInlineImageGenNode ? "space-y-3 p-3" : "space-y-3 p-4"}`}>
+      <div className={`${isRoleInputNode ? "p-1.5" : isCompactInput ? "nodrag space-y-2 p-1.5" : isTextInputNode || isSimpleMediaInputNode ? "p-0" : isInlineImageGenNode ? "space-y-3 p-3" : "space-y-3 p-4"}`}>
+        {isRoleInputNode ? (
+          <div className="flex h-16 w-16 items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-slate-100">
+            {node.data.referenceImage ? (
+              <img
+                src={node.data.referenceImage}
+                alt={node.data.name || "角色头像"}
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <ImageIcon className="h-6 w-6 text-slate-400" />
+            )}
+          </div>
+        ) : null}
+        {isRoleStructurerNode ? (
+          <div className="nodrag space-y-3" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="rounded-[18px] border border-slate-200 bg-slate-50 px-3 py-2.5">
+              <div className="text-[12px] font-semibold text-slate-800">短剧角色画像结构化</div>
+              <div className="mt-1 text-[10px] leading-4 text-slate-500">
+                仅做结构化抽取、有限推断和一致性校验，不生成剧情。
+              </div>
+            </div>
+
+            <label className="block">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500">角色名称</span>
+              <input
+                type="text"
+                value={node.data.roleName || ""}
+                onChange={(event) => updateData(node.id, { roleName: event.target.value })}
+                placeholder="例如：林晚"
+                className="mt-1.5 w-full rounded-[12px] border border-slate-200 bg-white px-3 py-2 text-[12px] text-slate-800 outline-none focus:border-cyan-200 focus:ring-2 focus:ring-cyan-100"
+              />
+            </label>
+
+            <label className="block">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500">人物设定</span>
+              <textarea
+                value={node.data.characterSetting || ""}
+                onChange={(event) => updateData(node.id, { characterSetting: event.target.value })}
+                placeholder="输入身份、表面状态、真实欲望、恐惧、创伤、价值观等。"
+                rows={3}
+                className="mt-1.5 w-full resize-none rounded-[12px] border border-slate-200 bg-white px-3 py-2 text-[12px] leading-5 text-slate-700 outline-none focus:border-cyan-200 focus:ring-2 focus:ring-cyan-100"
+              />
+            </label>
+
+            <label className="block">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500">关系网络</span>
+              <textarea
+                value={node.data.relationshipNetwork || ""}
+                onChange={(event) => updateData(node.id, { relationshipNetwork: event.target.value })}
+                placeholder="输入与其他人物的关系、依赖、敌对、隐瞒、控制、交易等。"
+                rows={3}
+                className="mt-1.5 w-full resize-none rounded-[12px] border border-slate-200 bg-white px-3 py-2 text-[12px] leading-5 text-slate-700 outline-none focus:border-cyan-200 focus:ring-2 focus:ring-cyan-100"
+              />
+            </label>
+
+            <label className="block">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500">世界观背景</span>
+              <textarea
+                value={node.data.worldviewBackground || ""}
+                onChange={(event) => updateData(node.id, { worldviewBackground: event.target.value })}
+                placeholder="输入阶层规则、行业规则、禁忌、社会压力或故事世界约束。"
+                rows={3}
+                className="mt-1.5 w-full resize-none rounded-[12px] border border-slate-200 bg-white px-3 py-2 text-[12px] leading-5 text-slate-700 outline-none focus:border-cyan-200 focus:ring-2 focus:ring-cyan-100"
+              />
+            </label>
+
+            <button
+              type="button"
+              onClick={runRoleStructurer}
+              disabled={!checkNodeReady(node, [], [])}
+              className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-[12px] bg-slate-900 px-4 text-[12px] font-semibold text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+            >
+              <Scan className="h-3.5 w-3.5" />
+              结构化角色画像
+            </button>
+
+            {node.data.structuredProfile ? (
+              <div className="rounded-[14px] border border-slate-200 bg-slate-950 p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-cyan-200">JSON Schema v1</span>
+                  <span className="text-[10px] text-slate-400">可接后续选题链路</span>
+                </div>
+                <pre className="custom-scrollbar max-h-52 overflow-auto whitespace-pre-wrap break-all text-[10px] leading-4 text-slate-100">
+                  {node.data.text || JSON.stringify(node.data.structuredProfile, null, 2)}
+                </pre>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         {/* Error */}
-        {node.data.status === "error" && !isTextInputNode && !isSimpleMediaInputNode && (
+        {node.data.status === "error" && !isTextInputNode && !isRoleInputNode && !isRoleStructurerNode && !isSimpleMediaInputNode && (
           <div className="rounded-[22px] border border-rose-200 bg-rose-50 px-3 py-2.5 text-xs text-rose-700 flex flex-col gap-2 animate-in fade-in zoom-in-95">
             <div className="flex items-start gap-2">
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-500" />
@@ -5001,6 +5552,21 @@ const NodeComponent = ({
                     {node.data.status === "loading" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                     {node.data.status === "loading" ? "运行中..." : "运行"}
                   </button>
+                  {node.data.status === "loading" && onCancelNode ? (
+                    <button
+                      type="button"
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onCancelNode?.();
+                      }}
+                      className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-[10px] border border-rose-200 bg-rose-50 px-4 text-[12px] font-semibold text-rose-600 transition hover:border-rose-300 hover:bg-rose-100 hover:text-rose-700"
+                      title="取消该节点生成"
+                    >
+                      <X className="h-4 w-4" />
+                      取消
+                    </button>
+                  ) : null}
                 </div>
               </>
             ) : null}
@@ -5030,7 +5596,7 @@ const NodeComponent = ({
               </div>
             ) : null}
 
-            {node.data.status === "success" && (isProcessor || isPostProcessor) && (
+            {node.data.status === "success" && (isProcessor || isPostProcessor) && !isImageCreationNode && (
               <button
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
@@ -5044,7 +5610,7 @@ const NodeComponent = ({
               </button>
             )}
             {/* ✅ 文生图后：一键续上图生图分支 */}
-            {node.data.status === "success" && isProcessor && (node.data.mode === "text2img" || node.data.mode === "local_text2img") && (
+            {node.data.status === "success" && isProcessor && !isImageCreationNode && (node.data.mode === "text2img" || node.data.mode === "local_text2img") && (
               <button
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
@@ -5545,8 +6111,11 @@ const NodeComponent = ({
         {isTextInputNode && (
           <div className="nodrag space-y-3 p-3">
             <div className="relative rounded-[12px] border border-[#E5E7EB] bg-[#F9FAFB] p-3 transition-all focus-within:border-cyan-300 focus-within:bg-white focus-within:shadow-[0_0_0_4px_rgba(34,211,238,0.12)]">
-              <textarea
-                className="block min-h-[132px] w-full resize-none border-0 bg-transparent px-0 py-0 pb-12 text-[13px] leading-6 text-slate-700 outline-none nodrag placeholder:text-slate-400"
+              <PersonaMentionTextarea
+                wrapperClassName="nodrag"
+                className="block min-h-[132px] w-full resize-none border-0 bg-transparent px-0 py-0 pb-12 text-[13px] leading-6 outline-none nodrag placeholder:text-slate-400"
+                overlayClassName="px-0 py-0 pb-12 text-[13px] leading-6"
+                personas={personaMentionOptions}
                 rows={5}
                 placeholder="例如：一只戴宇航头盔的橘猫站在雨夜霓虹街头，电影感打光，低机位，浅景深。"
                 value={node.data.text || ""}
@@ -5581,7 +6150,7 @@ const NodeComponent = ({
 
       {/* Ports */}
       <div className="pointer-events-none absolute top-1/2 w-full -translate-y-1/2 flex justify-between px-0">
-        {node.type !== NODE_TYPES.INPUT && !isTextInputNode && (
+        {node.type !== NODE_TYPES.INPUT && !isTextInputNode && !isRoleInputNode && (
           <div className="pointer-events-auto relative -translate-x-1/2">
             <div
               onMouseEnter={() => onConnectTargetHover?.(VIDEO_GEN_INPUT_HANDLE_MAIN)}
@@ -5603,6 +6172,36 @@ const NodeComponent = ({
           onMouseDown={onConnectStart}
           className="pointer-events-auto ml-auto translate-x-1/2 h-3 w-3 cursor-crosshair rounded-full border border-slate-300 bg-white shadow-[0_0_0_2px_rgba(255,255,255,0.9)] transition-transform duration-150 hover:scale-[1.55] hover:border-cyan-400 hover:bg-cyan-50 z-20"
         />
+        {isTextInputNode ? (
+          <div className="pointer-events-none absolute left-[calc(100%+10px)] top-1/2 z-30 flex w-[92px] -translate-y-1/2 flex-col gap-3 py-8 opacity-0 transition-all duration-150 group-hover/node:pointer-events-auto group-hover/node:opacity-100 hover:opacity-100">
+            <div className="nodrag flex flex-col gap-3">
+              <button
+                type="button"
+                className="inline-flex h-8 items-center gap-1.5 whitespace-nowrap rounded-full border border-cyan-200 bg-white px-2.5 text-[11px] font-medium text-cyan-700 shadow-[0_12px_26px_rgba(15,23,42,0.12)] transition hover:-translate-y-0.5 hover:bg-cyan-50"
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onQuickCreateFromText?.(node.id, "image");
+                }}
+              >
+                <Plus className="h-3 w-3" />
+                <span>生图</span>
+              </button>
+              <button
+                type="button"
+                className="inline-flex h-8 items-center gap-1.5 whitespace-nowrap rounded-full border border-rose-200 bg-white px-2.5 text-[11px] font-medium text-rose-700 shadow-[0_12px_26px_rgba(15,23,42,0.12)] transition hover:-translate-y-0.5 hover:bg-rose-50"
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onQuickCreateFromText?.(node.id, "video");
+                }}
+              >
+                <Plus className="h-3 w-3" />
+                <span>生视频</span>
+              </button>
+            </div>
+          </div>
+        ) : null}
       </div>
       {hasDedicatedLastFrameInput ? (
         <div className="pointer-events-none absolute inset-y-0 left-0 flex w-full items-center justify-between px-0">
@@ -5660,10 +6259,12 @@ const Workbench = () => {
   const [canvasDropUploading, setCanvasDropUploading] = useState(null);
 
   const [isRunning, setIsRunning] = useState(false);
-  const [runScope, setRunScope] = useState("selected_downstream");
+  const runAbortControllerRef = useRef(null);
+  const nodeAbortControllersRef = useRef(new Map());
+  const cancelledNodeIdsRef = useRef(new Set());
+  const runningNodeIdsRef = useRef(new Set());
   const [apiStatus, setApiStatus] = useState("checking");
   const [_globalError, setGlobalError] = useState(null);
-  const [loadingTip, setLoadingTip] = useState("");
   const [previewImage, setPreviewImage] = useState(null);
   const [showHistoryPanel, setShowHistoryPanel] = useState(false);
   const [activeHistoryTab, setActiveHistoryTab] = useState("recent");
@@ -5673,6 +6274,7 @@ const Workbench = () => {
   const [runToast, setRunToast] = useState(null);
   const [hoveredSidebarItemKey, setHoveredSidebarItemKey] = useState("");
   const [hoveredSidebarPreview, setHoveredSidebarPreview] = useState(null);
+  const [sidebarNodeInputMenu, setSidebarNodeInputMenu] = useState(null);
   const [sidebarWorkflowMenu, setSidebarWorkflowMenu] = useState(null);
   const nodeElementMapRef = useRef(new Map());
   const [sidebarImageCreateMenu, setSidebarImageCreateMenu] = useState(null);
@@ -5683,6 +6285,7 @@ const Workbench = () => {
   const [assetLibraryLoaded, setAssetLibraryLoaded] = useState(false);
   const [expandedAssetWorkIds, setExpandedAssetWorkIds] = useState(new Set());
   const [assetLibraryDetailWorkId, setAssetLibraryDetailWorkId] = useState("");
+  const [assetLibraryDetailPersonaId, setAssetLibraryDetailPersonaId] = useState("");
   const [editingAssetWorkTitleId, setEditingAssetWorkTitleId] = useState("");
   const [editingAssetWorkTitleDraft, setEditingAssetWorkTitleDraft] = useState("");
   const [pendingUploadNodeId, setPendingUploadNodeId] = useState("");
@@ -5768,7 +6371,9 @@ const Workbench = () => {
   const sidebarUploadMenuRef = useRef(null);
   const sidebarImageUploadInputRef = useRef(null);
   const sidebarVideoUploadInputRef = useRef(null);
+  const assetLibraryPersonaImageInputRef = useRef(null);
   const sidebarUploadMenuCloseTimerRef = useRef(null);
+  const sidebarNodeInputMenuCloseTimerRef = useRef(null);
   const sidebarImageCreateMenuCloseTimerRef = useRef(null);
   const sidebarVideoCreateMenuCloseTimerRef = useRef(null);
   const sidebarWorkflowMenuCloseTimerRef = useRef(null);
@@ -5803,6 +6408,11 @@ const Workbench = () => {
   const assetLibraryWorks = useMemo(() => assetLibraryStore?.works || EMPTY_LIST, [assetLibraryStore]);
   const assetLibraryWorkVersions = useMemo(() => assetLibraryStore?.workVersions || EMPTY_LIST, [assetLibraryStore]);
   const assetLibraryAssets = useMemo(() => assetLibraryStore?.assets || EMPTY_LIST, [assetLibraryStore]);
+  const assetLibraryPersonas = useMemo(() => assetLibraryStore?.personas || EMPTY_LIST, [assetLibraryStore]);
+  const personaMentionOptions = useMemo(
+    () => (assetLibraryPersonas || []).filter((item) => String(item?.name || "").trim()),
+    [assetLibraryPersonas],
+  );
   const assetLibraryVersionsByWorkId = useMemo(() => {
     const next = new Map();
     assetLibraryWorkVersions.forEach((item) => {
@@ -5830,6 +6440,10 @@ const Workbench = () => {
   const assetLibraryDetailWork = useMemo(
     () => assetLibraryWorks.find((item) => item.id === assetLibraryDetailWorkId) || null,
     [assetLibraryWorks, assetLibraryDetailWorkId],
+  );
+  const assetLibraryDetailPersona = useMemo(
+    () => assetLibraryPersonas.find((item) => item.id === assetLibraryDetailPersonaId) || null,
+    [assetLibraryPersonas, assetLibraryDetailPersonaId],
   );
   const assetLibraryDetailVersions = useMemo(
     () => (assetLibraryDetailWork ? assetLibraryVersionsByWorkId.get(assetLibraryDetailWork.id) || EMPTY_LIST : EMPTY_LIST),
@@ -5866,6 +6480,12 @@ const Workbench = () => {
   }, [assetLibraryDetailWork, assetLibraryDetailWorkId]);
 
   useEffect(() => {
+    if (assetLibraryDetailPersonaId && !assetLibraryDetailPersona) {
+      setAssetLibraryDetailPersonaId("");
+    }
+  }, [assetLibraryDetailPersona, assetLibraryDetailPersonaId]);
+
+  useEffect(() => {
     if (!pendingUploadNodeId) return;
     const exists = nodes.some((item) => item.id === pendingUploadNodeId);
     if (!exists) {
@@ -5887,6 +6507,9 @@ const Workbench = () => {
     if (sidebarUploadMenuCloseTimerRef.current) {
       window.clearTimeout(sidebarUploadMenuCloseTimerRef.current);
     }
+    if (sidebarNodeInputMenuCloseTimerRef.current) {
+      window.clearTimeout(sidebarNodeInputMenuCloseTimerRef.current);
+    }
     if (sidebarImageCreateMenuCloseTimerRef.current) {
       window.clearTimeout(sidebarImageCreateMenuCloseTimerRef.current);
     }
@@ -5897,6 +6520,16 @@ const Workbench = () => {
       window.clearTimeout(sidebarWorkflowMenuCloseTimerRef.current);
     }
   }, []);
+
+  useEffect(() => {
+    if (!sidebarNodeInputMenu) return undefined;
+    const handlePointerDown = (event) => {
+      if (event.target.closest("[data-sidebar-node-input-menu='true']")) return;
+      setSidebarNodeInputMenu(null);
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [sidebarNodeInputMenu]);
 
   useEffect(() => {
     if (!sidebarImageCreateMenu) return undefined;
@@ -6879,6 +7512,8 @@ const Workbench = () => {
       setSelectedConnectionIds(new Set());
       setActiveNodeId(null);
       setShowAssetLibrary(false);
+      setAssetLibraryDetailWorkId("");
+      setAssetLibraryDetailPersonaId("");
       setRunToast({ message: successMessage, type: "info" });
       setTimeout(() => setRunToast(null), 2200);
     },
@@ -6971,6 +7606,8 @@ const Workbench = () => {
     });
     setShowAssetLibrary(true);
     setAssetLibraryTab("works");
+    setAssetLibraryDetailWorkId("");
+    setAssetLibraryDetailPersonaId("");
     setRunToast({ message: forceNewWork ? "已另存为新作品" : "已保存到作品库，并追加一个新版本", type: "info" });
     setTimeout(() => setRunToast(null), 2200);
   }, [canvasId, connections, nodes, viewport]);
@@ -7017,6 +7654,82 @@ const Workbench = () => {
     setEditingAssetWorkTitleId("");
     setEditingAssetWorkTitleDraft("");
   }, [editingAssetWorkTitleDraft, editingAssetWorkTitleId]);
+
+  const createAssetLibraryPersona = useCallback(() => {
+    const now = Date.now();
+    const persona = {
+      id: `persona_${generateId()}`,
+      name: "未命名人物",
+      description: "点击进入详情编辑人物介绍",
+      referenceImage: "",
+      voiceDescription: "",
+      relationshipNetwork: "",
+      createdAt: now,
+      updatedAt: now,
+    };
+    setAssetLibraryStore((prev) => {
+      const current = normalizeAssetLibraryStore(prev);
+      return {
+        ...current,
+        personas: [persona, ...(current.personas || [])].slice(0, 100),
+      };
+    });
+    setAssetLibraryTab("personas");
+    setAssetLibraryDetailWorkId("");
+    setAssetLibraryDetailPersonaId(persona.id);
+  }, []);
+
+  const updateAssetLibraryPersona = useCallback((personaId, patch) => {
+    const normalizedPersonaId = String(personaId || "").trim();
+    if (!normalizedPersonaId || !patch || typeof patch !== "object") return;
+    setAssetLibraryStore((prev) => {
+      const current = normalizeAssetLibraryStore(prev);
+      return {
+        ...current,
+        personas: (current.personas || []).map((item) =>
+          item.id === normalizedPersonaId
+            ? normalizeAssetLibraryPersona({
+                ...item,
+                ...patch,
+                updatedAt: Date.now(),
+              })
+            : item,
+        ),
+      };
+    });
+  }, []);
+
+  const removeAssetLibraryPersona = useCallback((personaId) => {
+    const normalizedPersonaId = String(personaId || "").trim();
+    if (!normalizedPersonaId) return;
+    setAssetLibraryStore((prev) => {
+      const current = normalizeAssetLibraryStore(prev);
+      return {
+        ...current,
+        personas: (current.personas || []).filter((item) => item.id !== normalizedPersonaId),
+      };
+    });
+    setAssetLibraryDetailPersonaId("");
+  }, []);
+
+  const handleAssetLibraryPersonaReferenceUpload = useCallback(
+    async (event) => {
+      const files = Array.from(event.target.files || []).filter((file) => isImageFileLike(file));
+      if (!files.length) {
+        event.target.value = "";
+        return;
+      }
+      try {
+        const [referenceImage] = await readFilesAsDataUrls(files.slice(0, 1));
+        if (referenceImage && assetLibraryDetailPersonaId) {
+          updateAssetLibraryPersona(assetLibraryDetailPersonaId, { referenceImage });
+        }
+      } finally {
+        event.target.value = "";
+      }
+    },
+    [assetLibraryDetailPersonaId, updateAssetLibraryPersona],
+  );
 
   const removeAssetLibraryItem = useCallback((kind, id) => {
     setAssetLibraryStore((prev) => {
@@ -7175,7 +7888,197 @@ const Workbench = () => {
     });
   };
 
+  const arrangeCanvasNodes = useCallback(() => {
+    const currentNodes = Array.isArray(nodesRef.current) ? nodesRef.current : [];
+    if (currentNodes.length === 0) return;
+
+    pushHistory();
+
+    const currentConnections = Array.isArray(connectionsRef.current) ? connectionsRef.current : [];
+    const nodeIds = new Set(currentNodes.map((node) => node.id));
+    const validConnections = currentConnections.filter((conn) => nodeIds.has(conn.from) && nodeIds.has(conn.to));
+    const outgoing = new Map(currentNodes.map((node) => [node.id, []]));
+    const incomingCount = new Map(currentNodes.map((node) => [node.id, 0]));
+
+    validConnections.forEach((conn) => {
+      outgoing.get(conn.from)?.push(conn.to);
+      incomingCount.set(conn.to, (incomingCount.get(conn.to) || 0) + 1);
+    });
+
+    const rankById = new Map();
+    const queue = currentNodes
+      .filter((node) => (incomingCount.get(node.id) || 0) === 0)
+      .sort((a, b) => (a.x - b.x) || (a.y - b.y));
+    const indegree = new Map(incomingCount);
+
+    queue.forEach((node) => rankById.set(node.id, 0));
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+      const node = queue[cursor];
+      const currentRank = rankById.get(node.id) || 0;
+      (outgoing.get(node.id) || []).forEach((targetId) => {
+        rankById.set(targetId, Math.max(rankById.get(targetId) || 0, currentRank + 1));
+        indegree.set(targetId, Math.max(0, (indegree.get(targetId) || 0) - 1));
+        if ((indegree.get(targetId) || 0) === 0) {
+          const targetNode = currentNodes.find((item) => item.id === targetId);
+          if (targetNode) queue.push(targetNode);
+        }
+      });
+    }
+
+    currentNodes.forEach((node) => {
+      if (!rankById.has(node.id)) {
+        const predecessorRanks = validConnections
+          .filter((conn) => conn.to === node.id && rankById.has(conn.from))
+          .map((conn) => rankById.get(conn.from) + 1);
+        rankById.set(node.id, predecessorRanks.length ? Math.max(...predecessorRanks) : 0);
+      }
+    });
+
+    const getNodeSize = (node) => {
+      const element = nodeElementMapRef.current.get(node.id);
+      const width = element?.offsetWidth || (node.type === NODE_TYPES.TEXT_INPUT ? 320 : node.type === NODE_TYPES.ROLE_INPUT ? 76 : 280);
+      const height = element?.offsetHeight || (node.type === NODE_TYPES.ROLE_INPUT ? 76 : 180);
+      return { width, height };
+    };
+
+    const layers = new Map();
+    currentNodes.forEach((node) => {
+      const rank = rankById.get(node.id) || 0;
+      if (!layers.has(rank)) layers.set(rank, []);
+      layers.get(rank).push(node);
+    });
+
+    const sortedRanks = Array.from(layers.keys()).sort((a, b) => a - b);
+    const layerOrderByRank = new Map();
+    sortedRanks.forEach((rank) => {
+      layerOrderByRank.set(
+        rank,
+        layers.get(rank).slice().sort((a, b) => (a.y - b.y) || (a.x - b.x)),
+      );
+    });
+
+    const getNeighborAverageOrder = (nodeId, neighborDirection, orderById) => {
+      const neighborIds = validConnections
+        .filter((conn) => (neighborDirection === "incoming" ? conn.to === nodeId : conn.from === nodeId))
+        .map((conn) => (neighborDirection === "incoming" ? conn.from : conn.to))
+        .filter((id) => orderById.has(id));
+      if (!neighborIds.length) return null;
+      return neighborIds.reduce((sum, id) => sum + orderById.get(id), 0) / neighborIds.length;
+    };
+
+    for (let pass = 0; pass < 4; pass += 1) {
+      const forwardRanks = sortedRanks.slice(1);
+      forwardRanks.forEach((rank) => {
+        const orderById = new Map();
+        sortedRanks.forEach((rankForOrder) => {
+          (layerOrderByRank.get(rankForOrder) || []).forEach((node, index) => {
+            orderById.set(node.id, index);
+          });
+        });
+        layerOrderByRank.set(
+          rank,
+          (layerOrderByRank.get(rank) || []).slice().sort((a, b) => {
+            const aScore = getNeighborAverageOrder(a.id, "incoming", orderById);
+            const bScore = getNeighborAverageOrder(b.id, "incoming", orderById);
+            if (aScore !== null || bScore !== null) return (aScore ?? Number.MAX_SAFE_INTEGER) - (bScore ?? Number.MAX_SAFE_INTEGER);
+            return (a.y - b.y) || (a.x - b.x);
+          }),
+        );
+      });
+
+      const backwardRanks = sortedRanks.slice(0, -1).reverse();
+      backwardRanks.forEach((rank) => {
+        const orderById = new Map();
+        sortedRanks.forEach((rankForOrder) => {
+          (layerOrderByRank.get(rankForOrder) || []).forEach((node, index) => {
+            orderById.set(node.id, index);
+          });
+        });
+        layerOrderByRank.set(
+          rank,
+          (layerOrderByRank.get(rank) || []).slice().sort((a, b) => {
+            const aScore = getNeighborAverageOrder(a.id, "outgoing", orderById);
+            const bScore = getNeighborAverageOrder(b.id, "outgoing", orderById);
+            if (aScore !== null || bScore !== null) return (aScore ?? Number.MAX_SAFE_INTEGER) - (bScore ?? Number.MAX_SAFE_INTEGER);
+            return (a.y - b.y) || (a.x - b.x);
+          }),
+        );
+      });
+    }
+
+    const baseX = Math.min(...currentNodes.map((node) => Number(node.x) || 0));
+    const baseY = Math.min(...currentNodes.map((node) => Number(node.y) || 0));
+    const gapX = 300;
+    const gapY = 84;
+    const layerMetrics = sortedRanks.map((rank) => {
+      const layerNodes = layerOrderByRank.get(rank) || [];
+      const sizes = layerNodes.map(getNodeSize);
+      const width = Math.max(...sizes.map((size) => size.width), 0);
+      const height = sizes.reduce((sum, size) => sum + size.height, 0) + Math.max(0, sizes.length - 1) * gapY;
+      return { rank, nodes: layerNodes, sizes, width, height };
+    });
+    const maxLayerHeight = Math.max(...layerMetrics.map((layer) => layer.height), 0);
+    const xByRank = new Map();
+    let xCursor = baseX;
+    layerMetrics.forEach((layer) => {
+      xByRank.set(layer.rank, xCursor);
+      xCursor += layer.width + gapX;
+    });
+
+    const arrangedPositions = new Map();
+    layerMetrics.forEach((layer) => {
+      let yCursor = baseY + Math.max(0, (maxLayerHeight - layer.height) / 2);
+      layer.nodes.forEach((node, index) => {
+        const size = layer.sizes[index] || getNodeSize(node);
+        arrangedPositions.set(node.id, {
+          x: xByRank.get(layer.rank) || baseX,
+          y: yCursor,
+        });
+        yCursor += size.height + gapY;
+      });
+    });
+
+    const nextNodes = currentNodes.map((node) => ({
+      ...node,
+      ...(arrangedPositions.get(node.id) || {}),
+    }));
+    setNodes(nextNodes);
+    setSelectedNodeIds(new Set());
+    setSelectedConnectionIds(new Set());
+
+    const canvasRect = canvasRef.current?.getBoundingClientRect();
+    if (canvasRect && nextNodes.length > 0) {
+      const padding = 120;
+      const bounds = nextNodes.reduce(
+        (acc, node) => {
+          const size = getNodeSize(node);
+          return {
+            minX: Math.min(acc.minX, node.x),
+            minY: Math.min(acc.minY, node.y),
+            maxX: Math.max(acc.maxX, node.x + size.width),
+            maxY: Math.max(acc.maxY, node.y + size.height),
+          };
+        },
+        { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity },
+      );
+      const contentWidth = Math.max(1, bounds.maxX - bounds.minX + padding * 2);
+      const contentHeight = Math.max(1, bounds.maxY - bounds.minY + padding * 2);
+      const nextZoom = Math.min(1, Math.max(MIN_ZOOM, Math.min(canvasRect.width / contentWidth, canvasRect.height / contentHeight)));
+      setViewport({
+        x: (canvasRect.width - (bounds.maxX - bounds.minX) * nextZoom) / 2 - bounds.minX * nextZoom,
+        y: (canvasRect.height - (bounds.maxY - bounds.minY) * nextZoom) / 2 - bounds.minY * nextZoom,
+        zoom: nextZoom,
+      });
+    }
+
+    setRunToast({ message: "已辅助整理画布节点", type: "info" });
+    setTimeout(() => setRunToast(null), 1800);
+  }, [pushHistory]);
+
   const handleWheel = (e) => {
+    if (isEditableElement(e.target)) {
+      return;
+    }
     if (e.target instanceof Element && e.target.closest('[data-agent-card-root="true"]')) {
       return;
     }
@@ -7406,6 +8309,52 @@ const handleNodeMouseDown = (e, nid) => {
     return screenToCanvas(centerX, centerY);
   }, [screenToCanvas]);
 
+  const createPersonaInputNodeAt = useCallback((persona, point = null) => {
+    const normalizedPersona = normalizeAssetLibraryPersona(persona);
+    if (!normalizedPersona.id) return;
+    const targetPoint = point || getCanvasViewportCenterPoint();
+    const nodeId = generateId();
+    const referenceImage = String(normalizedPersona.referenceImage || "").trim();
+    const structuredProfile = buildRoleProfileStructuredOutput({
+      roleName: normalizedPersona.name,
+      characterSetting: normalizedPersona.description,
+      relationshipNetwork: normalizedPersona.relationshipNetwork,
+      worldviewBackground: "",
+    });
+    const structuredText = JSON.stringify(structuredProfile, null, 2);
+
+    pushHistory();
+    setNodes((prev) => [
+      ...prev,
+      {
+        id: nodeId,
+        type: NODE_TYPES.ROLE_INPUT,
+        x: targetPoint.x - 38,
+        y: targetPoint.y - 38,
+        data: {
+          personaId: normalizedPersona.id,
+          name: normalizedPersona.name || "未命名人物",
+          description: normalizedPersona.description,
+          referenceImage,
+          voiceDescription: normalizedPersona.voiceDescription,
+          relationshipNetwork: normalizedPersona.relationshipNetwork,
+          images: referenceImage ? [referenceImage] : [],
+          structuredProfile,
+          text: structuredText,
+        },
+      },
+    ]);
+    setSelectedNodeIds(new Set([nodeId]));
+    setSelectedConnectionIds(new Set());
+    setActiveNodeId(nodeId);
+    setShowAssetLibrary(false);
+    setAssetLibraryDetailWorkId("");
+    setAssetLibraryDetailPersonaId("");
+    setAssetLibraryPickerMode(false);
+    setRunToast({ message: "已添加角色到画布，并完成结构化", type: "info" });
+    setTimeout(() => setRunToast(null), 2200);
+  }, [getCanvasViewportCenterPoint, pushHistory]);
+
   const handleSidebarMediaUpload = useCallback(
     async (event, mediaKind = "mixed") => {
       const normalizedMediaKind = normalizeInputMediaKind(mediaKind);
@@ -7449,6 +8398,8 @@ const handleNodeMouseDown = (e, nid) => {
       if (!url) return;
       createMediaUploadNodeAt(getCanvasViewportCenterPoint(), [url], isVideoContent(url) ? "video" : "image");
       setShowAssetLibrary(false);
+      setAssetLibraryDetailWorkId("");
+      setAssetLibraryDetailPersonaId("");
       setAssetLibraryPickerMode(false);
       setRunToast({ message: "已将素材放回画布", type: "info" });
       setTimeout(() => setRunToast(null), 2200);
@@ -7588,17 +8539,32 @@ const handleNodeMouseDown = (e, nid) => {
     const cx = r ? r.width / 2 : window.innerWidth / 2;
     const cy = r ? r.height / 2 : window.innerHeight / 2;
     const c = screenToCanvas(cx, cy);
+    const processorModePreset = modePreset === "image_creation" ? "text2img" : (modePreset || "multi_image_generate");
+    const processorDefaults = getProcessorModeDefaults(processorModePreset);
 
     const d = {
       [NODE_TYPES.INPUT]: { images: [], mediaKind: "image", title: getReferenceNodeTitle("image") },
       [NODE_TYPES.TEXT_INPUT]: { text: "" },
+      [NODE_TYPES.ROLE_INPUT]: { personaId: "", name: "", referenceImage: "", images: [], text: "" },
+      [NODE_TYPES.ROLE_STRUCTURER]: {
+        title: "角色结构化",
+        roleName: "",
+        characterSetting: "",
+        relationshipNetwork: "",
+        worldviewBackground: "",
+        structuredProfile: null,
+        text: "",
+        status: "idle",
+        error: "",
+      },
       [NODE_TYPES.PROCESSOR]: {
-        ...getProcessorModeDefaults(modePreset || "multi_image_generate"),
+        ...processorDefaults,
+        title: modePreset === "image_creation" ? "图像创作" : "",
         batchSize: 1,
         uploadedImages: [],
         status: "idle",
         refImage: null,
-        model: getProcessorModeDefaults(modePreset || "multi_image_generate").model || defaultImageModelId,
+        model: processorDefaults.model || defaultImageModelId,
       },
       [NODE_TYPES.POST_PROCESSOR]: {
         mode: "relight",
@@ -7610,16 +8576,36 @@ const handleNodeMouseDown = (e, nid) => {
         model: defaultImageModelId,
       },
       [NODE_TYPES.VIDEO_GEN]: {
-        mode: modePreset === "local_img2video" ? "local_img2video" : "img2video",
+        title: modePreset === "first_last_reference" ? "视频创作" : modePreset === "omni_reference" ? "全能生视频" : "",
+        mode: modePreset === "text2video" ? "text2video" : modePreset === "local_img2video" ? "local_img2video" : "img2video",
         prompt: "",
         templates:
           modePreset === "local_img2video"
             ? { duration: 5, resolution: "480p", ratio: "1:1", note: "" }
-            : { motion: "", camera: "", duration: 5, resolution: "1080p", ratio: "", note: "", generate_audio_new: true },
+            : {
+                motion: "",
+                camera: modePreset === "first_last_reference" ? "固定镜头(Fixed)" : "",
+                duration: 5,
+                resolution: "1080p",
+                ratio: "",
+                note: "",
+                imageType: modePreset === "omni_reference" ? "4" : modePreset === "first_last_reference" ? "2" : "",
+                generate_audio_new: true,
+              },
         batchSize: 1,
         status: "idle",
         refImage: null,
-        model: modePreset === "local_img2video" ? "comfyui-qwen-i2v" : defaultVideoModelId,
+        lastFrameImage: "",
+        firstLastFrameOnly: modePreset === "first_last_reference",
+        omniReferenceOnly: modePreset === "omni_reference",
+        model: modePreset === "local_img2video"
+          ? "comfyui-qwen-i2v"
+          : modePreset === "omni_reference"
+          ? (
+              videoModelOptions.find((item) => isSeedanceOmniReferenceModel(item?.id, item?.name, item?.label, item?.remark))?.id ||
+              defaultVideoModelId
+            )
+          : defaultVideoModelId,
       },
       [NODE_TYPES.OUTPUT]: { images: [] },
     };
@@ -7630,7 +8616,7 @@ const handleNodeMouseDown = (e, nid) => {
     if (selectedNodeIds.size === 1) {
       const sourceId = Array.from(selectedNodeIds)[0];
       const sourceNode = nodes.find((n) => n.id === sourceId);
-      const canInput = t !== NODE_TYPES.INPUT && t !== NODE_TYPES.TEXT_INPUT;
+      const canInput = t !== NODE_TYPES.INPUT && t !== NODE_TYPES.TEXT_INPUT && t !== NODE_TYPES.ROLE_INPUT;
       if (sourceNode && canInput) {
         newConnection = { id: generateId(), from: sourceId, to: id };
         newNode.x = sourceNode.x + 350;
@@ -7754,23 +8740,6 @@ const handleNodeMouseDown = (e, nid) => {
     ], { alignToViewportCenter: true });
   };
 
-  const createFirstLastFrameVideoTemplate = () => {
-    const n0 = { id: generateId(), type: NODE_TYPES.TEXT_INPUT, x: 100, y: 220, data: { text: "让首尾画面自然衔接，形成平滑的镜头运动" } };
-    const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 20, data: { images: [], mediaKind: "image", title: "图片参考（首帧）" } };
-    const n2 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 430, data: { images: [], mediaKind: "image", title: "图片参考（尾帧）" } };
-    const firstLastModelId =
-      videoModelOptions.find((item) => isSeedanceOmniReferenceModel(item?.id, item?.name, item?.label, item?.remark))?.id ||
-      defaultVideoModelId;
-    const n3 = { id: generateId(), type: NODE_TYPES.VIDEO_GEN, x: 500, y: 220, data: { title: "首尾帧生视频", mode: "img2video", model: firstLastModelId, prompt: "", templates: { motion: "标准(Standard)", camera: "固定镜头(Fixed)", duration: 5, resolution: "1080p", ratio: "", note: "", imageType: "2", generate_audio_new: true }, batchSize: 1, status: "idle", refImage: null, firstLastFrameOnly: true } };
-    const n4 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 220, data: { images: [] } };
-    appendTemplateGraph([n0, n1, n2, n3, n4], [
-      { id: generateId(), from: n0.id, to: n3.id },
-      { id: generateId(), from: n1.id, to: n3.id },
-      { id: generateId(), from: n2.id, to: n3.id, toHandle: VIDEO_GEN_INPUT_HANDLE_LAST_FRAME },
-      { id: generateId(), from: n3.id, to: n4.id },
-    ], { alignToViewportCenter: true });
-  };
-
   const createOmniReferenceVideoTemplate = () => {
     const n0 = { id: generateId(), type: NODE_TYPES.TEXT_INPUT, x: 100, y: 200, data: { text: "综合参考图中的主体、风格和镜头语言，生成自然视频" } };
     const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 20, data: { images: [], mediaKind: "image", title: getReferenceNodeTitle("image") } };
@@ -7861,6 +8830,110 @@ const handleNodeMouseDown = (e, nid) => {
     setSelectedNodeIds(new Set([newNodeId]));
   };
 
+  const createPromptQuickChain = useCallback((sourceNodeId, kind) => {
+    const sourceNode = nodesRef.current.find((n) => n.id === sourceNodeId && n.type === NODE_TYPES.TEXT_INPUT);
+    if (!sourceNode) return;
+
+    pushHistory();
+
+    const isVideo = kind === "video";
+    const creativeNodeId = generateId();
+    const outputNodeId = generateId();
+    const outgoingCount = (connectionsRef.current || []).filter((conn) => conn.from === sourceNodeId).length;
+    const creativeX = sourceNode.x + 390;
+    const creativeY = sourceNode.y + (isVideo ? 220 : 0) + Math.min(outgoingCount, 4) * 18;
+    const outputX = creativeX + 360;
+    const outputY = creativeY;
+    const imageDefaults = getProcessorModeDefaults("text2img");
+
+    const creativeNode = isVideo
+      ? {
+          id: creativeNodeId,
+          type: NODE_TYPES.VIDEO_GEN,
+          x: creativeX,
+          y: creativeY,
+          data: {
+            title: "视频创作",
+            mode: "text2video",
+            model: defaultVideoModelId,
+            prompt: "",
+            templates: {
+              motion: "标准(Standard)",
+              camera: "推近(Zoom In)",
+              duration: 5,
+              resolution: "1080p",
+              ratio: "",
+              note: "",
+              generate_audio_new: true,
+            },
+            batchSize: 1,
+            status: "idle",
+            refImage: null,
+          },
+        }
+      : {
+          id: creativeNodeId,
+          type: NODE_TYPES.PROCESSOR,
+          x: creativeX,
+          y: creativeY,
+          data: {
+            ...imageDefaults,
+            title: "图像创作",
+            batchSize: 1,
+            uploadedImages: [],
+            status: "idle",
+            refImage: null,
+            model: imageDefaults.model || defaultImageModelId,
+          },
+        };
+
+    const outputNode = {
+      id: outputNodeId,
+      type: NODE_TYPES.OUTPUT,
+      x: outputX,
+      y: outputY,
+      data: { images: [] },
+    };
+
+    setNodes((prev) => [...prev, creativeNode, outputNode]);
+    setConnections((prev) => [
+      ...prev,
+      { id: generateId(), from: sourceNodeId, to: creativeNodeId },
+      { id: generateId(), from: creativeNodeId, to: outputNodeId },
+    ]);
+    setSelectedNodeIds(new Set([creativeNodeId]));
+    setSelectedConnectionIds(new Set());
+  }, [defaultImageModelId, defaultVideoModelId, pushHistory]);
+
+  const createImageOperationResultNode = useCallback((sourceNodeId, resultImages, title) => {
+    const safeImages = (Array.isArray(resultImages) ? resultImages : [])
+      .map((item) => String(item || "").trim())
+      .filter(Boolean);
+    if (!safeImages.length) return "";
+
+    const sourceNode = nodesRef.current.find((node) => node.id === sourceNodeId);
+    if (!sourceNode) return "";
+
+    const resultNodeId = generateId();
+    const outgoingCount = (connectionsRef.current || []).filter((connection) => connection.from === sourceNodeId).length;
+    const resultNode = {
+      id: resultNodeId,
+      type: NODE_TYPES.OUTPUT,
+      x: sourceNode.x + 350,
+      y: sourceNode.y + Math.min(outgoingCount, 5) * 64,
+      data: {
+        title,
+        images: safeImages,
+      },
+    };
+
+    setNodes((prev) => [...prev, resultNode]);
+    setConnections((prev) => [...prev, { id: generateId(), from: sourceNodeId, to: resultNodeId }]);
+    setSelectedNodeIds(new Set([resultNodeId]));
+    setSelectedConnectionIds(new Set());
+    return resultNodeId;
+  }, []);
+
   const runCompactRemoveWatermark = useCallback(
     async (sourceNodeId, imageIndex = 0) => {
       try {
@@ -7873,7 +8946,7 @@ const handleNodeMouseDown = (e, nid) => {
           throw new Error("缺少去水印输入图片");
         }
 
-        const nextImages = [...images];
+        const resultImages = [];
         for (const { item, index } of imageEntries) {
           const resp = await apiFetch(`/api/remove_watermark`, {
             method: "POST",
@@ -7894,15 +8967,11 @@ const handleNodeMouseDown = (e, nid) => {
           if (!nextImage) {
             throw new Error("去水印未返回结果");
           }
-          nextImages[index] = nextImage;
+          resultImages.push(nextImage);
         }
 
         pushHistory();
-        updateNodeData(sourceNodeId, {
-          images: nextImages,
-          status: "idle",
-          error: "",
-        });
+        createImageOperationResultNode(sourceNodeId, resultImages, "去水印结果");
         setRunToast({
           message: imageEntries.length > 1 ? `批量去水印完成，共 ${imageEntries.length} 张` : "去水印完成",
           type: "info",
@@ -7915,7 +8984,7 @@ const handleNodeMouseDown = (e, nid) => {
         throw error;
       }
     },
-    [apiFetch, pushHistory],
+    [apiFetch, createImageOperationResultNode, pushHistory],
   );
 
   const runCompactRmbg = useCallback(
@@ -7930,7 +8999,7 @@ const handleNodeMouseDown = (e, nid) => {
           throw new Error("缺少抠图输入图片");
         }
 
-        const nextImages = [...images];
+        const resultImages = [];
         for (const { item, index } of imageEntries) {
           const resp = await apiFetch(`/api/rmbg`, {
             method: "POST",
@@ -7951,15 +9020,11 @@ const handleNodeMouseDown = (e, nid) => {
           if (!nextImage) {
             throw new Error("抠图未返回结果");
           }
-          nextImages[index] = nextImage;
+          resultImages.push(nextImage);
         }
 
         pushHistory();
-        updateNodeData(sourceNodeId, {
-          images: nextImages,
-          status: "idle",
-          error: "",
-        });
+        createImageOperationResultNode(sourceNodeId, resultImages, "抠图结果");
         setRunToast({
           message: imageEntries.length > 1 ? `批量抠图完成，共 ${imageEntries.length} 张` : "抠图完成",
           type: "info",
@@ -7972,7 +9037,7 @@ const handleNodeMouseDown = (e, nid) => {
         throw error;
       }
     },
-    [apiFetch, pushHistory],
+    [apiFetch, createImageOperationResultNode, pushHistory],
   );
 
   // ✅ 继续图生图：在“文生图(text2img)”后，自动接：输入 -> 图生图 -> 输出
@@ -10229,33 +11294,46 @@ const handleNodeMouseDown = (e, nid) => {
     );
   };
 
-  const handleRunClick = () => {
-    let targetNodes = [];
-    const allAiNodes = nodes.filter((n) => [NODE_TYPES.PROCESSOR, NODE_TYPES.POST_PROCESSOR, NODE_TYPES.VIDEO_GEN].includes(n.type));
-
-    if (runScope === "all") targetNodes = allAiNodes;
-    else if (runScope === "selected") targetNodes = allAiNodes.filter((n) => selectedNodeIds.has(n.id));
-    else if (runScope === "selected_downstream") {
-      const startIds = Array.from(selectedNodeIds).filter((id) => allAiNodes.find((n) => n.id === id));
-      if (startIds.length === 0) {
-        setGlobalError("请先选中起始节点");
-        return;
+  const cancelCurrentGeneration = useCallback(() => {
+    const controller = runAbortControllerRef.current;
+    if (!controller || controller.signal.aborted) return;
+    controller.abort(new DOMException("生成已取消", "AbortError"));
+    nodeAbortControllersRef.current.forEach((nodeController) => {
+      if (!nodeController.signal.aborted) {
+        nodeController.abort(new DOMException("生成已取消", "AbortError"));
       }
-      const downstreamIds = getDownstreamNodes(startIds, nodes, connections);
-      targetNodes = allAiNodes.filter((n) => downstreamIds.has(n.id));
-    }
+    });
+    setRunToast({ message: "正在取消当前生成...", type: "info" });
+    setTimeout(() => setRunToast(null), 1800);
+  }, []);
 
-    if (targetNodes.length === 0) {
-      setGlobalError("没有可运行的节点");
-      return;
+  const cancelNodeGeneration = useCallback((nodeId) => {
+    const normalizedNodeId = String(nodeId || "").trim();
+    if (!normalizedNodeId) return;
+    cancelledNodeIdsRef.current.add(normalizedNodeId);
+    const controller = nodeAbortControllersRef.current.get(normalizedNodeId);
+    if (controller && !controller.signal.aborted) {
+      controller.abort(new DOMException("节点生成已取消", "AbortError"));
     }
-
-    let taskCount = 0;
-    targetNodes.forEach((n) => (taskCount += n.data.batchSize || 1));
-    setRunToast({ message: `准备执行：${targetNodes.length} 个节点 / 共 ${taskCount} 次生成任务`, type: "info" });
-    setTimeout(() => setRunToast(null), 3000);
-    executeFlow(new Set(targetNodes.map((n) => n.id)));
-  };
+    setNodes((prev) =>
+      prev.map((node) =>
+        node.id === normalizedNodeId && node.data?.status === "loading"
+          ? {
+              ...node,
+              data: {
+                ...node.data,
+                status: "idle",
+                error: "已取消",
+                progress: 0,
+                total: 0,
+              },
+            }
+          : node,
+      ),
+    );
+    setRunToast({ message: "已取消该节点生成", type: "info" });
+    setTimeout(() => setRunToast(null), 1800);
+  }, []);
 
   const safeInvoke = useCallback(
     (action, actionName = "操作") => {
@@ -10271,6 +11349,11 @@ const handleNodeMouseDown = (e, nid) => {
   );
 
   const executeFlow = async (specificNodesSet) => {
+    if (runAbortControllerRef.current && !runAbortControllerRef.current.signal.aborted) {
+      setRunToast({ message: "已有生成任务正在运行", type: "info" });
+      setTimeout(() => setRunToast(null), 1800);
+      return;
+    }
     setGlobalError(null);
 
     const baseNodes = nodesRef.current;
@@ -10401,10 +11484,26 @@ const handleNodeMouseDown = (e, nid) => {
     }
 
     const finalOrder = orderedIds.length === targetIds.length ? orderedIds : targetIds;
+    const runController = new AbortController();
+    const runSignal = runController.signal;
+    runAbortControllerRef.current = runController;
+    runningNodeIdsRef.current = new Set(targetIds);
+    cancelledNodeIdsRef.current = new Set();
+    nodeAbortControllersRef.current = new Map();
+    let currentNodeSignal = null;
+    const throwIfCancelled = () => {
+      if (runSignal.aborted) {
+        throw runSignal.reason || new DOMException("生成已取消", "AbortError");
+      }
+    };
+    const runApiFetch = (url, init = {}) => {
+      throwIfCancelled();
+      return apiFetch(url, { ...init, signal: currentNodeSignal || runSignal });
+    };
+    const runSubmitAIChatImageTask = (payload, options = {}) =>
+      submitAIChatImageTask(runApiFetch, payload, { ...options, signal: currentNodeSignal || runSignal });
 
     setIsRunning(true);
-    setLoadingTip(LOADING_TIPS[Math.floor(Math.random() * LOADING_TIPS.length)]);
-    const tipInterval = setInterval(() => setLoadingTip(LOADING_TIPS[Math.floor(Math.random() * LOADING_TIPS.length)]), 3000);
 
     setNodes((prev) =>
       prev.map((n) =>
@@ -10414,8 +11513,33 @@ const handleNodeMouseDown = (e, nid) => {
 
     try {
       for (const nodeId of finalOrder) {
+        throwIfCancelled();
+        if (cancelledNodeIdsRef.current.has(nodeId)) {
+          setNodes((prev) =>
+            prev.map((node) =>
+              node.id === nodeId && node.data?.status === "loading"
+                ? { ...node, data: { ...node.data, status: "idle", error: "已取消", progress: 0, total: 0 } }
+                : node,
+            ),
+          );
+          continue;
+        }
         const procNode = runtimeNodes.get(nodeId);
         if (!procNode) continue;
+        const nodeController = new AbortController();
+        nodeAbortControllersRef.current.set(nodeId, nodeController);
+        currentNodeSignal = nodeController.signal;
+        let nodeWasCancelled = false;
+        const markCurrentNodeCancelled = () => {
+          nodeWasCancelled = true;
+          cancelledNodeIdsRef.current.add(nodeId);
+          applyNodeUpdate(procNode.id, {
+            status: "idle",
+            error: "已取消",
+            progress: 0,
+            total: 0,
+          });
+        };
 
         const incomingConns = baseConnections.filter((c) => c.to === procNode.id);
         const primaryIncomingConns = incomingConns.filter(
@@ -10450,6 +11574,26 @@ const handleNodeMouseDown = (e, nid) => {
         });
         sourceText = sourceText.trim();
 
+        if (procNode.type === NODE_TYPES.ROLE_STRUCTURER) {
+          const profile = buildRoleProfileStructuredOutput({
+            roleName: procNode.data.roleName,
+            characterSetting: procNode.data.characterSetting || sourceText,
+            relationshipNetwork: procNode.data.relationshipNetwork,
+            worldviewBackground: procNode.data.worldviewBackground,
+          });
+          applyNodeUpdate(procNode.id, {
+            structuredProfile: profile,
+            text: JSON.stringify(profile, null, 2),
+            status: "success",
+            error: "",
+            progress: 1,
+            total: 1,
+          });
+          nodeAbortControllersRef.current.delete(nodeId);
+          currentNodeSignal = null;
+          continue;
+        }
+
         const shouldAggregateMultiSourceImg2Video =
           procNode.data.mode === "img2video" && sourceNodeMediaGroups.length > 1;
         const needsSingle =
@@ -10461,6 +11605,8 @@ const handleNodeMouseDown = (e, nid) => {
 
         if (effectiveInputCount === 0 && !needsSingle) {
           applyNodeUpdate(procNode.id, { status: "error", error: "溯源失败：未检测到输入图片（请确认上游节点已先产出 images，并且连线正确）" });
+          nodeAbortControllersRef.current.delete(nodeId);
+          currentNodeSignal = null;
           continue;
         }
 
@@ -10470,7 +11616,9 @@ const handleNodeMouseDown = (e, nid) => {
         const outputImages = [];
 
         for (let i = 0; i < effectiveInputCount; i++) {
+          throwIfCancelled();
           for (let b = 0; b < batchSize; b++) {
+            throwIfCancelled();
             try {
               let resultUrl = null;
 
@@ -10479,7 +11627,7 @@ const handleNodeMouseDown = (e, nid) => {
                 if (!promptToUse?.trim()) throw new Error("缺少输入文本提示词");
 
                 if (procNode.data.mode === "local_text2img") {
-                  const resp = await apiFetch(`/api/local/text2img`, {
+                  const resp = await runApiFetch(`/api/local/text2img`, {
                     method: "POST",
                     skipAuth: true,
                     headers: { "Content-Type": "application/json" },
@@ -10553,7 +11701,7 @@ const handleNodeMouseDown = (e, nid) => {
                       authorizationSource: authorizationInfo?.source || "none",
                     });
                     try {
-                      const proxyData = await submitAIChatImageTask(apiFetch, proxyPayload, {
+                      const proxyData = await runSubmitAIChatImageTask(proxyPayload, {
                         onDebug: (event) => pushApiDebugDetail("aiChatImage", event),
                       });
                       if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
@@ -10581,7 +11729,7 @@ const handleNodeMouseDown = (e, nid) => {
                         message: proxyError instanceof Error ? proxyError.message : String(proxyError),
                       });
                       return aiChatStream(
-                        apiFetch,
+                        runApiFetch,
                         {
                           history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || undefined,
                           module_enum: WORKBENCH_AI_CHAT_MODULE_ENUM,
@@ -10593,6 +11741,7 @@ const handleNodeMouseDown = (e, nid) => {
                         },
                         {
                           onDebug: (event) => pushApiDebugDetail("aiChatImage", event),
+                          signal: runSignal,
                           onMeta: (meta) => {
                             if (meta?.aiChatSessionId) aiChatSessionIdRef.current = meta.aiChatSessionId;
                             if (meta?.historyAiChatRecordId) aiChatHistoryRecordIdRef.current = meta.historyAiChatRecordId;
@@ -10692,7 +11841,7 @@ const handleNodeMouseDown = (e, nid) => {
                     : {}),
                 };
                   if (procNode.data.mode === "local_img2video") {
-                  const resp = await apiFetch(`/api/local/img2video`, {
+                  const resp = await runApiFetch(`/api/local/img2video`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(payload),
@@ -10720,7 +11869,7 @@ const handleNodeMouseDown = (e, nid) => {
                       ["imagetype", "image_type", "模式", "参考模式", "参考类型"]
                     );
                     effectiveLastFrameImage = isFirstLastFrameReferenceSelection(selectedImageType, imageTypeOptions)
-                      ? (lastFrameImages[0] || procNode.data.refImage || null)
+                      ? (lastFrameImages[0] || procNode.data.lastFrameImage || procNode.data.refImage || null)
                       : null;
                     const matchedResolutionId = findAIChatParamValueId(paramList, ["resolution", "分辨率", "清晰度"], selectedResolution);
                     const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比", "画幅", "aspect"], selectedRatio);
@@ -10793,7 +11942,7 @@ const handleNodeMouseDown = (e, nid) => {
                       },
                       authorizationSource: authorizationInfo?.source || "none",
                     });
-                    const proxyData = await submitAIChatImageTask(apiFetch, proxyPayload, {
+                    const proxyData = await runSubmitAIChatImageTask(proxyPayload, {
                       onDebug: (event) => pushApiDebugDetail("aiChatImage", event),
                     });
                     if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
@@ -10848,13 +11997,16 @@ const handleNodeMouseDown = (e, nid) => {
                       throw new Error(`img2video 代理失败: ${proxyErrorMsg}; 多输入节点聚合模式不支持回退 /api/img2video`);
                     }
                     try {
-                      const resp = await apiFetch(`/api/img2video`, {
+                      const fallbackPayload = effectiveLastFrameImage
+                        ? {
+                            ...payload,
+                            last_frame_image: effectiveLastFrameImage,
+                          }
+                        : payload;
+                      const resp = await runApiFetch(`/api/img2video`, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                          ...payload,
-                          last_frame_image: effectiveLastFrameImage,
-                        }),
+                        body: JSON.stringify(fallbackPayload),
                       });
                       const data = await resp.json();
                       if (!resp.ok) throw new Error(extractApiError(data));
@@ -10923,7 +12075,7 @@ const handleNodeMouseDown = (e, nid) => {
                     },
                     authorizationSource: authorizationInfo?.source || "none",
                   });
-                  const proxyData = await submitAIChatImageTask(apiFetch, proxyPayload, {
+                  const proxyData = await runSubmitAIChatImageTask(proxyPayload, {
                     onDebug: (event) => pushApiDebugDetail("aiChatImage", event),
                   });
                   if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
@@ -10967,7 +12119,7 @@ const handleNodeMouseDown = (e, nid) => {
                   throw proxyError;
                 }
               } else if (procNode.data.mode === "rmbg") {
-                const resp = await apiFetch(`/api/rmbg`, {
+                const resp = await runApiFetch(`/api/rmbg`, {
                   method: "POST",
                   skipAuth: true,
                   headers: { "Content-Type": "application/json" },
@@ -10981,7 +12133,7 @@ const handleNodeMouseDown = (e, nid) => {
                 if (!resp.ok) throw new Error(extractApiError(data));
                 resultUrl = data.image || data.images?.[0];
               } else if (procNode.data.mode === "feature_extract") {
-                const resp = await apiFetch(`/api/multi_image_generate`, {
+                const resp = await runApiFetch(`/api/multi_image_generate`, {
                   method: "POST",
                   skipAuth: true,
                   headers: { "Content-Type": "application/json" },
@@ -11034,7 +12186,7 @@ const handleNodeMouseDown = (e, nid) => {
                     },
                     authorizationSource: authorizationInfo?.source || "none",
                   });
-                  const proxyData = await submitAIChatImageTask(apiFetch, proxyPayload, {
+                  const proxyData = await runSubmitAIChatImageTask(proxyPayload, {
                     onDebug: (event) => pushApiDebugDetail("aiChatImage", event),
                   });
                   if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
@@ -11078,7 +12230,7 @@ const handleNodeMouseDown = (e, nid) => {
                   throw proxyError;
                 }
               } else if (procNode.data.mode === "multi_angleshots") {
-                const resp = await apiFetch(`/api/multi_angleshots`, {
+                const resp = await runApiFetch(`/api/multi_angleshots`, {
                   method: "POST",
                   skipAuth: true,
                   headers: { "Content-Type": "application/json" },
@@ -11100,7 +12252,7 @@ const handleNodeMouseDown = (e, nid) => {
                   ref_image: procNode.data.refImage,
                   model: procNode.data.model,
                 };
-                const resp = await apiFetch(`/api/edit`, {
+                const resp = await runApiFetch(`/api/edit`, {
                   method: "POST",
                   skipAuth: MODES_WITHOUT_APP_AUTH.has(procNode.data.mode),
                   headers: { "Content-Type": "application/json" },
@@ -11113,13 +12265,29 @@ const handleNodeMouseDown = (e, nid) => {
 
               if (resultUrl) outputImages.push(resultUrl);
             } catch (e) {
+              if (runSignal.aborted) {
+                throw e;
+              }
+              if (currentNodeSignal?.aborted || cancelledNodeIdsRef.current.has(nodeId) || isAbortLikeError(e)) {
+                markCurrentNodeCancelled();
+                break;
+              }
               console.error("Task execution failed:", e);
               applyNodeUpdate(procNode.id, { status: "error", error: e.message || String(e) });
             }
 
+            if (nodeWasCancelled) break;
+            throwIfCancelled();
             const currentProgress = i * batchSize + (b + 1);
             applyNodeUpdate(procNode.id, { progress: currentProgress });
           }
+          if (nodeWasCancelled) break;
+        }
+
+        if (nodeWasCancelled) {
+          nodeAbortControllersRef.current.delete(nodeId);
+          currentNodeSignal = null;
+          continue;
         }
 
         if (outputImages.length > 0) {
@@ -11131,9 +12299,41 @@ const handleNodeMouseDown = (e, nid) => {
             applyNodeUpdate(targetOutput.id, { images: [...prevOut, ...outputImages] });
           }
         }
+        nodeAbortControllersRef.current.delete(nodeId);
+        currentNodeSignal = null;
+      }
+    } catch (error) {
+      if (runSignal.aborted || isAbortLikeError(error)) {
+        const runningIds = new Set(runningNodeIdsRef.current || []);
+        setNodes((prev) =>
+          prev.map((node) =>
+            runningIds.has(node.id) && node.data?.status === "loading"
+              ? {
+                  ...node,
+                  data: {
+                    ...node.data,
+                    status: "idle",
+                    error: "已取消",
+                    progress: 0,
+                    total: 0,
+                  },
+                }
+              : node,
+          ),
+        );
+        setRunToast({ message: "已取消当前生成", type: "info" });
+        setTimeout(() => setRunToast(null), 1800);
+      } else {
+        console.error("[Workbench] executeFlow:error", error);
+        setGlobalError(error instanceof Error ? error.message : String(error || "运行失败"));
       }
     } finally {
-      clearInterval(tipInterval);
+      if (runAbortControllerRef.current === runController) {
+        runAbortControllerRef.current = null;
+      }
+      nodeAbortControllersRef.current.clear();
+      cancelledNodeIdsRef.current = new Set();
+      runningNodeIdsRef.current = new Set();
       setIsRunning(false);
     }
   };
@@ -11207,9 +12407,8 @@ const handleNodeMouseDown = (e, nid) => {
         },
         authorizationSource: authorizationInfo?.source || "none",
       });
-      const nextImages = [...sourceImages];
       const nextRetrySources = { ...retrySources };
-      let lastResultUrl = "";
+      const resultImages = [];
       for (const { item, index } of imageEntries) {
         const retrySourceImage = String(nextRetrySources?.[index] || "").trim();
         const sourceImage = retrySourceImage || item;
@@ -11241,20 +12440,11 @@ const handleNodeMouseDown = (e, nid) => {
           const summary = summarizeAIChatResponse(proxyData);
           throw new Error(`aiChat 三视图未返回可解析图片URL${summary ? ` | 响应摘要: ${summary}` : ""}`);
         }
-        nextImages[index] = resultUrl;
-        nextRetrySources[index] = retrySourceImage || sourceImage;
-        lastResultUrl = resultUrl;
+        resultImages.push(resultUrl);
       }
 
       pushHistory();
-      updateNodeData(sourceNodeId, {
-        images: nextImages,
-        compactThreeViewSourceImages: nextRetrySources,
-        compactThreeViewSourceImage: String(nextRetrySources?.[imageIndex] || sourceNode?.data?.compactThreeViewSourceImage || "").trim(),
-        compactThreeViewLastResultImage: lastResultUrl,
-        status: "idle",
-        error: "",
-      });
+      createImageOperationResultNode(sourceNodeId, resultImages, "三视图结果");
       updateApiDebugStatus("aiChatImage", {
         status: "success",
         message: `three-view model=${modelId} params=${Object.keys(resolvedParamPayload).length}`,
@@ -11269,10 +12459,10 @@ const handleNodeMouseDown = (e, nid) => {
       apiFetch,
       pushApiDebugDetail,
       pushHistory,
+      createImageOperationResultNode,
       resolveModelParamsForId,
       threeViewImageModelId,
       updateApiDebugStatus,
-      updateNodeData,
     ],
   );
 
@@ -11337,22 +12527,28 @@ const handleNodeMouseDown = (e, nid) => {
             stroke="transparent"
             strokeWidth="16"
             fill="none"
-            className="cursor-pointer"
+            className="cursor-pointer pointer-events-auto"
+            pointerEvents="stroke"
             onMouseDown={(event) => {
               event.stopPropagation();
             }}
             onClick={(event) => handleConnectionClick(event, conn.id)}
+            onDoubleClick={(event) => {
+              event.stopPropagation();
+              deleteConnectionById(conn.id);
+            }}
           />
           <path
             d={path}
             stroke={isInteractive ? "#22d3ee" : "rgba(100,116,139,0.72)"}
             strokeWidth={isInteractive ? "3" : "2.2"}
             fill="none"
-            className="transition-colors duration-200"
+            className="pointer-events-none transition-colors duration-200"
           />
           {isInteractive ? (
             <g
-              className="cursor-pointer"
+              className="cursor-pointer pointer-events-auto"
+              pointerEvents="all"
               onMouseDown={(event) => {
                 event.stopPropagation();
               }}
@@ -11361,19 +12557,29 @@ const handleNodeMouseDown = (e, nid) => {
                 deleteConnectionById(conn.id);
               }}
             >
+              <title>删除连接</title>
               <circle
                 cx={midX}
                 cy={midY}
-                r="10"
+                r="18"
+                fill="rgba(255,255,255,0.001)"
+                pointerEvents="all"
+              />
+              <circle
+                cx={midX}
+                cy={midY}
+                r="11"
                 fill="white"
-                stroke="#fda4af"
+                stroke="#fb7185"
                 strokeWidth="1.5"
+                pointerEvents="all"
               />
               <path
                 d={`M ${midX - 3.5} ${midY - 3.5} L ${midX + 3.5} ${midY + 3.5} M ${midX + 3.5} ${midY - 3.5} L ${midX - 3.5} ${midY + 3.5}`}
                 stroke="#e11d48"
                 strokeWidth="1.5"
                 strokeLinecap="round"
+                pointerEvents="none"
               />
             </g>
           ) : null}
@@ -11433,30 +12639,12 @@ const handleNodeMouseDown = (e, nid) => {
         title: "节点",
         items: [
           {
-            id: "node_text_prompt",
-            icon: Clipboard,
-            label: "提示词输入",
-            desc: "纯文本提示词",
+            id: "node_input",
+            icon: Plus,
+            label: "输入",
+            desc: "提示词 / 图像创作 / 视频创作",
             color: "text-yellow-400",
             bg: "bg-yellow-500/10",
-            onClick: () => addNode(NODE_TYPES.TEXT_INPUT),
-          },
-          {
-            id: "node_image_generate",
-            icon: ImagePlus,
-            label: "图片创作",
-            desc: "文生图 / 图生图 / 多图生图",
-            color: "text-purple-400",
-            bg: "bg-purple-500/10",
-            onClick: () => {},
-          },
-          {
-            id: "node_video_generate",
-            icon: Film,
-            label: "视频创作",
-            desc: "文生视频 / 图生视频 / 首尾帧 / 全能参考",
-            color: "text-rose-400",
-            bg: "bg-rose-500/10",
             onClick: () => {},
           },
           {
@@ -11479,6 +12667,24 @@ const handleNodeMouseDown = (e, nid) => {
         key: "workflows",
         title: "工作流",
         items: [
+          {
+            id: "node_image_generate",
+            icon: ImagePlus,
+            label: "图片工作流",
+            desc: "文生图 / 图生图 / 多图生图",
+            color: "text-purple-400",
+            bg: "bg-purple-500/10",
+            onClick: () => {},
+          },
+          {
+            id: "node_video_generate",
+            icon: Film,
+            label: "视频工作流",
+            desc: "文生视频 / 图生视频 / 首尾帧 / 全能参考",
+            color: "text-rose-400",
+            bg: "bg-rose-500/10",
+            onClick: () => {},
+          },
           {
             id: "workflow_bundle",
             icon: Layers,
@@ -11515,12 +12721,21 @@ const handleNodeMouseDown = (e, nid) => {
               compact
               category={item.sectionTitle}
               primary={false}
-              menuTrigger={item.id === "workflow_bundle"}
+              menuTrigger={item.id === "node_input" || item.id === "node_image_generate" || item.id === "node_video_generate" || item.id === "workflow_bundle"}
               onHoverChange={(isHovering, target) => {
                 setHoveredSidebarItemKey(isHovering ? item.id : "");
                 if (isHovering && target && workspaceShellRef.current) {
                   const itemRect = target.getBoundingClientRect();
                   const shellRect = workspaceShellRef.current.getBoundingClientRect();
+                  if (item.id === "node_input") {
+                    if (sidebarNodeInputMenuCloseTimerRef.current) {
+                      window.clearTimeout(sidebarNodeInputMenuCloseTimerRef.current);
+                      sidebarNodeInputMenuCloseTimerRef.current = null;
+                    }
+                    setSidebarNodeInputMenu({
+                      top: itemRect.top - shellRect.top + itemRect.height / 2,
+                    });
+                  }
                   if (item.id === "node_image_generate") {
                     if (sidebarImageCreateMenuCloseTimerRef.current) {
                       window.clearTimeout(sidebarImageCreateMenuCloseTimerRef.current);
@@ -11555,6 +12770,15 @@ const handleNodeMouseDown = (e, nid) => {
                   });
                   return;
                 }
+                if (item.id === "node_input") {
+                  if (sidebarNodeInputMenuCloseTimerRef.current) {
+                    window.clearTimeout(sidebarNodeInputMenuCloseTimerRef.current);
+                  }
+                  sidebarNodeInputMenuCloseTimerRef.current = window.setTimeout(() => {
+                    setSidebarNodeInputMenu(null);
+                    sidebarNodeInputMenuCloseTimerRef.current = null;
+                  }, 140);
+                }
                 if (item.id === "node_image_generate") {
                   if (sidebarImageCreateMenuCloseTimerRef.current) {
                     window.clearTimeout(sidebarImageCreateMenuCloseTimerRef.current);
@@ -11586,7 +12810,7 @@ const handleNodeMouseDown = (e, nid) => {
               }}
               onClick={(event) => {
                 setActiveSidebarItemKey(item.id);
-                if (item.id === "node_image_generate" || item.id === "node_video_generate" || item.id === "workflow_bundle") return;
+                if (item.id === "node_input" || item.id === "node_image_generate" || item.id === "node_video_generate" || item.id === "workflow_bundle") return;
                 safeInvoke(() => item.onClick?.(event), item.label || "侧栏操作");
                 onAction?.();
               }}
@@ -11659,30 +12883,6 @@ const handleNodeMouseDown = (e, nid) => {
               <Server className="w-3 h-3" /> {apiStatus === "online" ? "API Online" : "API Offline"}
             </div>
           )}
-
-          <div className="flex overflow-hidden rounded-[20px] border border-slate-200 bg-white shadow-[0_14px_30px_rgba(15,23,42,0.08)]">
-            <button
-              onClick={() => safeInvoke(handleRunClick, "运行工作流")}
-              disabled={isRunning}
-              className={`flex min-w-[118px] items-center justify-center gap-2 px-4 py-2.5 text-sm font-bold transition-all ${
-                isRunning
-                  ? "cursor-not-allowed bg-slate-100 text-slate-400"
-                  : "bg-cyan-50 text-cyan-700 hover:bg-cyan-100 border-r border-slate-200"
-              }`}
-            >
-              {isRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />} <span className="truncate max-w-[150px]">{isRunning ? loadingTip : "运行"}</span>
-            </button>
-            <div className="relative group">
-              <button className="h-full border-l border-slate-200 bg-white px-3 hover:bg-slate-50">
-                <ChevronDown className="w-4 h-4 text-slate-600" />
-              </button>
-              <div className="absolute right-0 top-full z-50 mt-2 hidden w-36 overflow-hidden rounded-[20px] border border-slate-200 bg-white shadow-[0_18px_36px_rgba(15,23,42,0.12)] group-hover:block">
-                <button onClick={() => setRunScope("all")} className={`w-full px-3 py-2 text-left text-xs hover:bg-slate-50 ${runScope === "all" ? "text-slate-900" : "text-slate-600"}`}>运行全部</button>
-                <button onClick={() => setRunScope("selected")} className={`w-full px-3 py-2 text-left text-xs hover:bg-slate-50 ${runScope === "selected" ? "text-slate-900" : "text-slate-600"}`}>运行选中</button>
-                <button onClick={() => setRunScope("selected_downstream")} className={`w-full px-3 py-2 text-left text-xs hover:bg-slate-50 ${runScope === "selected_downstream" ? "text-slate-900" : "text-slate-600"}`}>选中 → 下游</button>
-              </div>
-            </div>
-          </div>
 
           <div className="relative">
             <button
@@ -12071,6 +13271,7 @@ const handleNodeMouseDown = (e, nid) => {
           onMouseDown={() => {
             setShowAssetLibrary(false);
             setAssetLibraryDetailWorkId("");
+            setAssetLibraryDetailPersonaId("");
             setAssetLibraryPickerMode(false);
           }}
         >
@@ -12083,8 +13284,10 @@ const handleNodeMouseDown = (e, nid) => {
               <div>
                 <div className="text-[15px] font-semibold text-slate-800">用户资产库</div>
                 <div className="mt-1 text-[12px] leading-5 text-slate-500">
-                  {assetLibraryDetailWork
-                    ? "查看作品封面、摘要、版本与素材，并从任意版本继续创作。"
+                  {assetLibraryDetailPersona
+                    ? "编辑人物设定、参考图、音色描述和关系网络，用于后续创作复用。"
+                    : assetLibraryDetailWork
+                    ? "查看作品封面、摘要与素材，并继续创作。"
                     : "自动保存当前草稿，手动沉淀作品，并随时恢复到画布继续创作。"}
                 </div>
               </div>
@@ -12093,6 +13296,7 @@ const handleNodeMouseDown = (e, nid) => {
                 onClick={() => {
                   setShowAssetLibrary(false);
                   setAssetLibraryDetailWorkId("");
+                  setAssetLibraryDetailPersonaId("");
                   setAssetLibraryPickerMode(false);
                 }}
                 className="rounded-full p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-900"
@@ -12101,11 +13305,14 @@ const handleNodeMouseDown = (e, nid) => {
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <div className="relative flex items-center gap-2 border-b border-slate-200 bg-slate-50/80 px-5 py-3">
-              {assetLibraryDetailWork ? (
+            <div className="relative flex flex-wrap items-center gap-2 border-b border-slate-200 bg-slate-50/80 px-5 py-3">
+              {assetLibraryDetailWork || assetLibraryDetailPersona ? (
                 <button
                   type="button"
-                  onClick={() => setAssetLibraryDetailWorkId("")}
+                  onClick={() => {
+                    setAssetLibraryDetailWorkId("");
+                    setAssetLibraryDetailPersonaId("");
+                  }}
                   className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] text-slate-700 transition-colors hover:border-slate-300 hover:bg-slate-50"
                 >
                   <ChevronRight className="h-3.5 w-3.5 rotate-180" />
@@ -12117,6 +13324,7 @@ const handleNodeMouseDown = (e, nid) => {
                 onClick={() => {
                   setAssetLibraryTab("works");
                   setAssetLibraryDetailWorkId("");
+                  setAssetLibraryDetailPersonaId("");
                 }}
                 className={`rounded-full px-3 py-1.5 text-[11px] transition-colors ${
                   assetLibraryTab === "works" ? "bg-slate-900 text-white" : "border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-slate-900"
@@ -12127,8 +13335,22 @@ const handleNodeMouseDown = (e, nid) => {
               <button
                 type="button"
                 onClick={() => {
+                  setAssetLibraryTab("personas");
+                  setAssetLibraryDetailWorkId("");
+                  setAssetLibraryDetailPersonaId("");
+                }}
+                className={`rounded-full px-3 py-1.5 text-[11px] transition-colors ${
+                  assetLibraryTab === "personas" ? "bg-slate-900 text-white" : "border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-slate-900"
+                }`}
+              >
+                人物 {assetLibraryPersonas.length}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
                   setAssetLibraryTab("drafts");
                   setAssetLibraryDetailWorkId("");
+                  setAssetLibraryDetailPersonaId("");
                 }}
                 className={`rounded-full px-3 py-1.5 text-[11px] transition-colors ${
                   assetLibraryTab === "drafts" ? "bg-slate-900 text-white" : "border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-slate-900"
@@ -12141,6 +13363,7 @@ const handleNodeMouseDown = (e, nid) => {
                 onClick={() => {
                   setAssetLibraryTab("assets");
                   setAssetLibraryDetailWorkId("");
+                  setAssetLibraryDetailPersonaId("");
                 }}
                 className={`rounded-full px-3 py-1.5 text-[11px] transition-colors ${
                   assetLibraryTab === "assets" ? "bg-slate-900 text-white" : "border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-slate-900"
@@ -12174,7 +13397,116 @@ const handleNodeMouseDown = (e, nid) => {
               </div>
             </div>
             <div className="relative min-h-0 flex-1 overflow-y-auto bg-slate-50/70 p-4 custom-scrollbar">
-              {assetLibraryDetailWork ? (
+              {assetLibraryDetailPersona ? (
+                <div className="space-y-4">
+                  <input
+                    ref={assetLibraryPersonaImageInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(event) => {
+                      void handleAssetLibraryPersonaReferenceUpload(event);
+                    }}
+                  />
+                  <div className="overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_22px_44px_rgba(15,23,42,0.08)]">
+                    <div className="p-5">
+                      <button
+                        type="button"
+                        onClick={() => assetLibraryPersonaImageInputRef.current?.click()}
+                        className="group flex h-48 w-full items-center justify-center overflow-hidden rounded-[24px] border border-dashed border-slate-200 bg-slate-100 transition-colors hover:border-cyan-200 hover:bg-cyan-50/60"
+                      >
+                        {assetLibraryDetailPersona.referenceImage ? (
+                          <img
+                            src={assetLibraryDetailPersona.referenceImage}
+                            alt={assetLibraryDetailPersona.name || "人物参考图"}
+                            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
+                          />
+                        ) : (
+                          <div className="flex flex-col items-center gap-2 text-slate-400">
+                            <ImagePlus className="h-7 w-7" />
+                            <span className="text-[12px]">上传人物参考图</span>
+                          </div>
+                        )}
+                      </button>
+                      <div className="mt-3 flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => assetLibraryPersonaImageInputRef.current?.click()}
+                          className="inline-flex items-center justify-center gap-1.5 rounded-full bg-slate-900 px-4 py-2 text-[11px] font-medium text-white transition-colors hover:bg-slate-800"
+                        >
+                          <Upload className="h-3.5 w-3.5" />
+                          {assetLibraryDetailPersona.referenceImage ? "更换参考图" : "上传参考图"}
+                        </button>
+                        {assetLibraryDetailPersona.referenceImage ? (
+                          <button
+                            type="button"
+                            onClick={() => updateAssetLibraryPersona(assetLibraryDetailPersona.id, { referenceImage: "" })}
+                            className="inline-flex items-center justify-center gap-1.5 rounded-full border border-slate-200 bg-white px-4 py-2 text-[11px] text-slate-500 transition-colors hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            移除参考图
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-4 rounded-[24px] border border-slate-200 bg-white p-5 shadow-[0_10px_24px_rgba(15,23,42,0.05)]">
+                    <label className="block">
+                      <span className="text-[11px] font-semibold text-slate-500">形象名称</span>
+                      <input
+                        type="text"
+                        value={assetLibraryDetailPersona.name}
+                        onChange={(event) => updateAssetLibraryPersona(assetLibraryDetailPersona.id, { name: event.target.value })}
+                        placeholder="例如：冷感银发女主"
+                        className="mt-2 w-full rounded-[16px] border border-slate-200 bg-slate-50 px-3 py-2.5 text-[14px] font-semibold text-slate-900 outline-none transition-colors focus:border-cyan-200 focus:bg-white focus:ring-2 focus:ring-cyan-100"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-[11px] font-semibold text-slate-500">人物设定</span>
+                      <textarea
+                        value={assetLibraryDetailPersona.description}
+                        onChange={(event) => updateAssetLibraryPersona(assetLibraryDetailPersona.id, { description: event.target.value })}
+                        placeholder="描述人物背景、性格、外貌、气质、服装、常用场景等。"
+                        rows={5}
+                        className="mt-2 w-full resize-none rounded-[16px] border border-slate-200 bg-slate-50 px-3 py-2.5 text-[12px] leading-6 text-slate-700 outline-none transition-colors focus:border-cyan-200 focus:bg-white focus:ring-2 focus:ring-cyan-100"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-[11px] font-semibold text-slate-500">音色描述</span>
+                      <textarea
+                        value={assetLibraryDetailPersona.voiceDescription}
+                        onChange={(event) => updateAssetLibraryPersona(assetLibraryDetailPersona.id, { voiceDescription: event.target.value })}
+                        placeholder="描述声音年龄感、语速、情绪、口音或旁白风格。"
+                        rows={4}
+                        className="mt-2 w-full resize-none rounded-[16px] border border-slate-200 bg-slate-50 px-3 py-2.5 text-[12px] leading-6 text-slate-700 outline-none transition-colors focus:border-cyan-200 focus:bg-white focus:ring-2 focus:ring-cyan-100"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-[11px] font-semibold text-slate-500">关系网络</span>
+                      <textarea
+                        value={assetLibraryDetailPersona.relationshipNetwork}
+                        onChange={(event) => updateAssetLibraryPersona(assetLibraryDetailPersona.id, { relationshipNetwork: event.target.value })}
+                        placeholder="记录与其他人物、品牌、组织或故事线的关系，例如：导师、竞争者、搭档、家人。"
+                        rows={5}
+                        className="mt-2 w-full resize-none rounded-[16px] border border-slate-200 bg-slate-50 px-3 py-2.5 text-[12px] leading-6 text-slate-700 outline-none transition-colors focus:border-cyan-200 focus:bg-white focus:ring-2 focus:ring-cyan-100"
+                      />
+                    </label>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!window.confirm("确认删除这个人物形象吗？")) return;
+                      removeAssetLibraryPersona(assetLibraryDetailPersona.id);
+                    }}
+                    className="inline-flex w-full items-center justify-center gap-1.5 rounded-full border border-slate-200 bg-white px-5 py-2.5 text-[12px] text-slate-500 transition-colors hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    删除人物形象
+                  </button>
+                </div>
+              ) : assetLibraryDetailWork ? (
                 <div className="space-y-6">
                   <div className="overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_22px_44px_rgba(15,23,42,0.08)]">
                     <div className="flex gap-5 p-5">
@@ -12336,6 +13668,67 @@ const handleNodeMouseDown = (e, nid) => {
                       </div>
                     );
                   })}
+                </div>
+              ) : assetLibraryTab === "personas" ? (
+                <div className="space-y-3">
+                  <button
+                    type="button"
+                    onClick={createAssetLibraryPersona}
+                    className="inline-flex w-full items-center justify-center gap-2 rounded-[20px] border border-cyan-200 bg-cyan-50 px-4 py-3 text-[12px] font-medium text-cyan-700 transition-colors hover:bg-cyan-100 hover:text-cyan-800"
+                  >
+                    <Plus className="h-4 w-4" />
+                    新建人物形象
+                  </button>
+                  {assetLibraryPersonas.length === 0 ? (
+                    <div className="rounded-[22px] border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-[12px] text-slate-500">
+                      还没有人物形象。新建后可维护名称、介绍、参考图、音色描述和关系网络。
+                    </div>
+                  ) : null}
+                  {assetLibraryPersonas.map((item) => (
+                    <div
+                      key={item.id}
+                      onClick={() => {
+                        setAssetLibraryDetailWorkId("");
+                        setAssetLibraryDetailPersonaId(item.id);
+                      }}
+                      className="flex w-full cursor-pointer gap-3 overflow-hidden rounded-[24px] border border-slate-200 bg-white p-3 text-left shadow-[0_10px_24px_rgba(15,23,42,0.05)] transition-all hover:border-slate-300 hover:shadow-[0_16px_32px_rgba(15,23,42,0.08)]"
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter" && event.key !== " ") return;
+                        event.preventDefault();
+                        setAssetLibraryDetailWorkId("");
+                        setAssetLibraryDetailPersonaId(item.id);
+                      }}
+                    >
+                      <div className="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-[18px] border border-slate-200 bg-slate-100">
+                        {item.referenceImage ? (
+                          <img src={item.referenceImage} alt={item.name || "人物参考图"} className="h-full w-full object-cover" />
+                        ) : (
+                          <ImageIcon className="h-5 w-5 text-slate-400" />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1 py-0.5">
+                        <div className="truncate text-[15px] font-semibold tracking-[-0.01em] text-slate-950">
+                          {item.name || "未命名人物"}
+                        </div>
+                        <div className="mt-1 line-clamp-2 text-[11px] leading-5 text-slate-500">
+                          {item.description || "暂无人物介绍"}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            createPersonaInputNodeAt(item);
+                          }}
+                          className="mt-3 inline-flex items-center justify-center gap-1.5 rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-[11px] font-medium text-cyan-700 transition-colors hover:bg-cyan-100 hover:text-cyan-800"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                          添加并结构化
+                        </button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               ) : assetLibraryTab === "works" ? (
                 <div className="space-y-3">
@@ -12839,6 +14232,84 @@ const handleNodeMouseDown = (e, nid) => {
           </div>
         ) : null}
 
+        {sidebarNodeInputMenu ? (
+          <div
+            data-sidebar-node-input-menu="true"
+            className="absolute z-[58] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.98)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
+            style={{ left: leftSidebarWidth + 18, top: sidebarNodeInputMenu.top }}
+            onMouseEnter={() => {
+              if (sidebarNodeInputMenuCloseTimerRef.current) {
+                window.clearTimeout(sidebarNodeInputMenuCloseTimerRef.current);
+                sidebarNodeInputMenuCloseTimerRef.current = null;
+              }
+            }}
+            onMouseLeave={() => {
+              if (sidebarNodeInputMenuCloseTimerRef.current) {
+                window.clearTimeout(sidebarNodeInputMenuCloseTimerRef.current);
+              }
+              sidebarNodeInputMenuCloseTimerRef.current = window.setTimeout(() => {
+                setSidebarNodeInputMenu(null);
+                sidebarNodeInputMenuCloseTimerRef.current = null;
+              }, 140);
+            }}
+          >
+            <div className="mb-2 px-1 text-[11px] font-medium text-slate-500">选择输入</div>
+            <div className="space-y-1.5">
+              <button
+                type="button"
+                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
+                onClick={() => {
+                  setActiveSidebarItemKey("node_text_prompt");
+                  setSidebarNodeInputMenu(null);
+                  safeInvoke(() => addNode(NODE_TYPES.TEXT_INPUT), "提示词输入");
+                }}
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
+                  <Clipboard className="h-[18px] w-[18px]" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-medium text-slate-800">提示词输入</div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">纯文本提示词输入，可连接到创作节点</div>
+                </div>
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
+                onClick={() => {
+                  setActiveSidebarItemKey("node_image_generate");
+                  setSidebarNodeInputMenu(null);
+                  safeInvoke(() => addNode(NODE_TYPES.PROCESSOR, "image_creation"), "图像创作");
+                }}
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
+                  <ImagePlus className="h-[18px] w-[18px]" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-medium text-slate-800">图像创作</div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">与现有生图节点一致，支持模型、尺寸和比例</div>
+                </div>
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
+                onClick={() => {
+                  setActiveSidebarItemKey("node_video_generate");
+                  setSidebarNodeInputMenu(null);
+                  safeInvoke(() => addNode(NODE_TYPES.VIDEO_GEN, "first_last_reference"), "视频创作");
+                }}
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
+                  <Film className="h-[18px] w-[18px]" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-medium text-slate-800">视频创作</div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">内置首尾帧参考 / 全能参考模式切换</div>
+                </div>
+              </button>
+            </div>
+          </div>
+        ) : null}
+
         {sidebarWorkflowMenu ? (
           <div
             data-sidebar-workflow-menu="true"
@@ -13102,22 +14573,6 @@ const handleNodeMouseDown = (e, nid) => {
                 className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
                 onClick={() => {
                   setSidebarVideoCreateMenu(null);
-                  safeInvoke(createFirstLastFrameVideoTemplate, "首尾帧生视频");
-                }}
-              >
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
-                  <GalleryHorizontal className="h-[18px] w-[18px]" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-[13px] font-medium text-slate-800">首尾帧生视频</div>
-                  <div className="mt-0.5 text-[11px] text-slate-500">首帧和尾帧共同约束视频过程</div>
-                </div>
-              </button>
-              <button
-                type="button"
-                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
-                onClick={() => {
-                  setSidebarVideoCreateMenu(null);
                   safeInvoke(createOmniReferenceVideoTemplate, "全能生视频");
                 }}
               >
@@ -13233,6 +14688,20 @@ const handleNodeMouseDown = (e, nid) => {
               <FolderOpen className="h-3.5 w-3.5" />
               资产库
             </button>
+            <button
+              type="button"
+              onClick={arrangeCanvasNodes}
+              disabled={nodes.length === 0}
+              className={`relative inline-flex items-center gap-1.5 rounded-[16px] border px-3 py-2 text-[11px] shadow-[0_18px_36px_rgba(15,23,42,0.08)] transition-colors ${
+                nodes.length === 0
+                  ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
+                  : "border-slate-200 bg-white text-slate-700 hover:bg-cyan-50 hover:text-cyan-700"
+              }`}
+              title="一键辅助整理排序"
+            >
+              <Layout className="h-3.5 w-3.5" />
+              整理
+            </button>
             <div className="relative flex items-center rounded-[16px] border border-slate-200 bg-white p-0.5 shadow-[0_18px_36px_rgba(15,23,42,0.08)] text-slate-500">
               <button onClick={() => zoomCanvas(-0.2)} className="relative rounded-[12px] p-1.5 transition-colors hover:bg-slate-100 hover:text-slate-900"><Minus className="w-3 h-3" /></button>
               <span className="relative w-9 text-center text-[10px] font-mono text-slate-700">{Math.round(viewport.zoom * 100)}%</span>
@@ -13287,10 +14756,11 @@ const handleNodeMouseDown = (e, nid) => {
                 updateData={updateNodeData}
 	                apiFetch={apiFetch}
 	                onOpenPromptPolishPicker={openPromptPolishPicker}
-	                imageModelOptions={imageModelOptions}
-	                videoModelOptions={videoModelOptions}
-	                resolveModelParamsForId={resolveModelParamsForId}
-	                onDelete={() => deleteNode(n.id)}
+                imageModelOptions={imageModelOptions}
+                videoModelOptions={videoModelOptions}
+                resolveModelParamsForId={resolveModelParamsForId}
+                personaMentionOptions={personaMentionOptions}
+                onDelete={() => deleteNode(n.id)}
                 onConnectStart={(e) => {
                   e.stopPropagation();
                   pushHistory();
@@ -13318,7 +14788,9 @@ const handleNodeMouseDown = (e, nid) => {
                 onRunVideoRmbg={runVideoRmbg}
                 onRunVideoLineart={runVideoLineart}
                 onRunVideoSplit={runVideoSplit}
+                onQuickCreateFromText={createPromptQuickChain}
                 onRunNode={(nodeId) => executeFlow(new Set([nodeId]))}
+                onCancelNode={() => cancelNodeGeneration(n.id)}
                 shouldAutoOpenUploadPicker={pendingUploadNodeId === n.id}
                 onAutoOpenUploadPickerHandled={(nodeId) => {
                   setPendingUploadNodeId((prev) => (prev === nodeId ? "" : prev));
@@ -13537,13 +15009,18 @@ const handleNodeMouseDown = (e, nid) => {
                   <Plus className={`${agentInputFocused || agentInput.trim() ? "h-5 w-5" : "h-4 w-4"}`} />
                 </button>
                 <div className={`relative min-w-0 flex-1 ${isCanvasPromptPending ? "pr-28" : "pr-14"}`}>
-                  <textarea
+                  <PersonaMentionTextarea
                     ref={agentInputRef}
                     value={agentInput}
                     onChange={(e) => {
                       setAgentPromptPolishError("");
                       setAgentInput(e.target.value);
                     }}
+                    personas={personaMentionOptions}
+                    wrapperClassName="relative"
+                    overlayClassName={`text-[15px] leading-7 ${
+                      agentInputFocused || agentInput.trim() ? "min-h-[120px]" : "h-9 min-h-9 pt-[2px] text-[14px] leading-8"
+                    }`}
                     onFocus={() => setAgentInputFocused(true)}
                     onMouseDown={() => setAgentInputFocused(true)}
                     rows={1}
@@ -13554,7 +15031,7 @@ const handleNodeMouseDown = (e, nid) => {
                         ? "请输入短剧需求，发送后会直接进入短剧创作流程。"
                         : "输入你的需求，让 Agent 帮你生成脚本、创作短剧，或搭建画布工作流。"
                     }
-                    className={`w-full resize-none overflow-y-auto bg-transparent text-[15px] leading-7 text-slate-800 outline-none placeholder:text-slate-400 ${
+                    className={`w-full resize-none overflow-y-auto bg-transparent text-[15px] leading-7 outline-none placeholder:text-slate-400 ${
                       agentInputFocused || agentInput.trim() ? "min-h-[120px]" : "h-9 min-h-9 pt-[2px] text-[14px] leading-8"
                     }`}
                     onKeyDown={(e) => {
@@ -13849,6 +15326,7 @@ const handleNodeMouseDown = (e, nid) => {
           imageModelOptions={imageModelOptions}
           videoModelOptions={videoModelOptions}
           resolveModelParamsForId={resolveModelParamsForId}
+          personaMentionOptions={personaMentionOptions}
         />
       </div>
 
