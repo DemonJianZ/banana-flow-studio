@@ -21,6 +21,7 @@ import { resolveMemberAuthorizationInfo, submitAIChatImageTask, viewAIChatModelP
 import { API_BASE, AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2 } from "../config";
 import { downloadMedia } from "../lib/downloadMedia";
 import { findAIChatModelIdByKeywords } from "../lib/aiChatModelResolver";
+import { pickFirstImageUrl } from "../lib/mediaUrl";
 import "../styles/pipelineDayTheme.css";
 
 const FUNCTION_META = {
@@ -279,33 +280,6 @@ const listAIChatParamChoiceOptions = (paramList, aliases = []) => {
     .filter(Boolean);
 };
 
-const pickFirstImageUrl = (payload) => {
-  if (!payload) return "";
-  if (typeof payload === "string") {
-    const matched = payload.match(/https?:\/\/[^\s"'<>]+/i);
-    return matched?.[0] || "";
-  }
-  if (Array.isArray(payload)) {
-    for (const item of payload) {
-      const found = pickFirstImageUrl(item);
-      if (found) return found;
-    }
-    return "";
-  }
-  if (typeof payload === "object") {
-    const directKeys = ["image_url", "imageUrl", "url", "image", "output_url", "outputUrl", "result_url", "resultUrl"];
-    for (const key of directKeys) {
-      const found = pickFirstImageUrl(payload[key]);
-      if (found) return found;
-    }
-    for (const value of Object.values(payload)) {
-      const found = pickFirstImageUrl(value);
-      if (found) return found;
-    }
-  }
-  return "";
-};
-
 const pickFirstVideoUrl = (payload) => {
   const normalizeVideoUrl = (raw) => {
     const text = String(raw || "").trim();
@@ -460,6 +434,7 @@ const PipelineBatchVideo = () => {
   const [rotationAngle, setRotationAngle] = useState(DEFAULT_ROTATION_ANGLE);
   const [rotationOptions, setRotationOptions] = useState(DEFAULT_ROTATION_OPTIONS);
   const [results, setResults] = useState([]);
+  const [failedImageUrls, setFailedImageUrls] = useState({});
   const [selectedResultIds, setSelectedResultIds] = useState([]);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState("");
@@ -615,6 +590,22 @@ const PipelineBatchVideo = () => {
     setSelectedResultIds((prev) => prev.filter((id) => imageResultIds.includes(id)));
   }, [imageResultIds]);
 
+  useEffect(() => {
+    setFailedImageUrls((prev) => {
+      const next = {};
+      let changed = false;
+      for (const [id, failedUrl] of Object.entries(prev)) {
+        const currentUrl = results.find((item) => String(item.id) === id)?.outputUrl || "";
+        if (currentUrl && currentUrl === failedUrl) {
+          next[id] = failedUrl;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [results]);
+
   const updateResult = useCallback((id, patch) => {
     setResults((prev) => {
       const base = prev.length ? prev : resultsSeedRef.current;
@@ -622,6 +613,18 @@ const PipelineBatchVideo = () => {
       const next = base.map((item) => (item.id === id ? { ...item, ...patch } : item));
       resultsSeedRef.current = next;
       return next;
+    });
+  }, []);
+
+  const handleResultImageError = useCallback((item) => {
+    console.warn("[image-load-error]", {
+      id: item.id,
+      outputUrl: item.outputUrl,
+      status: item.status,
+    });
+    setFailedImageUrls((prev) => {
+      if (!item?.id || !item?.outputUrl || prev[item.id] === item.outputUrl) return prev;
+      return { ...prev, [item.id]: item.outputUrl };
     });
   }, []);
 
@@ -915,11 +918,7 @@ const PipelineBatchVideo = () => {
               });
               if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
               if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
-              const generatedImage =
-                pickFirstImageUrl(proxyData?.image_url) ||
-                pickFirstImageUrl(proxyData?.events) ||
-                pickFirstImageUrl(proxyData?.text) ||
-                "";
+              const generatedImage = pickFirstImageUrl(proxyData);
               const doneErr = String(proxyData?.done_error || "").trim();
               if (!generatedImage && doneErr) throw new Error(doneErr);
               if (!generatedImage) throw new Error("图片生成未返回结果");
@@ -1073,9 +1072,6 @@ const PipelineBatchVideo = () => {
               pickFirstVideoUrl(proxyData?.events) ||
               pickFirstVideoUrl(proxyData?.text) ||
               pickFirstVideoUrl(proxyData) ||
-              pickFirstImageUrl(proxyData?.image_url) ||
-              pickFirstImageUrl(proxyData?.events) ||
-              pickFirstImageUrl(proxyData?.text) ||
               pickFirstImageUrl(proxyData) ||
               "";
             const doneErr = String(proxyData?.done_error || "").trim();
@@ -1120,7 +1116,7 @@ const PipelineBatchVideo = () => {
         upscaleError: null,
         upscaleTemplateEnum: item.upscaleTemplateEnum || VIDEO_HD_TEMPLATE_ENUM_2K,
       });
-    } catch (err) {
+    } catch {
       updateResult(item.id, { videoStatus: "error", videoError: MOTION_FAILURE_MESSAGE });
     }
   },
@@ -1158,9 +1154,6 @@ const PipelineBatchVideo = () => {
           pickFirstVideoUrl(proxyData?.events) ||
           pickFirstVideoUrl(proxyData?.text) ||
           pickFirstVideoUrl(proxyData) ||
-          pickFirstImageUrl(proxyData?.image_url) ||
-          pickFirstImageUrl(proxyData?.events) ||
-          pickFirstImageUrl(proxyData?.text) ||
           pickFirstImageUrl(proxyData) ||
           "";
         const doneErr = String(proxyData?.done_error || "").trim();
@@ -1231,7 +1224,7 @@ const PipelineBatchVideo = () => {
       upscaledVideoUrl: null,
       upscaleStatus: "idle",
       upscaleError: null,
-      upscaleTemplateEnum: item.upscaleTemplateEnum || VIDEO_HD_TEMPLATE_ENUM_2K,
+      upscaleTemplateEnum: VIDEO_HD_TEMPLATE_ENUM_2K,
     });
   }, [updateResult]);
 
@@ -2137,15 +2130,25 @@ const PipelineBatchVideo = () => {
                             <Loader2 className="w-5 h-5 animate-spin" />
                           </div>
                         )}
-                        {item.outputUrl ? (
+                        {item.outputUrl && failedImageUrls[item.id] !== item.outputUrl ? (
                           <button
                             type="button"
                             onClick={() => setPreviewImage(item.outputUrl)}
                             className="block w-full h-36 rounded-lg border border-slate-800 overflow-hidden"
                             title="点击放大预览"
                           >
-                            <img src={item.outputUrl} alt="图片结果" className="w-full h-full object-cover" />
+                            <img
+                              src={item.outputUrl}
+                              alt="图片结果"
+                              className="w-full h-full object-cover"
+                              onError={() => handleResultImageError(item)}
+                            />
                           </button>
+                        ) : item.outputUrl ? (
+                          <div className="w-full h-36 rounded-lg border border-amber-500/30 bg-slate-950/60 flex flex-col items-center justify-center gap-1 text-xs text-slate-400">
+                            <AlertCircle className="w-4 h-4 text-amber-400" />
+                            图片加载失败
+                          </div>
                         ) : (
                           <div className="w-full h-36 rounded-lg border border-dashed border-slate-800 flex items-center justify-center text-xs text-slate-600">
                             {item.status === "error" ? "生成失败" : "等待生成"}
