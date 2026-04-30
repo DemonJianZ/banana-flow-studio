@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
+import * as THREE from "three";
 import {
   Upload,
   Image as ImageIcon,
@@ -57,6 +58,7 @@ import {
   VolumeX,
   FolderOpen,
   Save,
+  Camera,
 } from "lucide-react";
 import { useAuth } from "../auth/AuthProvider";
 import { useNavigate } from "../router";
@@ -1740,6 +1742,7 @@ const NODE_TYPES = {
   PROCESSOR: "processor",
   POST_PROCESSOR: "post_processor",
   VIDEO_GEN: "video_gen",
+  PANORAMA_VIEWER: "panorama_viewer",
   OUTPUT: "output",
 };
 
@@ -2458,6 +2461,12 @@ const checkNodeReady = (node, nodes, connections) => {
         String(node.data.worldviewBackground || "").trim()
     );
   }
+  if (node.type === NODE_TYPES.PANORAMA_VIEWER) {
+    if (node.data.image) return true;
+    const inputConns = connections.filter((c) => c.to === node.id);
+    const sourceNodes = inputConns.map((c) => nodes.find((n) => n.id === c.from)).filter(Boolean);
+    return sourceNodes.some((n) => (n.data.images?.length || 0) > 0 || (n.data.uploadedImages?.length || 0) > 0);
+  }
   if (node.type === NODE_TYPES.OUTPUT) return true;
 
   const inputConns = connections.filter((c) => c.to === node.id);
@@ -2505,6 +2514,269 @@ const VideoPlayer = ({ src, className, controls = false, autoPlay = true, ...pro
       onError={() => setError(true)}
       {...props}
     />
+  );
+};
+
+const clampPanoramaZoom = (value) => Math.min(2.4, Math.max(0.75, Number(value) || 1));
+const normalizePanoramaYaw = (value) => {
+  const next = Number(value) || 0;
+  return ((next % 360) + 360) % 360;
+};
+
+const PanoramaViewerSurface = ({
+  image,
+  yaw = 0,
+  zoom = 1,
+  onYawChange,
+  onZoomChange,
+  onReset,
+  onOpenFullscreen,
+  onSnapshot,
+  className = "",
+  compact = false,
+}) => {
+  const mountRef = useRef(null);
+  const dragRef = useRef({ active: false, startX: 0, startYaw: 0 });
+  const threeRef = useRef(null);
+  const hasImage = Boolean(image);
+  const safeYaw = normalizePanoramaYaw(yaw);
+  const safeZoom = clampPanoramaZoom(zoom);
+  const cameraFov = Math.max(32, Math.min(92, 76 / safeZoom));
+
+  useEffect(() => {
+    const mount = mountRef.current;
+    if (!mount) return undefined;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(cameraFov, 1, 0.1, 1100);
+    camera.position.set(0, 0, 0.01);
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: false,
+      powerPreference: "high-performance",
+      preserveDrawingBuffer: true,
+    });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setClearColor(0x0f172a, 1);
+    renderer.domElement.className = "h-full w-full";
+    renderer.domElement.dataset.panoramaCanvas = "true";
+    mount.appendChild(renderer.domElement);
+
+    const geometry = new THREE.SphereGeometry(500, 64, 40);
+    geometry.scale(-1, 1, 1);
+    const material = new THREE.MeshBasicMaterial({ color: 0x182033 });
+    const mesh = new THREE.Mesh(geometry, material);
+    scene.add(mesh);
+
+    let frameId = 0;
+    let disposed = false;
+    const resize = () => {
+      if (disposed || !mount) return;
+      const rect = mount.getBoundingClientRect();
+      const width = Math.max(1, Math.floor(rect.width));
+      const height = Math.max(1, Math.floor(rect.height));
+      renderer.setSize(width, height, false);
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+    };
+    const render = () => {
+      if (disposed) return;
+      renderer.render(scene, camera);
+      frameId = window.requestAnimationFrame(render);
+    };
+
+    resize();
+    window.addEventListener("resize", resize);
+    frameId = window.requestAnimationFrame(render);
+    threeRef.current = { camera, renderer, scene, geometry, material, mesh, resize };
+
+    return () => {
+      disposed = true;
+      window.cancelAnimationFrame(frameId);
+      window.removeEventListener("resize", resize);
+      threeRef.current = null;
+      geometry.dispose();
+      material.map?.dispose?.();
+      material.dispose();
+      renderer.dispose();
+      renderer.domElement.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    const state = threeRef.current;
+    if (!state) return;
+    state.camera.fov = cameraFov;
+    state.camera.updateProjectionMatrix();
+    state.mesh.geometry = state.geometry;
+    state.mesh.position.set(0, 0, 0);
+    state.mesh.rotation.set(0, 0, 0);
+    const phi = THREE.MathUtils.degToRad(90);
+    const theta = THREE.MathUtils.degToRad(safeYaw);
+    state.camera.lookAt(
+      500 * Math.sin(phi) * Math.cos(theta),
+      0,
+      500 * Math.sin(phi) * Math.sin(theta),
+    );
+  }, [cameraFov, safeYaw]);
+
+  useEffect(() => {
+    const state = threeRef.current;
+    if (!state) return undefined;
+    if (!image) {
+      state.material.map?.dispose?.();
+      state.material.map = null;
+      state.material.color.set(0x182033);
+      state.material.needsUpdate = true;
+      return undefined;
+    }
+    let cancelled = false;
+    const loader = new THREE.TextureLoader();
+    loader.setCrossOrigin("anonymous");
+    loader.load(
+      image,
+      (texture) => {
+        if (cancelled || !threeRef.current) {
+          texture.dispose();
+          return;
+        }
+        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.wrapS = THREE.RepeatWrapping;
+        texture.wrapT = THREE.ClampToEdgeWrapping;
+        texture.minFilter = THREE.LinearFilter;
+        texture.magFilter = THREE.LinearFilter;
+        const current = threeRef.current.material;
+        current.map?.dispose?.();
+        current.map = texture;
+        current.color.set(0xffffff);
+        current.needsUpdate = true;
+      },
+      undefined,
+      () => {
+        if (!threeRef.current) return;
+        threeRef.current.material.color.set(0x182033);
+        threeRef.current.material.needsUpdate = true;
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [image]);
+
+  const handlePointerDown = (event) => {
+    if (!hasImage) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragRef.current = { active: true, startX: event.clientX, startYaw: safeYaw };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+
+  const handlePointerMove = (event) => {
+    if (!dragRef.current.active) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const delta = event.clientX - dragRef.current.startX;
+    onYawChange?.(normalizePanoramaYaw(dragRef.current.startYaw - delta / safeZoom));
+  };
+
+  const handlePointerUp = (event) => {
+    if (!dragRef.current.active) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragRef.current.active = false;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+  };
+
+  const captureSnapshot = () => {
+    const state = threeRef.current;
+    if (!state || !hasImage) return;
+    state.renderer.render(state.scene, state.camera);
+    const dataUrl = state.renderer.domElement.toDataURL("image/png");
+    if (dataUrl) onSnapshot?.(dataUrl);
+  };
+
+  return (
+    <div
+      className={`nodrag relative overflow-hidden rounded-[16px] border border-slate-200 bg-slate-950 ${className}`}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      onWheel={(event) => {
+        if (!hasImage) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onZoomChange?.(clampPanoramaZoom(safeZoom + (event.deltaY > 0 ? -0.08 : 0.08)));
+      }}
+    >
+      <div ref={mountRef} className="absolute inset-0 cursor-grab active:cursor-grabbing" />
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-14 bg-gradient-to-b from-black/42 to-transparent" />
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-black/50 to-transparent" />
+      <div className="pointer-events-none absolute left-1/2 top-1/2 h-10 w-10 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/20" />
+      <div className="pointer-events-none absolute left-1/2 top-1/2 h-px w-8 -translate-x-1/2 bg-white/25" />
+      <div className="pointer-events-none absolute left-1/2 top-1/2 h-8 w-px -translate-y-1/2 bg-white/25" />
+
+      {hasImage ? (
+        <div className="absolute bottom-3 left-3 flex items-center gap-2 rounded-full border border-white/15 bg-black/42 px-3 py-1.5 text-[11px] font-medium text-white/85 backdrop-blur-md">
+          <Scan className="h-3.5 w-3.5" />
+          <span>{Math.round(safeYaw)} deg</span>
+          <span className="text-white/45">/</span>
+          <span>{Math.round(safeZoom * 100)}%</span>
+        </div>
+      ) : (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center text-white/72">
+          <Scan className="h-7 w-7 text-white/55" />
+          <div className="text-[13px] font-medium text-white">等待全景图</div>
+          <div className="text-[11px] leading-5 text-white/55">上传或连接一张 2:1 全景图后浏览</div>
+        </div>
+      )}
+
+      {hasImage ? (
+        <div className="absolute right-3 top-3 flex items-center gap-1.5">
+          <button
+            type="button"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-black/42 text-white/82 backdrop-blur-md transition hover:bg-white/14 hover:text-white"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              onReset?.();
+            }}
+            title="重置视角"
+            aria-label="重置视角"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+          </button>
+          {!compact ? (
+            <button
+              type="button"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-black/42 text-white/82 backdrop-blur-md transition hover:bg-white/14 hover:text-white"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpenFullscreen?.();
+              }}
+              title="全屏浏览"
+              aria-label="全屏浏览"
+            >
+              <Maximize className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-black/42 text-white/82 backdrop-blur-md transition hover:bg-white/14 hover:text-white"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              captureSnapshot();
+            }}
+            title="截图当前视角"
+            aria-label="截图当前视角"
+          >
+            <Camera className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      ) : null}
+    </div>
   );
 };
 
@@ -2828,7 +3100,14 @@ const PropertyPanel = ({
   }));
   const [imageParamLoading, setImageParamLoading] = useState(false);
   const [imageParamError, setImageParamError] = useState("");
-  const hasConfigNode = !!node && ![NODE_TYPES.INPUT, NODE_TYPES.OUTPUT, NODE_TYPES.TEXT_INPUT, NODE_TYPES.ROLE_INPUT, NODE_TYPES.ROLE_STRUCTURER].includes(node?.type);
+  const hasConfigNode = !!node && ![
+    NODE_TYPES.INPUT,
+    NODE_TYPES.OUTPUT,
+    NODE_TYPES.TEXT_INPUT,
+    NODE_TYPES.ROLE_INPUT,
+    NODE_TYPES.ROLE_STRUCTURER,
+    NODE_TYPES.PANORAMA_VIEWER,
+  ].includes(node?.type);
 
   const isProcessor = node?.type === NODE_TYPES.PROCESSOR;
   const isPostProcessor = node?.type === NODE_TYPES.POST_PROCESSOR;
@@ -4033,6 +4312,7 @@ const NodeComponent = ({
   onRunVideoRmbg,
   onRunVideoLineart,
   onRunVideoSplit,
+  onPanoramaSnapshot,
   onQuickCreateFromText,
   onRunNode,
   onCancelNode,
@@ -4069,8 +4349,12 @@ const NodeComponent = ({
   const [inlineImageParamLoading, setInlineImageParamLoading] = useState(false);
   const [inlineImageParamError, setInlineImageParamError] = useState("");
   const [isUploadDropActive, setIsUploadDropActive] = useState(false);
+  const [panoramaYaw, setPanoramaYaw] = useState(() => normalizePanoramaYaw(node.data.yaw || 0));
+  const [panoramaZoom, setPanoramaZoom] = useState(() => clampPanoramaZoom(node.data.zoom || 1));
+  const [panoramaFullscreen, setPanoramaFullscreen] = useState(false);
   const nodeRootRef = useRef(null);
   const simpleMediaUploadInputRef = useRef(null);
+  const panoramaUploadInputRef = useRef(null);
   const videoLastFrameInputRef = useRef(null);
 
   useEffect(() => {
@@ -4187,6 +4471,7 @@ const NodeComponent = ({
   const isTextInputNode = node.type === NODE_TYPES.TEXT_INPUT;
   const isRoleInputNode = node.type === NODE_TYPES.ROLE_INPUT;
   const isRoleStructurerNode = node.type === NODE_TYPES.ROLE_STRUCTURER;
+  const isPanoramaViewerNode = node.type === NODE_TYPES.PANORAMA_VIEWER;
   const isCompactInput = isInput && !!node.data.compact;
   const isSimpleMediaInputNode = isInput && !isCompactInput;
   const isInlineText2ImgNode = isProcessor && node.data.mode === "text2img";
@@ -4363,10 +4648,19 @@ const NodeComponent = ({
     setVideoSplitOutputResolution(DEFAULT_VIDEO_SPLIT_OUTPUT_RESOLUTION);
     setVideoSplitIncludeAudio(false);
     setIsUploadDropActive(false);
+    setPanoramaYaw(normalizePanoramaYaw(node.data.yaw || 0));
+    setPanoramaZoom(clampPanoramaZoom(node.data.zoom || 1));
+    setPanoramaFullscreen(false);
     const nextSegments = normalizeVideoSplitSegments([]);
     setVideoSplitSegments(nextSegments);
     setVideoSplitDrafts(buildVideoSplitDrafts(nextSegments));
   }, [node.id]);
+
+  useEffect(() => {
+    if (!isPanoramaViewerNode) return;
+    setPanoramaYaw(normalizePanoramaYaw(node.data.yaw || 0));
+    setPanoramaZoom(clampPanoramaZoom(node.data.zoom || 1));
+  }, [isPanoramaViewerNode, node.data.yaw, node.data.zoom]);
 
   useEffect(() => {
     if (!showCompactInputActions) {
@@ -4737,6 +5031,7 @@ const NodeComponent = ({
   if (isProcessor) title = node.data.title || TOOL_CARDS[node.data.mode]?.name || "图片生成";
   if (isPostProcessor) title = node.data.title || TOOL_CARDS[node.data.mode]?.name || "后期增强";
   if (isVideoGen) title = node.data.title || TOOL_CARDS[node.data.mode]?.name || "视频生成";
+  if (isPanoramaViewerNode) title = node.data.title || "全景图浏览器";
   if (isTextInputNode) title = "提示词";
   if (isRoleStructurerNode) title = "角色结构化";
 
@@ -4761,6 +5056,41 @@ const NodeComponent = ({
       return `${base} bg-[#DBEAFE] text-[#2563EB] hover:bg-[#DBEAFE] active:bg-[#BFDBFE]`;
     }
     return `${base} hover:bg-[#E5E7EB] active:bg-[#D1D5DB]`;
+  };
+  const updatePanoramaView = (next = {}) => {
+    const nextYaw = next.yaw == null ? panoramaYaw : normalizePanoramaYaw(next.yaw);
+    const nextZoom = next.zoom == null ? panoramaZoom : clampPanoramaZoom(next.zoom);
+    setPanoramaYaw(nextYaw);
+    setPanoramaZoom(nextZoom);
+    updateData(node.id, { yaw: nextYaw, zoom: nextZoom });
+  };
+  const handlePanoramaUpload = async (event) => {
+    const files = Array.from(event.target.files || []).filter((file) => isImageFileLike(file));
+    if (!files.length) {
+      event.target.value = "";
+      return;
+    }
+    try {
+      const [image] = await readFilesAsDataUrls(files.slice(0, 1));
+      if (image) {
+        updateData(node.id, {
+          image,
+          images: [image],
+          status: "success",
+          error: "",
+          yaw: 0,
+          zoom: 1,
+        });
+        setPanoramaYaw(0);
+        setPanoramaZoom(1);
+      }
+    } finally {
+      event.target.value = "";
+    }
+  };
+  const handlePanoramaSnapshot = (dataUrl) => {
+    if (!dataUrl) return;
+    onPanoramaSnapshot?.(node.id, dataUrl);
   };
   const renderBackgroundProcessingOverlay = ({
     title: overlayTitle = "正在抠图",
@@ -4882,6 +5212,10 @@ const NodeComponent = ({
     : isOutput
     ? `absolute w-[280px] overflow-visible rounded-[16px] border bg-white shadow-[0_14px_30px_rgba(15,23,42,0.06)] flex flex-col transition-colors duration-200 ${
         selected ? "border-cyan-300" : "border-[#E5E7EB]"
+      } ${selectedNodeShellClass}`
+    : isPanoramaViewerNode
+    ? `absolute w-[min(520px,calc(100vw-48px))] overflow-visible rounded-[18px] border bg-white shadow-[0_18px_42px_rgba(15,23,42,0.08)] flex flex-col transition-colors duration-200 ${
+        node.data.status === "error" ? "border-rose-300" : selected ? "border-cyan-300" : "border-[#E5E7EB]"
       } ${selectedNodeShellClass}`
     : isInlineImageGenNode
     ? `absolute w-[280px] overflow-visible rounded-[16px] border bg-white shadow-[0_14px_30px_rgba(15,23,42,0.06)] flex flex-col transition-colors duration-200 ${
@@ -6055,6 +6389,142 @@ const NodeComponent = ({
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {isPanoramaViewerNode && (
+          <div className="nodrag p-3" onMouseDown={(e) => e.stopPropagation()}>
+            <input
+              ref={panoramaUploadInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={handlePanoramaUpload}
+            />
+            <PanoramaViewerSurface
+              image={node.data.image || node.data.images?.[0] || ""}
+              yaw={panoramaYaw}
+              zoom={panoramaZoom}
+              onYawChange={(nextYaw) => {
+                setPanoramaYaw(nextYaw);
+                updateData(node.id, { yaw: nextYaw });
+              }}
+              onZoomChange={(nextZoom) => updatePanoramaView({ zoom: nextZoom })}
+              onReset={() => updatePanoramaView({ yaw: 0, zoom: 1 })}
+              onOpenFullscreen={() => setPanoramaFullscreen(true)}
+              onSnapshot={handlePanoramaSnapshot}
+              className="h-[292px] w-full"
+            />
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0 text-[11px] leading-5 text-slate-500">
+                拖动画面环视，滚轮缩放；推荐使用 2:1 等距柱状全景图。
+              </div>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <button
+                  type="button"
+                  disabled={!(node.data.image || node.data.images?.[0])}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3 text-[11px] font-medium text-emerald-700 transition hover:border-emerald-300 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    const canvas = nodeRootRef.current?.querySelector?.("[data-panorama-canvas='true']");
+                    if (!canvas) return;
+                    const dataUrl = canvas.toDataURL("image/png");
+                    handlePanoramaSnapshot(dataUrl);
+                  }}
+                >
+                  <Camera className="h-3.5 w-3.5" />
+                  截图
+                </button>
+                <button
+                  type="button"
+                  disabled={!isReady || node.data.status === "loading"}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-full border border-cyan-200 bg-cyan-50 px-3 text-[11px] font-medium text-cyan-700 transition hover:border-cyan-300 hover:bg-cyan-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onRunNode?.(node.id);
+                  }}
+                >
+                  {node.data.status === "loading" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                  载入
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex h-8 items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 text-[11px] font-medium text-slate-700 transition hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-700"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    panoramaUploadInputRef.current?.click();
+                  }}
+                >
+                  <Upload className="h-3.5 w-3.5" />
+                  上传
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex h-8 items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 text-[11px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    updatePanoramaView({ yaw: 0, zoom: 1 });
+                  }}
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  重置
+                </button>
+              </div>
+            </div>
+            {node.data.error ? <div className="mt-2 text-[11px] text-rose-500">{node.data.error}</div> : null}
+            {panoramaFullscreen && (node.data.image || node.data.images?.[0]) ? createPortal(
+              <div
+                className="fixed inset-0 z-[120] bg-slate-950/92 p-5 backdrop-blur-sm"
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={() => setPanoramaFullscreen(false)}
+              >
+                <div className="absolute right-5 top-5 z-10 flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="inline-flex h-10 items-center gap-2 rounded-full border border-white/15 bg-white/10 px-4 text-[13px] font-medium text-white/86 backdrop-blur-md transition hover:bg-white/16 hover:text-white"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      const canvases = Array.from(document.querySelectorAll("[data-panorama-canvas='true']"));
+                      const canvas = canvases[canvases.length - 1];
+                      if (!canvas) return;
+                      handlePanoramaSnapshot(canvas.toDataURL("image/png"));
+                    }}
+                    title="截图当前视角"
+                    aria-label="截图当前视角"
+                  >
+                    <Camera className="h-4 w-4" />
+                    截图
+                  </button>
+                  <button
+                    type="button"
+                    className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/15 bg-white/10 text-white/82 backdrop-blur-md transition hover:bg-white/16 hover:text-white"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setPanoramaFullscreen(false);
+                    }}
+                    title="关闭"
+                    aria-label="关闭"
+                  >
+                    <X className="h-5 w-5" />
+                  </button>
+                </div>
+                <PanoramaViewerSurface
+                  image={node.data.image || node.data.images?.[0] || ""}
+                  yaw={panoramaYaw}
+                  zoom={panoramaZoom}
+                  onYawChange={(nextYaw) => {
+                    setPanoramaYaw(nextYaw);
+                    updateData(node.id, { yaw: nextYaw });
+                  }}
+                  onZoomChange={(nextZoom) => updatePanoramaView({ zoom: nextZoom })}
+                  onReset={() => updatePanoramaView({ yaw: 0, zoom: 1 })}
+                  onSnapshot={handlePanoramaSnapshot}
+                  compact
+                  className="h-full w-full rounded-[20px]"
+                />
+              </div>,
+              document.body,
+            ) : null}
           </div>
         )}
 
@@ -8607,6 +9077,15 @@ const handleNodeMouseDown = (e, nid) => {
             )
           : defaultVideoModelId,
       },
+      [NODE_TYPES.PANORAMA_VIEWER]: {
+        title: "全景图浏览器",
+        image: "",
+        images: [],
+        yaw: 0,
+        zoom: 1,
+        status: "idle",
+        error: "",
+      },
       [NODE_TYPES.OUTPUT]: { images: [] },
     };
 
@@ -8715,6 +9194,36 @@ const handleNodeMouseDown = (e, nid) => {
       { id: generateId(), from: n2.id, to: n4.id },
       { id: generateId(), from: n3.id, to: n4.id },
       { id: generateId(), from: n4.id, to: n5.id },
+    ], { alignToViewportCenter: true });
+  };
+
+  const createPanoramaViewerTemplate = () => {
+    const n0 = {
+      id: generateId(),
+      type: NODE_TYPES.INPUT,
+      x: 100,
+      y: 20,
+      data: { images: [], mediaKind: "image", title: "全景图输入" },
+    };
+    const n1 = {
+      id: generateId(),
+      type: NODE_TYPES.PANORAMA_VIEWER,
+      x: 100,
+      y: 260,
+      data: {
+        title: "全景图浏览器",
+        image: "",
+        images: [],
+        yaw: 0,
+        zoom: 1,
+        status: "idle",
+        error: "",
+      },
+    };
+    const n2 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 700, y: 340, data: { title: "视角截图", images: [] } };
+    appendTemplateGraph([n0, n1, n2], [
+      { id: generateId(), from: n0.id, to: n1.id },
+      { id: generateId(), from: n1.id, to: n2.id },
     ], { alignToViewportCenter: true });
   };
 
@@ -11083,6 +11592,51 @@ const handleNodeMouseDown = (e, nid) => {
 
   const updateNodeData = (id, d) => setNodes((p) => p.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...d } } : n)));
 
+  const handlePanoramaSnapshot = useCallback(
+    (nodeId, dataUrl) => {
+      if (!nodeId || !dataUrl) return;
+      pushHistory();
+      const downstreamOutputIds = new Set(
+        (connectionsRef.current || [])
+          .filter((conn) => conn.from === nodeId)
+          .map((conn) => nodesRef.current.find((node) => node.id === conn.to))
+          .filter((node) => node?.type === NODE_TYPES.OUTPUT)
+          .map((node) => node.id),
+      );
+      setNodes((prev) =>
+        prev.map((node) => {
+          if (node.id === nodeId) {
+            const screenshots = [...(node.data.screenshots || []), dataUrl];
+            return {
+              ...node,
+              data: {
+                ...node.data,
+                screenshots,
+                images: screenshots,
+                lastSnapshot: dataUrl,
+                status: "success",
+                error: "",
+              },
+            };
+          }
+          if (downstreamOutputIds.has(node.id)) {
+            return {
+              ...node,
+              data: {
+                ...node.data,
+                images: [...(node.data.images || []), dataUrl],
+              },
+            };
+          }
+          return node;
+        }),
+      );
+      setRunToast({ message: "已截图并输出到后续节点", type: "info" });
+      setTimeout(() => setRunToast(null), 1800);
+    },
+    [pushHistory],
+  );
+
   const startConnection = (e, nid) => {
     e.preventDefault();
     e.stopPropagation();
@@ -11584,6 +12138,32 @@ const handleNodeMouseDown = (e, nid) => {
           applyNodeUpdate(procNode.id, {
             structuredProfile: profile,
             text: JSON.stringify(profile, null, 2),
+            status: "success",
+            error: "",
+            progress: 1,
+            total: 1,
+          });
+          nodeAbortControllersRef.current.delete(nodeId);
+          currentNodeSignal = null;
+          continue;
+        }
+
+        if (procNode.type === NODE_TYPES.PANORAMA_VIEWER) {
+          const panoramaImage = inputImages.find((item) => item && !isVideoContent(item)) || procNode.data.image || procNode.data.images?.[0] || "";
+          if (!panoramaImage) {
+            applyNodeUpdate(procNode.id, {
+              status: "error",
+              error: "请连接或上传一张全景图片",
+              progress: 0,
+              total: 0,
+            });
+            nodeAbortControllersRef.current.delete(nodeId);
+            currentNodeSignal = null;
+            continue;
+          }
+          applyNodeUpdate(procNode.id, {
+            image: panoramaImage,
+            images: [panoramaImage],
             status: "success",
             error: "",
             progress: 1,
@@ -12677,7 +13257,7 @@ const handleNodeMouseDown = (e, nid) => {
             id: "node_image_generate",
             icon: ImagePlus,
             label: "图片工作流",
-            desc: "文生图 / 图生图 / 多图生图",
+            desc: "文生图 / 图生图 / 全景浏览",
             color: "text-purple-400",
             bg: "bg-purple-500/10",
             onClick: () => {},
@@ -14515,6 +15095,22 @@ const handleNodeMouseDown = (e, nid) => {
                   <div className="mt-0.5 text-[11px] text-slate-500">多参考图联合生成与重绘</div>
                 </div>
               </button>
+              <button
+                type="button"
+                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
+                onClick={() => {
+                  setSidebarImageCreateMenu(null);
+                  safeInvoke(createPanoramaViewerTemplate, "全景图浏览器");
+                }}
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
+                  <Scan className="h-[18px] w-[18px]" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-medium text-slate-800">全景图浏览器</div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">在画布中拖拽查看 360 全景图</div>
+                </div>
+              </button>
             </div>
           </div>
         ) : null}
@@ -14794,6 +15390,7 @@ const handleNodeMouseDown = (e, nid) => {
                 onRunVideoRmbg={runVideoRmbg}
                 onRunVideoLineart={runVideoLineart}
                 onRunVideoSplit={runVideoSplit}
+                onPanoramaSnapshot={handlePanoramaSnapshot}
                 onQuickCreateFromText={createPromptQuickChain}
                 onRunNode={(nodeId) => executeFlow(new Set([nodeId]))}
                 onCancelNode={() => cancelNodeGeneration(n.id)}
