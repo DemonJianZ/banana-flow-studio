@@ -9,13 +9,15 @@ const normalizePath = (path) => {
   return path.startsWith("/") ? path : `/${path}`;
 };
 
+const stripPathExtras = (path) => normalizePath(path).split(/[?#]/)[0];
+
 const matchPath = (routePath, currentPath) => {
   if (routePath === "*") return true;
-  return normalizePath(routePath) === normalizePath(currentPath);
+  return stripPathExtras(routePath) === stripPathExtras(currentPath);
 };
 
 export function BrowserRouter({ children }) {
-  const [path, setPath] = useState(() => window.location.pathname);
+  const [path, setPath] = useState(() => `${window.location.pathname}${window.location.search}`);
 
   const navigate = useCallback((to, options = {}) => {
     const target = normalizePath(to);
@@ -28,7 +30,7 @@ export function BrowserRouter({ children }) {
   }, []);
 
   useEffect(() => {
-    const handler = () => setPath(window.location.pathname);
+    const handler = () => setPath(`${window.location.pathname}${window.location.search}`);
     window.addEventListener("popstate", handler);
     return () => window.removeEventListener("popstate", handler);
   }, []);
@@ -68,6 +70,12 @@ export function useNavigate() {
   const ctx = useContext(RouterContext);
   if (!ctx) throw new Error("useNavigate must be used within BrowserRouter");
   return ctx.navigate;
+}
+
+export function useCurrentPath() {
+  const ctx = useContext(RouterContext);
+  if (!ctx) throw new Error("useCurrentPath must be used within BrowserRouter");
+  return ctx.path;
 }
 
 export function Link({ to, children, className, target, rel, ...rest }) {

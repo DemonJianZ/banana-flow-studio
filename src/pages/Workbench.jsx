@@ -118,6 +118,7 @@ import { detectIntent } from "../agent/router";
 import { detectPreferenceSuggestions } from "../agent/preferenceSuggestion";
 import { buildHitlFeedbackRows } from "../agent/hitlFeedbackHistory";
 import { AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2 } from "../config";
+import Html360Viewer from "./Html360Viewer";
 import { findAIChatModelIdByKeywords } from "../lib/aiChatModelResolver";
 import { downloadMedia } from "../lib/downloadMedia";
 import { isVideoContent } from "../lib/mediaType.js";
@@ -646,6 +647,9 @@ const readMediaFileAsDataUrl = (file) => {
 
 const readFilesAsDataUrls = (files) =>
   Promise.all(Array.from(files || []).map((file) => readMediaFileAsDataUrl(file)));
+
+const readFilesAsOriginalDataUrls = (files) =>
+  Promise.all(Array.from(files || []).map((file) => readFileAsDataUrl(file)));
 
 const cloneCanvasNodeForHistory = (node) => ({
   ...node,
@@ -2556,7 +2560,7 @@ const PanoramaViewerSurface = ({
       powerPreference: "high-performance",
       preserveDrawingBuffer: true,
     });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 3));
     renderer.setClearColor(0x0f172a, 1);
     renderer.domElement.className = "h-full w-full";
     renderer.domElement.dataset.panoramaCanvas = "true";
@@ -4368,6 +4372,8 @@ const NodeComponent = ({
   const simpleMediaUploadLabel = inputMediaKind === "image" ? "上传图片" : inputMediaKind === "video" ? "上传视频" : "上传图片/视频";
   const simpleMediaDropTitle = inputMediaKind === "image" ? "拖拽图片到此，或点击上传" : inputMediaKind === "video" ? "拖拽视频到此，或点击上传" : "拖拽媒体到此，或点击上传";
   const simpleMediaSupportHint = inputMediaKind === "image" ? "支持 JPG / PNG / WebP / GIF" : inputMediaKind === "video" ? "支持 MP4 / MOV / WebM" : "支持常见图片与视频格式";
+  const shouldPreserveOriginalImageUpload = inputMediaKind === "image" && String(node.data.title || "").includes("全景");
+  const readSimpleMediaUploadFiles = shouldPreserveOriginalImageUpload ? readFilesAsOriginalDataUrls : readFilesAsDataUrls;
 
   const handleFileUpload = (e) => {
     const files = Array.from(e.target.files || []).filter((file) => {
@@ -4377,7 +4383,7 @@ const NodeComponent = ({
     });
     if (!files.length) return;
 
-    readFilesAsDataUrls(files).then((newImages) => {
+    readSimpleMediaUploadFiles(files).then((newImages) => {
       const currentImages = node.data.images || [];
       updateData(node.id, { images: [...currentImages, ...newImages] });
     });
@@ -5071,7 +5077,7 @@ const NodeComponent = ({
       return;
     }
     try {
-      const [image] = await readFilesAsDataUrls(files.slice(0, 1));
+      const [image] = await readFilesAsOriginalDataUrls(files.slice(0, 1));
       if (image) {
         updateData(node.id, {
           image,
@@ -6361,7 +6367,7 @@ const NodeComponent = ({
                       return isMediaFileLike(file);
                     });
                     if (!files.length) return;
-                    readFilesAsDataUrls(files).then((newImages) => {
+                    readSimpleMediaUploadFiles(files).then((newImages) => {
                       updateData(node.id, {
                         images: [...(node.data.images || []), ...newImages],
                       });
@@ -6761,6 +6767,7 @@ const Workbench = () => {
   const [pendingUploadNodeId, setPendingUploadNodeId] = useState("");
   const [showSidebarUploadMenu, setShowSidebarUploadMenu] = useState(false);
   const [sidebarVideoCreateMenu, setSidebarVideoCreateMenu] = useState(null);
+  const [showIntegrated360Viewer, setShowIntegrated360Viewer] = useState(false);
   const [assetLibraryPickerMode, setAssetLibraryPickerMode] = useState(false);
   const [canvasId] = useState(() => {
     const saved = localStorage.getItem(CANVAS_KEY);
@@ -15100,7 +15107,7 @@ const handleNodeMouseDown = (e, nid) => {
                 className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
                 onClick={() => {
                   setSidebarImageCreateMenu(null);
-                  safeInvoke(createPanoramaViewerTemplate, "全景图浏览器");
+                  setShowIntegrated360Viewer(true);
                 }}
               >
                 <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
@@ -15108,7 +15115,7 @@ const handleNodeMouseDown = (e, nid) => {
                 </div>
                 <div className="min-w-0">
                   <div className="text-[13px] font-medium text-slate-800">全景图浏览器</div>
-                  <div className="mt-0.5 text-[11px] text-slate-500">在画布中拖拽查看 360 全景图</div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">在当前页面内查看 360 图片/视频</div>
                 </div>
               </button>
             </div>
@@ -16162,6 +16169,15 @@ const handleNodeMouseDown = (e, nid) => {
           </div>
         </div>
       )}
+
+      {showIntegrated360Viewer
+        ? createPortal(
+            <div className="fixed inset-0 z-[180] bg-slate-950">
+              <Html360Viewer embedded onClose={() => setShowIntegrated360Viewer(false)} />
+            </div>,
+            document.body,
+          )
+        : null}
 
       {/* Preview Modal */}
       {previewImage && (

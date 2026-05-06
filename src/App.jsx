@@ -1,5 +1,5 @@
 import React from "react";
-import { BrowserRouter, Navigate, Route, Routes } from "./router";
+import { BrowserRouter, Navigate, Route, Routes, useCurrentPath } from "./router";
 import { AuthProvider } from "./auth/AuthProvider";
 import Workbench from "./pages/Workbench";
 import AuthPage from "./pages/AuthPage";
@@ -8,7 +8,9 @@ import PipelineBatchVideo from "./pages/PipelineBatchVideo";
 import PipelineFeatureExtract from "./pages/PipelineFeatureExtract";
 import PipelineBatchWordArt from "./pages/PipelineBatchWordArt";
 import PipelineRmbg from "./pages/PipelineRmbg";
+import Html360Viewer from "./pages/Html360Viewer";
 import GlobalToast from "./components/GlobalToast";
+import { getPhotographerToolFromLocation } from "./lib/photographerHostRoute";
 
 
 const LoadingScreen = () => (
@@ -21,6 +23,14 @@ const LoadingScreen = () => (
 );
 
 const ProtectedRoute = ({ children }) => children;
+
+const AppEntry = () => {
+  useCurrentPath();
+  if (getPhotographerToolFromLocation() === "360-viewer") {
+    return <Html360Viewer />;
+  }
+  return <Workbench />;
+};
 
 const RootRedirect = () => <Navigate to="/app" replace />;
 
@@ -36,7 +46,7 @@ export default function App() {
             path="/app"
             element={
               <ProtectedRoute>
-                <Workbench />
+                <AppEntry />
               </ProtectedRoute>
             }
           />
@@ -101,6 +111,14 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <PipelineBatchWordArt />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/app/360-viewer"
+            element={
+              <ProtectedRoute>
+                <Html360Viewer />
               </ProtectedRoute>
             }
           />
