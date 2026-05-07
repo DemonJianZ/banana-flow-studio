@@ -53,8 +53,21 @@ class AgentToolRegistry:
         name = str(tool_name or "").strip()
         return name in self._tools or name in self._aliases
 
-    def list_tools(self) -> List[Dict[str, Any]]:
-        return [entry.spec.to_dict() for _, entry in sorted(self._tools.items(), key=lambda item: item[0])]
+    def list_tools(
+        self,
+        *,
+        category: Optional[str] = None,
+        enabled: Optional[bool] = None,
+    ) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        target_category = str(category or "").strip()
+        for _, entry in sorted(self._tools.items(), key=lambda item: item[0]):
+            if target_category and str(entry.spec.category or "").strip() != target_category:
+                continue
+            if enabled is not None and bool(entry.spec.enabled) is not bool(enabled):
+                continue
+            out.append(entry.spec.to_dict())
+        return out
 
     def list_tool_names(self) -> List[str]:
         return sorted(set(self._tools.keys()) | set(self._aliases.keys()))
@@ -69,5 +82,18 @@ class AgentToolRegistry:
         payload["canonical_name"] = entry.spec.name
         return payload
 
-    def to_prompt_catalog(self) -> List[Dict[str, Any]]:
-        return [entry.spec.to_prompt_catalog() for _, entry in sorted(self._tools.items(), key=lambda item: item[0])]
+    def to_prompt_catalog(
+        self,
+        *,
+        category: Optional[str] = None,
+        enabled: Optional[bool] = None,
+    ) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        target_category = str(category or "").strip()
+        for _, entry in sorted(self._tools.items(), key=lambda item: item[0]):
+            if target_category and str(entry.spec.category or "").strip() != target_category:
+                continue
+            if enabled is not None and bool(entry.spec.enabled) is not bool(enabled):
+                continue
+            out.append(entry.spec.to_prompt_catalog())
+        return out

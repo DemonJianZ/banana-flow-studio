@@ -182,3 +182,8 @@ class AgentToolSpec:
         payload = dict(args or {})
         _validate_schema(self.input_schema, payload, "")
         return payload
+
+    def validate_output(self, output: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(output or {})
+        _validate_schema(self.output_schema, payload, "")
+        return payload

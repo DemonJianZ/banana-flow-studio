@@ -89,6 +89,51 @@ class AgentToolRegistryTests(unittest.TestCase):
         self.assertIn("agent_prompt_polish", encoded)
         self.assertIn("comfyui.text2img", encoded)
 
+    def test_list_tools_and_prompt_catalog_should_support_category_and_enabled_filtering(self):
+        registry = AgentToolRegistry()
+        registry.register(
+            AgentToolSpec(
+                name="prompt_enabled",
+                description="prompt",
+                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                output_schema={"type": "object", "properties": {}, "additionalProperties": True},
+                annotations={"readOnlyHint": True, "idempotentHint": True, "destructiveHint": False},
+                category="prompt",
+                enabled=True,
+            ),
+            lambda args, ctx: {},
+        )
+        registry.register(
+            AgentToolSpec(
+                name="prompt_disabled",
+                description="prompt disabled",
+                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                output_schema={"type": "object", "properties": {}, "additionalProperties": True},
+                annotations={"readOnlyHint": True, "idempotentHint": True, "destructiveHint": False},
+                category="prompt",
+                enabled=False,
+            ),
+            lambda args, ctx: {},
+        )
+        registry.register(
+            AgentToolSpec(
+                name="asset_enabled",
+                description="asset",
+                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                output_schema={"type": "object", "properties": {}, "additionalProperties": True},
+                annotations={"readOnlyHint": True, "idempotentHint": True, "destructiveHint": False},
+                category="assets",
+                enabled=True,
+            ),
+            lambda args, ctx: {},
+        )
+
+        prompt_enabled = registry.list_tools(category="prompt", enabled=True)
+        prompt_all = registry.to_prompt_catalog(category="prompt", enabled=None)
+
+        self.assertEqual([item["name"] for item in prompt_enabled], ["prompt_enabled"])
+        self.assertEqual([item["name"] for item in prompt_all], ["prompt_disabled", "prompt_enabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

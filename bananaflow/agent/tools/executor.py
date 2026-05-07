@@ -9,6 +9,9 @@ from .registry import AgentToolRegistry
 
 
 REDACTED_KEYS = ("authorization", "token", "api_key", "cookie", "password", "secret")
+DEFAULT_TRACE_LIST_LIMIT = 50
+DEFAULT_TRACE_OBJECT_DEPTH = 4
+DEFAULT_TRACE_COLLECTION_ITEMS = 20
 
 
 def _is_redacted_key(key: str) -> bool:
@@ -26,22 +29,34 @@ def _truncate_string(text: str, limit: int = 240) -> str:
     return value
 
 
-def _sanitize_trace_value(value: Any) -> Any:
+def _sanitize_trace_value(value: Any, *, depth: int = 0, max_depth: int = DEFAULT_TRACE_OBJECT_DEPTH) -> Any:
+    if depth >= max_depth:
+        return "<max-depth>"
     if isinstance(value, dict):
         out: Dict[str, Any] = {}
-        for key, item in value.items():
+        for index, (key, item) in enumerate(value.items()):
+            if index >= DEFAULT_TRACE_COLLECTION_ITEMS:
+                out["<truncated_keys>"] = len(value) - DEFAULT_TRACE_COLLECTION_ITEMS
+                break
             if item is None:
                 continue
             key_text = str(key)
             if _is_redacted_key(key_text):
                 out[key_text] = "<redacted>"
             else:
-                out[key_text] = _sanitize_trace_value(item)
+                out[key_text] = _sanitize_trace_value(item, depth=depth + 1, max_depth=max_depth)
         return out
     if isinstance(value, list):
-        return [_sanitize_trace_value(item) for item in value if item is not None]
+        out = [_sanitize_trace_value(item, depth=depth + 1, max_depth=max_depth) for item in value[:DEFAULT_TRACE_COLLECTION_ITEMS] if item is not None]
+        if len(value) > DEFAULT_TRACE_COLLECTION_ITEMS:
+            out.append(f"<truncated_items:{len(value) - DEFAULT_TRACE_COLLECTION_ITEMS}>")
+        return out
     if isinstance(value, tuple):
-        return [_sanitize_trace_value(item) for item in value if item is not None]
+        items = list(value)
+        out = [_sanitize_trace_value(item, depth=depth + 1, max_depth=max_depth) for item in items[:DEFAULT_TRACE_COLLECTION_ITEMS] if item is not None]
+        if len(items) > DEFAULT_TRACE_COLLECTION_ITEMS:
+            out.append(f"<truncated_items:{len(items) - DEFAULT_TRACE_COLLECTION_ITEMS}>")
+        return out
     if isinstance(value, str):
         return _truncate_string(value)
     return value
@@ -82,6 +97,9 @@ class AgentToolResult:
     retry_count: int = 0
     tool_version: str = ""
     tool_hash: str = ""
+    category: str = ""
+    cost_level: str = ""
+    timeout_seconds: Optional[float] = None
     exception: Optional[BaseException] = None
 
 
@@ -125,6 +143,9 @@ class AgentToolExecutor:
         canonical_name = str(tool_name or "").strip()
         tool_version = ""
         tool_hash = ""
+        category = ""
+        cost_level = ""
+        timeout_seconds: Optional[float] = None
         max_attempts = 1
 
         try:
@@ -133,6 +154,12 @@ class AgentToolExecutor:
             canonical_name = spec.name
             tool_version = spec.tool_version
             tool_hash = spec.tool_hash
+            category = str(spec.category or "").strip()
+            cost_level = str(spec.cost_level or "").strip()
+            timeout_seconds = spec.timeout_seconds
+            allow_disabled = bool((call_context.extra or {}).get("allow_disabled_tools"))
+            if not spec.enabled and not allow_disabled:
+                raise AgentToolExecutionError(f"tool disabled: {canonical_name}")
             payload = spec.validate_input(payload)
             retry_cfg = dict(spec.retry or {})
             max_attempts = max(1, int(retry_cfg.get("max_attempts") or 1))
@@ -144,6 +171,9 @@ class AgentToolExecutor:
                 "tool_name": canonical_name,
                 "tool_version": tool_version,
                 "tool_hash": tool_hash,
+                "category": category,
+                "cost_level": cost_level,
+                "timeout_seconds": timeout_seconds,
                 "req_id": call_context.req_id,
                 "latency_ms": latency_ms,
                 "retry_count": 0,
@@ -160,6 +190,11 @@ class AgentToolExecutor:
                 error={"type": error_type, "message": error_text},
                 latency_ms=latency_ms,
                 retry_count=0,
+                tool_version=tool_version,
+                tool_hash=tool_hash,
+                category=category,
+                cost_level=cost_level,
+                timeout_seconds=timeout_seconds,
             )
             return AgentToolResult(
                 ok=False,
@@ -171,6 +206,9 @@ class AgentToolExecutor:
                 retry_count=0,
                 tool_version=tool_version,
                 tool_hash=tool_hash,
+                category=category,
+                cost_level=cost_level,
+                timeout_seconds=timeout_seconds,
                 exception=exc,
             )
 
@@ -181,15 +219,19 @@ class AgentToolExecutor:
                 if not isinstance(result, dict):
                     raise AgentToolExecutionError(f"{canonical_name} returned non-object result")
                 output = dict(result)
-                output.setdefault("tool_name", spec.name)
                 output.setdefault("tool_version", spec.tool_version)
                 output.setdefault("tool_hash", spec.tool_hash)
+                output = spec.validate_output(output)
+                output.setdefault("tool_name", spec.name)
                 latency_ms = max(0, int((time.perf_counter() - started) * 1000))
                 retry_count = max(0, attempts - 1)
                 self._last_call_meta = {
                     "tool_name": spec.name,
                     "tool_version": spec.tool_version,
                     "tool_hash": spec.tool_hash,
+                    "category": category,
+                    "cost_level": cost_level,
+                    "timeout_seconds": timeout_seconds,
                     "req_id": call_context.req_id,
                     "latency_ms": latency_ms,
                     "retry_count": retry_count,
@@ -205,6 +247,11 @@ class AgentToolExecutor:
                     error=None,
                     latency_ms=latency_ms,
                     retry_count=retry_count,
+                    tool_version=tool_version,
+                    tool_hash=tool_hash,
+                    category=category,
+                    cost_level=cost_level,
+                    timeout_seconds=timeout_seconds,
                 )
                 return AgentToolResult(
                     ok=True,
@@ -215,6 +262,9 @@ class AgentToolExecutor:
                     retry_count=retry_count,
                     tool_version=tool_version,
                     tool_hash=tool_hash,
+                    category=category,
+                    cost_level=cost_level,
+                    timeout_seconds=timeout_seconds,
                 )
             except Exception as exc:
                 last_error = exc
@@ -229,6 +279,9 @@ class AgentToolExecutor:
             "tool_name": canonical_name,
             "tool_version": tool_version,
             "tool_hash": tool_hash,
+            "category": category,
+            "cost_level": cost_level,
+            "timeout_seconds": timeout_seconds,
             "req_id": call_context.req_id,
             "latency_ms": latency_ms,
             "retry_count": retry_count,
@@ -245,6 +298,11 @@ class AgentToolExecutor:
             error={"type": error_type, "message": error_text},
             latency_ms=latency_ms,
             retry_count=retry_count,
+            tool_version=tool_version,
+            tool_hash=tool_hash,
+            category=category,
+            cost_level=cost_level,
+            timeout_seconds=timeout_seconds,
         )
         return AgentToolResult(
             ok=False,
@@ -256,6 +314,9 @@ class AgentToolExecutor:
             retry_count=retry_count,
             tool_version=tool_version,
             tool_hash=tool_hash,
+            category=category,
+            cost_level=cost_level,
+            timeout_seconds=timeout_seconds,
             exception=last_error,
         )
 
@@ -271,18 +332,32 @@ class AgentToolExecutor:
         error: Optional[Dict[str, Any]],
         latency_ms: int,
         retry_count: int,
+        tool_version: str,
+        tool_hash: str,
+        category: str,
+        cost_level: str,
+        timeout_seconds: Optional[float],
     ) -> None:
+        max_depth = int((context.extra or {}).get("trace_object_depth") or DEFAULT_TRACE_OBJECT_DEPTH)
         context.trace_sink.append(
             {
                 "type": "AGENT_TOOL_CALL",
                 "req_id": context.req_id,
                 "tool_name": str(tool_name or "").strip(),
                 "canonical_tool_name": canonical_tool_name,
+                "tool_version": tool_version,
+                "tool_hash": tool_hash,
+                "category": category,
+                "cost_level": cost_level,
+                "timeout_seconds": timeout_seconds,
                 "ok": bool(ok),
                 "latency_ms": int(latency_ms),
                 "retry_count": int(retry_count),
-                "args": _sanitize_trace_value(args),
-                "output": _sanitize_trace_value(output or {}) if ok else None,
-                "error": _sanitize_trace_value(error or {}) if not ok else None,
+                "args": _sanitize_trace_value(args, max_depth=max_depth),
+                "output": _sanitize_trace_value(output or {}, max_depth=max_depth) if ok else None,
+                "error": _sanitize_trace_value(error or {}, max_depth=max_depth) if not ok else None,
             }
         )
+        trace_limit = max(1, int((context.extra or {}).get("trace_list_limit") or DEFAULT_TRACE_LIST_LIMIT))
+        if len(context.trace_sink) > trace_limit:
+            del context.trace_sink[:-trace_limit]

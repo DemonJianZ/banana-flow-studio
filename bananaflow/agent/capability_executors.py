@@ -4,14 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from google.genai import types
-
-from core.config import (
-    AGENT_CHAT_HTTP_PROXY,
-    AGENT_CHAT_HTTPS_PROXY,
-    MODEL_AGENT_CHAT,
-    MODEL_PROMPT_POLISH,
-)
+from core.config import MODEL_AGENT_CHAT, MODEL_PROMPT_POLISH
 from schemas.api import (
     AgentChitchatResponse,
     AgentDramaRequest,
@@ -19,9 +12,6 @@ from schemas.api import (
     PromptPolishRequest,
     PromptPolishResponse,
 )
-from services.genai_client import call_genai_retry_with_proxy
-
-from agent.drama_creator import DramaCreatorClient
 from agent.idea_script.schemas import IdeaScriptRequest, IdeaScriptResponse
 from agent.tools import AgentToolContext, build_builtin_executor
 
@@ -35,22 +25,12 @@ _TOOL_EXECUTOR = build_builtin_executor()
 
 
 def run_agent_chitchat(message: str, req_id: str) -> AgentChitchatResponse:
-    prompt = (
-        "你是 Banana Flow Studio 的中文创意助理。\n"
-        "请直接回答用户问题，保持简洁、自然、口语化。\n"
-        "如果用户在闲聊，也要正常回应，但不要编造能力。\n"
-        "如果用户表达了脚本、短剧创作、画布工作流等明确意图，可以顺带提示你也能继续帮助完成这些任务。\n"
-        f"用户消息：{message}"
+    payload = _TOOL_EXECUTOR.execute(
+        "agent_chitchat",
+        {"message": str(message or "")},
+        context=AgentToolContext(req_id=req_id),
     )
-    response = call_genai_retry_with_proxy(
-        contents=[types.Part(text=prompt)],
-        config=types.GenerateContentConfig(temperature=0.7),
-        req_id=f"agent_chitchat:{req_id}",
-        model=MODEL_AGENT_CHAT,
-        http_proxy=AGENT_CHAT_HTTP_PROXY,
-        https_proxy=AGENT_CHAT_HTTPS_PROXY,
-    )
-    text = str(getattr(response, "text", "") or "").strip()
+    text = str(payload.get("text") or "").strip()
     if not text:
         text = "我在。你可以继续告诉我你想聊什么，或者直接让我做脚本、短剧、导出。"
     return AgentChitchatResponse(text=text, model=MODEL_AGENT_CHAT)
@@ -67,11 +47,10 @@ def run_agent_drama(req: AgentDramaRequest, req_id: str) -> AgentDramaResponse:
         },
         context=AgentToolContext(req_id=req_id),
     )
-    client = DramaCreatorClient()
     return AgentDramaResponse(
         text=str(payload.get("text") or "").strip(),
         summary=str(payload.get("summary") or "").strip(),
-        model=str(payload.get("model") or client.model).strip(),
+        model=str(payload.get("model") or "").strip(),
         mode=str(req.task_mode or "").strip(),
     )
 

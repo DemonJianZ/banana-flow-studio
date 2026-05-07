@@ -49,7 +49,7 @@ from bananaflow.agent.tools import (  # noqa: E402
     AgentToolValidationError,
     register_builtin_tools,
 )
-from bananaflow.core.config import MODEL_PROMPT_POLISH  # noqa: E402
+from bananaflow.core.config import MODEL_AGENT_CHAT, MODEL_PROMPT_POLISH  # noqa: E402
 from bananaflow.schemas.api import PromptPolishRequest  # noqa: E402
 from bananaflow.agent.capability_executors import run_agent_prompt_polish  # noqa: E402
 
@@ -136,6 +136,50 @@ class AgentToolExecutorTests(unittest.TestCase):
         self.assertEqual(state["calls"], 3)
         self.assertGreaterEqual(result.latency_ms, 0)
 
+    def test_disabled_tools_should_be_blocked_by_default(self):
+        registry = AgentToolRegistry()
+        registry.register(
+            AgentToolSpec(
+                name="disabled_tool",
+                description="disabled",
+                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                output_schema={"type": "object", "properties": {}, "additionalProperties": True},
+                annotations={"readOnlyHint": True, "idempotentHint": True, "destructiveHint": False},
+                enabled=False,
+            ),
+            lambda args, ctx: {"ok": True},
+        )
+        executor = AgentToolExecutor(registry)
+
+        result = executor.safe_execute("disabled_tool", {}, context=AgentToolContext(req_id="req-disabled"))
+
+        self.assertFalse(result.ok)
+        self.assertIn("tool disabled", result.error)
+
+    def test_output_schema_should_be_validated(self):
+        registry = AgentToolRegistry()
+        registry.register(
+            AgentToolSpec(
+                name="output_tool",
+                description="output",
+                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                output_schema={
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}, "tool_version": {"type": "string"}, "tool_hash": {"type": "string"}},
+                    "required": ["text", "tool_version", "tool_hash"],
+                    "additionalProperties": True,
+                },
+                annotations={"readOnlyHint": True, "idempotentHint": True, "destructiveHint": False},
+            ),
+            lambda args, ctx: {"text": 123},
+        )
+        executor = AgentToolExecutor(registry)
+
+        result = executor.safe_execute("output_tool", {}, context=AgentToolContext(req_id="req-output"))
+
+        self.assertFalse(result.ok)
+        self.assertIn("must be a string", result.error)
+
     def test_trace_sink_should_receive_redacted_event(self):
         registry = AgentToolRegistry()
         registry.register(
@@ -174,10 +218,38 @@ class AgentToolExecutorTests(unittest.TestCase):
         self.assertEqual(len(trace_sink), 1)
         event = trace_sink[0]
         self.assertEqual(event["type"], "AGENT_TOOL_CALL")
+        self.assertEqual(event["category"], "general")
+        self.assertEqual(event["cost_level"], "low")
+        self.assertEqual(event["tool_version"], "1.0.0")
+        self.assertEqual(len(event["tool_hash"]), 64)
         self.assertEqual(event["args"]["authorization"], "<redacted>")
         self.assertIn("<truncated", event["args"]["image"])
         self.assertIn("<truncated", event["args"]["note"])
         self.assertEqual(event["output"]["password"], "<redacted>")
+
+    def test_trace_should_limit_list_length_and_object_depth(self):
+        registry = AgentToolRegistry()
+        registry.register(
+            AgentToolSpec(
+                name="trace_limit_tool",
+                description="trace limit",
+                input_schema={"type": "object", "properties": {"nested": {"type": "object"}}, "additionalProperties": False},
+                output_schema={"type": "object", "properties": {}, "additionalProperties": True},
+                annotations={"readOnlyHint": True, "idempotentHint": True, "destructiveHint": False},
+            ),
+            lambda args, ctx: {"ok": True, "nested": args.get("nested")},
+        )
+        executor = AgentToolExecutor(registry)
+        trace_sink = []
+        context = AgentToolContext(req_id="req-trace-limit", trace_sink=trace_sink, extra={"trace_list_limit": 2, "trace_object_depth": 2})
+
+        nested = {"a": {"b": {"c": {"d": "too deep"}}}}
+        executor.safe_execute("trace_limit_tool", {"nested": nested}, context=context)
+        executor.safe_execute("trace_limit_tool", {"nested": nested}, context=context)
+        executor.safe_execute("trace_limit_tool", {"nested": nested}, context=context)
+
+        self.assertEqual(len(trace_sink), 2)
+        self.assertEqual(trace_sink[-1]["args"]["nested"]["a"], "<max-depth>")
 
     def test_anyof_required_fields_should_be_enforced(self):
         registry = AgentToolRegistry()
@@ -324,6 +396,19 @@ class AgentToolExecutorTests(unittest.TestCase):
         execute.assert_called_once()
         call_args = execute.call_args
         self.assertEqual(call_args.args[0], "agent_prompt_polish")
+
+    def test_capability_executor_chitchat_should_route_via_tool_executor(self):
+        from bananaflow.agent.capability_executors import run_agent_chitchat
+
+        with mock.patch("bananaflow.agent.capability_executors._TOOL_EXECUTOR.execute") as execute:
+            execute.return_value = {"text": "chat ok", "model": "model-a", "tool_version": "1.0.0", "tool_hash": "0" * 64}
+
+            response = run_agent_chitchat("你好", "req-chat")
+
+        self.assertEqual(response.text, "chat ok")
+        self.assertEqual(response.model, MODEL_AGENT_CHAT)
+        execute.assert_called_once()
+        self.assertEqual(execute.call_args.args[0], "agent_chitchat")
 
 
 if __name__ == "__main__":
