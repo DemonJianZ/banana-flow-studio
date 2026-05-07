@@ -85,6 +85,10 @@ class IdeaScriptAgentConfig(BaseModel):
     context_max_pref_items: int = Field(default=10, ge=1, le=50)
     context_max_pref_chars: int = Field(default=1200, ge=200, le=8000)
     trajectory_eval_enabled: bool = False
+    agent_trace_enabled: bool = False
+    agent_trace_inputs_enabled: bool = False
+    agent_trace_raw_output_enabled: bool = True
+    agent_trace_max_chars: int = Field(default=4000, ge=200, le=20000)
 
     @classmethod
     def from_env(cls) -> "IdeaScriptAgentConfig":
@@ -96,6 +100,7 @@ class IdeaScriptAgentConfig(BaseModel):
         context_max_turn_chars_env = _as_int(os.getenv("BANANAFLOW_CONTEXT_MAX_TURN_CHARS"))
         context_max_pref_items_env = _as_int(os.getenv("BANANAFLOW_MAX_PREF_ITEMS"))
         context_max_pref_chars_env = _as_int(os.getenv("BANANAFLOW_MAX_PREF_CHARS"))
+        agent_trace_max_chars_env = _as_int(os.getenv("BANANAFLOW_AGENT_TRACE_MAX_CHARS"))
         return cls(
             inference=NodeRuntimeConfig.from_env("inference"),
             generation=NodeRuntimeConfig.from_env("generation"),
@@ -134,6 +139,19 @@ class IdeaScriptAgentConfig(BaseModel):
                 os.getenv("BANANAFLOW_ENABLE_TRAJECTORY_EVAL"),
                 default=False,
             ),
+            agent_trace_enabled=_as_bool(
+                os.getenv("BANANAFLOW_AGENT_TRACE_ENABLED"),
+                default=False,
+            ),
+            agent_trace_inputs_enabled=_as_bool(
+                os.getenv("BANANAFLOW_AGENT_TRACE_INPUTS_ENABLED"),
+                default=False,
+            ),
+            agent_trace_raw_output_enabled=_as_bool(
+                os.getenv("BANANAFLOW_AGENT_TRACE_RAW_OUTPUT_ENABLED"),
+                default=True,
+            ),
+            agent_trace_max_chars=(4000 if agent_trace_max_chars_env is None else agent_trace_max_chars_env),
         )
 
     def stable_config_hash(self) -> str:

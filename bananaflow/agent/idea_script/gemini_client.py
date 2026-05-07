@@ -142,6 +142,9 @@ class IdeaScriptGeminiClient:
         self.ollama_client = OllamaTextClient() if self.is_ollama else None
         self.last_inference_payload: Dict[str, Any] = {}
         self.last_generation_payload: Dict[str, Any] = {}
+        self.last_call_id = 0
+        self.last_raw_text = ""
+        self.last_json_payload: Any = None
         default_timeout_sec = (
             DEFAULT_IDEA_SCRIPT_OLLAMA_TIMEOUT_SEC
             if self.is_ollama
@@ -219,6 +222,8 @@ class IdeaScriptGeminiClient:
         raise ValueError("json_parse_failed")
 
     def _call_json(self, prompt: str) -> Any:
+        self.last_raw_text = ""
+        self.last_json_payload = None
         cfg_kwargs: Dict[str, Any] = {"response_mime_type": "application/json"}
         if self.temperature is not None:
             cfg_kwargs["temperature"] = self.temperature
@@ -255,7 +260,11 @@ class IdeaScriptGeminiClient:
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
         text = self._extract_text(response)
-        return self._extract_json(text)
+        self.last_call_id += 1
+        self.last_raw_text = text
+        data = self._extract_json(text)
+        self.last_json_payload = data
+        return data
 
     def _with_skill(self, prompt: str) -> str:
         if not self.skill_block:

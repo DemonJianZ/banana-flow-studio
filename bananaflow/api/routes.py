@@ -27,10 +27,6 @@ from google.genai import types
 from core.config import (
     MODEL_GEMINI,
     MODEL_DOUBAO,
-    MODEL_AGENT_CHAT,
-    MODEL_PROMPT_POLISH,
-    AGENT_CHAT_HTTP_PROXY,
-    AGENT_CHAT_HTTPS_PROXY,
     MODEL_COMFYUI_OVERLAYTEXT,
     MODEL_COMFYUI_RMBG,
     MODEL_COMFYUI_REMOVE_WATERMARK,
@@ -86,7 +82,7 @@ from storage.ai_chat_tasks import (
 )
 
 from storage.prompt_log import PromptLogger, LogAnalyzer
-from services.genai_client import call_genai_retry, call_genai_retry_with_proxy
+from services.genai_client import call_genai_retry
 from services.ark import call_doubao_image_gen
 from services.ark_video import generate_video_from_image, VideoGenError
 from services.comfyui import (
@@ -106,12 +102,20 @@ from services.comfyui import (
 from utils.images import parse_data_url, bytes_to_data_url, get_image_from_response
 from utils.size import calculate_target_resolution
 from prompts.business import build_business_prompt
-from prompts.refine import ollama_prompt_polish
 
-from agent.drama_creator import DramaCreatorClient
-from agent.idea_script.orchestrator import IdeaScriptOrchestrator
+from agent.idea_script.instance import idea_script_orchestrator
 from agent.idea_script.schemas import EditPlan, IdeaScriptRequest, IdeaScriptResponse
 from agent.planner import agent_plan_impl
+from agent.capability_executors import (
+    SKILL_CHITCHAT,
+    SKILL_DRAMA,
+    SKILL_IDEA_SCRIPT,
+    SKILL_PROMPT_POLISH,
+    run_agent_chitchat,
+    run_agent_drama,
+    run_agent_prompt_polish,
+)
+from agent.capabilities_runner import run_agent_capability_with_optional_langgraph
 from quality.harvester import harvest_eval_case
 from quality.metrics_schema import build_quality_metrics
 from memory.service import (
@@ -149,7 +153,6 @@ video_rmbg_tasks: Dict[str, Dict[str, Any]] = {}
 video_rmbg_tasks_lock = threading.Lock()
 video_split_tasks: Dict[str, Dict[str, Any]] = {}
 video_split_tasks_lock = threading.Lock()
-idea_script_orchestrator = IdeaScriptOrchestrator()
 idea_script_plan_cache: Dict[str, Dict[str, Any]] = {}
 idea_script_plan_cache_lock = threading.Lock()
 _tracer = _otel_trace.get_tracer(__name__) if _otel_trace else None
@@ -1465,6 +1468,31 @@ def _emit_trajectory_event(
         idempotency_key=f"trajectory_eval:{req_id}:{session_id}",
     )
     return payload
+
+
+def _emit_agent_trace_events(
+    *,
+    session_id: str,
+    tenant_id: str,
+    user_id: str,
+    trace_payloads: Optional[list[Dict[str, Any]]],
+    req_id: str,
+) -> list[Dict[str, Any]]:
+    if not bool(getattr(idea_script_orchestrator.config, "agent_trace_enabled", False)):
+        return []
+    payloads = [dict(item or {}) for item in list(trace_payloads or []) if isinstance(item, dict)]
+    if not payloads:
+        return []
+    for idx, payload in enumerate(payloads, start=1):
+        _append_session_event_audit(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            event_type="AGENT_TRACE",
+            payload=payload,
+            idempotency_key=f"agent_trace:{req_id}:{session_id}:{idx}",
+        )
+    return payloads
 
 
 @contextmanager
@@ -4212,27 +4240,16 @@ def agent_chitchat(
     if not message:
         raise HTTPException(status_code=400, detail="message 不能为空")
 
-    prompt = (
-        "你是 Banana Flow Studio 的中文创意助理。\n"
-        "请直接回答用户问题，保持简洁、自然、口语化。\n"
-        "如果用户在闲聊，也要正常回应，但不要编造能力。\n"
-        "如果用户表达了脚本、短剧创作、画布工作流等明确意图，可以顺带提示你也能继续帮助完成这些任务。\n"
-        f"用户消息：{message}"
-    )
-
     try:
-        response = call_genai_retry_with_proxy(
-            contents=[types.Part(text=prompt)],
-            config=types.GenerateContentConfig(temperature=0.7),
-            req_id=f"agent_chitchat:{req_id}",
-            model=MODEL_AGENT_CHAT,
-            http_proxy=AGENT_CHAT_HTTP_PROXY,
-            https_proxy=AGENT_CHAT_HTTPS_PROXY,
+        out, _, _ = run_agent_capability_with_optional_langgraph(
+            skill=SKILL_CHITCHAT,
+            req_id=req_id,
+            thread_id=f"{SKILL_CHITCHAT}:{req_id}",
+            payload={"message": message},
+            direct=lambda: run_agent_chitchat(message, req_id),
+            after_graph=lambda fin: AgentChitchatResponse.model_validate(fin["result"]),
         )
-        text = str(getattr(response, "text", "") or "").strip()
-        if not text:
-            text = "我在。你可以继续告诉我你想聊什么，或者直接让我做脚本、短剧、导出。"
-        return AgentChitchatResponse(text=text, model=MODEL_AGENT_CHAT)
+        return out
     except Exception as e:
         sys_logger.error(f"[{req_id}] /api/agent/chitchat error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -4249,19 +4266,15 @@ def agent_drama(
         raise HTTPException(status_code=400, detail="prompt 不能为空")
 
     try:
-        client = DramaCreatorClient()
-        payload = client.generate(
-            prompt=prompt,
-            task_mode=str(req.task_mode or "").strip(),
-            episode_count=req.episode_count,
-            existing_script=str(req.existing_script or "").strip(),
+        out, _, _ = run_agent_capability_with_optional_langgraph(
+            skill=SKILL_DRAMA,
+            req_id=req_id,
+            thread_id=f"{SKILL_DRAMA}:{req_id}",
+            payload={"drama_request": req.model_dump()},
+            direct=lambda: run_agent_drama(req, req_id),
+            after_graph=lambda fin: AgentDramaResponse.model_validate(fin["result"]),
         )
-        return AgentDramaResponse(
-            text=str(payload.get("text") or "").strip(),
-            summary=str(payload.get("summary") or "").strip(),
-            model=str(payload.get("model") or client.model).strip(),
-            mode=str(req.task_mode or "").strip(),
-        )
+        return out
     except HTTPException:
         raise
     except ValueError as e:
@@ -4285,12 +4298,15 @@ def agent_prompt_polish(
         raise HTTPException(status_code=400, detail="prompt 不能为空")
 
     try:
-        payload = ollama_prompt_polish(prompt, mode=mode, req_id=f"prompt_polish:{req_id}")
-        text = str(payload.get("text") or "").strip()
-        variants = payload.get("variants") or []
-        if not text:
-            raise RuntimeError("prompt_polish returned empty response")
-        return PromptPolishResponse(text=text, model=MODEL_PROMPT_POLISH, variants=variants)
+        out, _, _ = run_agent_capability_with_optional_langgraph(
+            skill=SKILL_PROMPT_POLISH,
+            req_id=req_id,
+            thread_id=f"{SKILL_PROMPT_POLISH}:{req_id}",
+            payload={"polish_request": req.model_dump()},
+            direct=lambda: run_agent_prompt_polish(req, req_id),
+            after_graph=lambda fin: PromptPolishResponse.model_validate(fin["result"]),
+        )
+        return out
     except HTTPException:
         raise
     except Exception as e:
@@ -4389,18 +4405,50 @@ def agent_idea_script(
         )
 
         trajectory_sink: list[Dict[str, Any]] = []
-        with _temporary_proxy_env(
-            http_proxy=_IDEA_SCRIPT_HTTP_PROXY,
-            https_proxy=_IDEA_SCRIPT_HTTPS_PROXY,
-        ):
-            out = idea_script_orchestrator.run(
+        trace_sink: list[Dict[str, Any]] = []
+
+        cap_payload = {
+            "idea_script_request": req.model_dump(),
+            "session_id": active_session_id,
+            "session_summary_present": session_summary_present,
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+        }
+
+        def _idea_direct() -> IdeaScriptResponse:
+            return idea_script_orchestrator.run(
                 req,
                 session_id=active_session_id,
                 session_summary_present=session_summary_present,
                 tenant_id=tenant_id,
                 user_id=user_id,
                 trajectory_sink=trajectory_sink,
+                trace_sink=trace_sink,
             )
+
+        with _temporary_proxy_env(
+            http_proxy=_IDEA_SCRIPT_HTTP_PROXY,
+            https_proxy=_IDEA_SCRIPT_HTTPS_PROXY,
+        ):
+            out, _cap_dbg, cap_final = run_agent_capability_with_optional_langgraph(
+                skill=SKILL_IDEA_SCRIPT,
+                req_id=req_id,
+                thread_id=f"{SKILL_IDEA_SCRIPT}:{active_session_id or req_id}",
+                payload=cap_payload,
+                direct=_idea_direct,
+                after_graph=lambda fin: IdeaScriptResponse.model_validate(fin["result"]),
+            )
+
+        if cap_final is not None:
+            trajectory_sink = list(cap_final.get("trajectory_sink") or [])
+            trace_sink = list(cap_final.get("trace_sink") or [])
+        agent_trace_payloads = _emit_agent_trace_events(
+            session_id=active_session_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            trace_payloads=trace_sink,
+            req_id=req_id,
+        )
         trajectory_payload = _emit_trajectory_event(
             session_id=active_session_id,
             tenant_id=tenant_id,
@@ -4432,7 +4480,7 @@ def agent_idea_script(
                 "tool_name": "idea_script_orchestrator.run",
                 "result_ref": {
                     "topic_count": len(out.topics or []),
-                    "edit_plan_count": 0,
+                    "edit_plan_count": len(out.edit_plans or []),
                 },
                 "isError": False,
                 "warnings": warnings,
@@ -4443,13 +4491,17 @@ def agent_idea_script(
                 "config_hash": out.config_hash,
             },
         )
+        edit_plan_ids = [str(getattr(plan, "plan_id", "") or "").strip() for plan in list(out.edit_plans or [])]
+        edit_plan_ids = [item for item in edit_plan_ids if item]
+        _cache_edit_plans(list(out.edit_plans or []))
+
         _append_session_event_audit(
             tenant_id=tenant_id,
             user_id=user_id,
             session_id=active_session_id,
             event_type="ARTIFACT_CREATED",
             payload={
-                "edit_plan_ids": [],
+                "edit_plan_ids": edit_plan_ids,
                 "bundle_dir": None,
             },
         )
@@ -4470,7 +4522,7 @@ def agent_idea_script(
                 session_id=active_session_id,
                 patch={
                     "last_product": req.product,
-                    "last_edit_plan_ids": [],
+                    "last_edit_plan_ids": edit_plan_ids,
                     "prompt_version": out.prompt_version,
                     "policy_version": out.policy_version,
                     "config_hash": out.config_hash,
@@ -4507,6 +4559,7 @@ def agent_idea_script(
                     "budget_exhausted_reason": out.budget_exhausted_reason,
                     "total_llm_calls": out.total_llm_calls,
                     "quality_metrics": quality_metrics_payload,
+                    "agent_trace_count": len(agent_trace_payloads or []),
                     "trajectory_score": (
                         float((trajectory_payload or {}).get("evaluation_score") or 0.0)
                         if trajectory_payload
@@ -4542,6 +4595,7 @@ def agent_idea_script(
                 "budget_exhausted_reason": out.budget_exhausted_reason,
                 "total_llm_calls": out.total_llm_calls,
                 "quality_metrics": quality_metrics_payload,
+                "agent_trace_count": len(agent_trace_payloads or []),
                 "trajectory_score": (
                     float((trajectory_payload or {}).get("evaluation_score") or 0.0)
                     if trajectory_payload

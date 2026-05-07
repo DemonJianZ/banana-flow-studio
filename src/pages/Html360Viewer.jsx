@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
+  Camera,
   Download,
   Eye,
   ImagePlus,
@@ -79,9 +80,54 @@ const PANORAMA_DEFAULT_PROMPT =
 - 风格漂移
 
 最终结果应是一张完整、准确、统一的全景图，可直接用于全景浏览或场景重建。`;
+const DISTORTION_FIX_PROMPT =
+  `请编辑输入图像，对该室内场景进行透视纠正、结构清理与细节优化。
+
+将原图中的畸变理解为镜头透视问题，而不是场景本身结构有误。请在不改变场景本质的前提下，校正镜头造成的广角拉伸、边缘变形和透视不稳，使画面更接近正常建筑摄影效果。
+
+必须保留：
+- 原有室内空间设定
+- 原有中式木质建筑语言
+- 原有中心构图逻辑
+- 原有桌案、圆形门洞/圆窗、地毯、两侧木格栅、两侧植物和灯具等主要元素
+- 原有色调、材质、光照方向和氛围
+
+必须修正：
+- 边缘拉伸
+- 桶形畸变
+- 墙面与窗框不自然弯曲
+- 地面与天花板透视过度夸张
+- 家具与空间比例不够自然的问题
+
+透视与结构要求：
+- 建筑竖向线条尽量保持垂直
+- 横向结构线尽量平稳、自然
+- 圆形结构保持圆润但不要变形
+- 左右两侧空间关系协调
+- 地板、墙面、天花板衔接合理
+- 家具摆放稳定，前后空间关系清晰
+- 整个空间应显得规整、可信、可理解
+
+细节补充规则：
+- 允许对局部细节进行适度合理修整与补全
+- 只允许做低风险、低存在感的补充
+- 新增或调整的内容必须与原场景材质、功能、风格一致
+- 宁可少调，也不要乱加
+- 不要新增高识别度主视觉元素
+- 不要把场景改造成另一个房间
+
+画面目标：
+呈现一个透视准确、结构合理、风格统一、细节干净的中式木质室内空间，具有自然真实的建筑摄影质感。`;
 
 const createStepState = (prompt) => ({
   prompt,
+  status: "idle",
+  error: "",
+  resultUrl: "",
+});
+
+const createPostprocessState = () => ({
+  sourceUrl: "",
   status: "idle",
   error: "",
   resultUrl: "",
@@ -342,13 +388,15 @@ export default function Html360Viewer({ embedded = false, onClose = null }) {
   const [previewAsset, setPreviewAsset] = useState(null);
   const [iframeNonce, setIframeNonce] = useState(0);
   const [panoramaStep, setPanoramaStep] = useState(() => createStepState(PANORAMA_DEFAULT_PROMPT));
+  const [postprocessStep, setPostprocessStep] = useState(() => createPostprocessState());
   const [globalError, setGlobalError] = useState("");
   const [aiChatImageModelId, setAiChatImageModelId] = useState("");
   const inputRef = useRef(null);
+  const iframeRef = useRef(null);
   const aiChatModelParamsCacheRef = useRef(new Map());
   const aiChatSessionIdRef = useRef("");
   const aiChatHistoryRecordIdRef = useRef("");
-  const abortControllersRef = useRef({ multiView: null, panorama: null });
+  const abortControllersRef = useRef({ panorama: null, postprocess: null });
 
   useEffect(() => {
     const controller = new AbortController();
@@ -415,6 +463,17 @@ export default function Html360Viewer({ embedded = false, onClose = null }) {
         : {
             ...prev,
             ...patch,
+        },
+    );
+  }, []);
+
+  const updatePostprocessStep = useCallback((patch) => {
+    setPostprocessStep((prev) =>
+      typeof patch === "function"
+        ? patch(prev)
+        : {
+            ...prev,
+            ...patch,
           },
     );
   }, []);
@@ -476,6 +535,130 @@ export default function Html360Viewer({ embedded = false, onClose = null }) {
     });
   }, [panoramaStep]);
 
+  const handlePreviewImage = useCallback((url, label) => {
+    if (!String(url || "").trim()) return;
+    setPreviewAsset({
+      url,
+      label: label || "预览结果",
+    });
+  }, []);
+
+  const submitImageTask = useCallback(
+    async ({ prompt, sourceImageUrl, signal }) => {
+      const memberAuth = resolveMemberAuthorizationInfo()?.value || "";
+      if (!memberAuth) {
+        throw new Error("缺少 member authorization，无法调用 gpt-image2(agent) 后端。");
+      }
+
+      const modelId = String(aiChatImageModelId || "").trim();
+      if (!modelId) {
+        throw new Error("未找到 gpt-image2 模型，无法生成图像。");
+      }
+
+      const paramList = await resolveModelParamsForId(modelId);
+      const resolvedParamPayload = buildAIChatParamPayload(paramList);
+      const matchedSizeId = findAIChatParamValueId(paramList, ["size", "尺寸"], DEFAULT_SIZE);
+      const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比", "画幅", "aspect"], DEFAULT_RATIO);
+
+      if (DEFAULT_SIZE && !matchedSizeId) {
+        throw new Error(`未匹配到 size 参数: ${DEFAULT_SIZE}`);
+      }
+      if (DEFAULT_RATIO && !matchedRatioId) {
+        throw new Error(`未匹配到 ratio 参数: ${DEFAULT_RATIO}`);
+      }
+
+      if (matchedSizeId) {
+        resolvedParamPayload.ai_image_param_size_id = matchedSizeId;
+      }
+      if (matchedRatioId) {
+        resolvedParamPayload.ai_image_param_ratio_id = matchedRatioId;
+      } else {
+        delete resolvedParamPayload.ai_image_param_ratio_id;
+      }
+
+      const proxyPayload = {
+        authorization: memberAuth,
+        history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
+        module_enum: WORKFLOW_MODULE_ENUM,
+        part_enum: String(AI_CHAT_PART_ENUM_203),
+        ai_chat_session_id: aiChatSessionIdRef.current || "",
+        ai_chat_model_id: modelId,
+        message: prompt,
+        images: [sourceImageUrl],
+        ...resolvedParamPayload,
+      };
+
+      const proxyData = await submitAIChatImageTask(apiFetch, proxyPayload, {
+        signal,
+      });
+
+      if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
+      if (proxyData?.source_history_record_id) {
+        aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
+      }
+
+      const resultUrl =
+        pickFirstImageUrl(proxyData?.image_url) ||
+        pickFirstImageUrl(proxyData?.events) ||
+        pickFirstImageUrl(proxyData?.text) ||
+        pickFirstImageUrl(proxyData) ||
+        "";
+      const doneErrMsg = String(proxyData?.done_error || "").trim();
+      if (!resultUrl && doneErrMsg) throw new Error(doneErrMsg);
+      if (!resultUrl) throw new Error("未返回可解析的图片结果。");
+      return resultUrl;
+    },
+    [aiChatImageModelId, apiFetch, resolveModelParamsForId],
+  );
+
+  const captureViewerScreenshot = useCallback(async () => {
+    const frame = iframeRef.current;
+    const frameWindow = frame?.contentWindow;
+    const frameDocument = frame?.contentDocument || frameWindow?.document;
+    if (!frameWindow || !frameDocument) {
+      setGlobalError("3D 浏览器尚未就绪，无法截图。");
+      return;
+    }
+
+    const canvas = frameDocument.querySelector("canvas");
+    if (!canvas) {
+      setGlobalError("当前没有可截图的 3D 画面。");
+      return;
+    }
+
+    const elementsToHide = [
+      frameDocument.getElementById("zoomInfo"),
+      frameDocument.getElementById("controls"),
+      frameDocument.getElementById("stereoButton"),
+    ].filter(Boolean);
+    const originalDisplays = elementsToHide.map((element) => element.style.display);
+
+    try {
+      elementsToHide.forEach((element) => {
+        element.style.display = "none";
+      });
+      await new Promise((resolve) => {
+        frameWindow.requestAnimationFrame(() => {
+          frameWindow.requestAnimationFrame(resolve);
+        });
+      });
+      const dataURL = canvas.toDataURL("image/png");
+      setPostprocessStep({
+        sourceUrl: dataURL,
+        status: "idle",
+        error: "",
+        resultUrl: "",
+      });
+      setGlobalError("");
+    } catch (error) {
+      setGlobalError(buildFriendlyErrorMessage(error, "截图"));
+    } finally {
+      elementsToHide.forEach((element, index) => {
+        element.style.display = originalDisplays[index] || "";
+      });
+    }
+  }, []);
+
   const runGenerationStep = useCallback(
     async () => {
       if (!inputImage?.url) {
@@ -495,12 +678,6 @@ export default function Html360Viewer({ embedded = false, onClose = null }) {
         return;
       }
 
-      const modelId = String(aiChatImageModelId || "").trim();
-      if (!modelId) {
-        updatePanoramaStep({ error: "图像模型仍在加载，请稍后重试。" });
-        return;
-      }
-
       abortControllersRef.current.panorama?.abort?.();
       const controller = new AbortController();
       abortControllersRef.current.panorama = controller;
@@ -508,59 +685,11 @@ export default function Html360Viewer({ embedded = false, onClose = null }) {
       updatePanoramaStep({ status: "loading", error: "" });
 
       try {
-        const paramList = await resolveModelParamsForId(modelId);
-        const resolvedParamPayload = buildAIChatParamPayload(paramList);
-        const effectiveSize = DEFAULT_SIZE;
-        const effectiveAspectRatio = DEFAULT_RATIO;
-        const matchedSizeId = findAIChatParamValueId(paramList, ["size", "尺寸"], effectiveSize);
-        const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比", "画幅", "aspect"], effectiveAspectRatio);
-
-        if (effectiveSize && !matchedSizeId) {
-          throw new Error(`未匹配到 size 参数: ${effectiveSize}`);
-        }
-        if (effectiveAspectRatio && !matchedRatioId) {
-          throw new Error(`未匹配到 ratio 参数: ${effectiveAspectRatio}`);
-        }
-
-        if (matchedSizeId) {
-          resolvedParamPayload.ai_image_param_size_id = matchedSizeId;
-        }
-        if (matchedRatioId) {
-          resolvedParamPayload.ai_image_param_ratio_id = matchedRatioId;
-        } else {
-          delete resolvedParamPayload.ai_image_param_ratio_id;
-        }
-
-        const proxyPayload = {
-          authorization: memberAuth,
-          history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
-          module_enum: WORKFLOW_MODULE_ENUM,
-          part_enum: String(AI_CHAT_PART_ENUM_203),
-          ai_chat_session_id: aiChatSessionIdRef.current || "",
-          ai_chat_model_id: modelId,
-          message: prompt,
-          images: [inputImage.url],
-          ...resolvedParamPayload,
-        };
-
-        const proxyData = await submitAIChatImageTask(apiFetch, proxyPayload, {
+        const resultUrl = await submitImageTask({
+          prompt,
+          sourceImageUrl: inputImage.url,
           signal: controller.signal,
         });
-
-        if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
-        if (proxyData?.source_history_record_id) {
-          aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
-        }
-
-        const resultUrl =
-          pickFirstImageUrl(proxyData?.image_url) ||
-          pickFirstImageUrl(proxyData?.events) ||
-          pickFirstImageUrl(proxyData?.text) ||
-          pickFirstImageUrl(proxyData) ||
-          "";
-        const doneErrMsg = String(proxyData?.done_error || "").trim();
-        if (!resultUrl && doneErrMsg) throw new Error(doneErrMsg);
-        if (!resultUrl) throw new Error("未返回可解析的图片结果。");
 
         updatePanoramaStep({ status: "success", error: "", resultUrl });
         if (STEP_META.autoLoadViewer) {
@@ -588,13 +717,48 @@ export default function Html360Viewer({ embedded = false, onClose = null }) {
     },
     [
       aiChatImageModelId,
-      apiFetch,
       inputImage,
       panoramaStep,
-      resolveModelParamsForId,
+      submitImageTask,
       updatePanoramaStep,
     ],
   );
+
+  const runPostprocessStep = useCallback(async () => {
+    const sourceUrl = String(postprocessStep.sourceUrl || "").trim();
+    if (!sourceUrl) {
+      setGlobalError("请先截图后再进行畸变修复。");
+      return;
+    }
+
+    abortControllersRef.current.postprocess?.abort?.();
+    const controller = new AbortController();
+    abortControllersRef.current.postprocess = controller;
+    setGlobalError("");
+    updatePostprocessStep({ status: "loading", error: "" });
+
+    try {
+      const resultUrl = await submitImageTask({
+        prompt: DISTORTION_FIX_PROMPT,
+        sourceImageUrl: sourceUrl,
+        signal: controller.signal,
+      });
+      updatePostprocessStep({ status: "success", error: "", resultUrl });
+    } catch (error) {
+      const isAbort = error?.name === "AbortError";
+      updatePostprocessStep({
+        status: "idle",
+        error: isAbort ? "任务已取消。" : buildFriendlyErrorMessage(error, "畸变修复"),
+      });
+      if (!isAbort) {
+        setGlobalError(buildFriendlyErrorMessage(error, "畸变修复"));
+      }
+    } finally {
+      if (abortControllersRef.current.postprocess === controller) {
+        abortControllersRef.current.postprocess = null;
+      }
+    }
+  }, [postprocessStep.sourceUrl, submitImageTask, updatePostprocessStep]);
 
   const activeInputReady = !!inputImage?.url;
 
@@ -712,6 +876,17 @@ export default function Html360Viewer({ embedded = false, onClose = null }) {
               <div className="truncate text-[14px] font-semibold text-slate-800">3D 浏览预览</div>
             </div>
             <div className="flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                className="inline-flex h-9 items-center gap-2 rounded-[12px] border border-slate-200 bg-white px-3 text-[13px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400"
+                onClick={() => {
+                  void captureViewerScreenshot();
+                }}
+                disabled={!viewerAsset?.url}
+              >
+                <Camera className="h-4 w-4" />
+                截图
+              </button>
               {panoramaStep.resultUrl ? (
                 <button
                   type="button"
@@ -728,6 +903,7 @@ export default function Html360Viewer({ embedded = false, onClose = null }) {
           <div className="relative min-h-0 flex-1 bg-[#F8FAFC] p-5">
             <div className="relative h-full overflow-hidden rounded-[20px] border border-slate-200 bg-black shadow-[0_16px_36px_rgba(15,23,42,0.12)]">
             <iframe
+              ref={iframeRef}
               key={`${iframeNonce}:${viewerAsset?.url || "empty"}`}
               title="360 panorama viewer"
               srcDoc={viewerDocument}
@@ -746,6 +922,93 @@ export default function Html360Viewer({ embedded = false, onClose = null }) {
           </div>
         </section>
       </div>
+
+      {postprocessStep.sourceUrl ? (
+        <div className="pointer-events-auto absolute bottom-6 left-6 z-[210] w-[320px] overflow-hidden rounded-[22px] border border-slate-200 bg-white shadow-[0_24px_56px_rgba(15,23,42,0.12)]">
+          <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+            <div className="text-[13px] font-semibold text-slate-800">后处理</div>
+            <button
+              type="button"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-[10px] border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-800"
+              onClick={() => setPostprocessStep(createPostprocessState())}
+              title="关闭后处理"
+              aria-label="关闭后处理"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <div className="space-y-3 p-4">
+            <button
+              type="button"
+              className="block w-full overflow-hidden rounded-[16px] border border-slate-200 bg-slate-100"
+              onClick={() => handlePreviewImage(postprocessStep.sourceUrl, "截图预览")}
+            >
+              <img
+                src={postprocessStep.sourceUrl}
+                alt="截图预览"
+                className="block h-32 w-full object-cover transition hover:opacity-95"
+              />
+            </button>
+
+            <button
+              type="button"
+              className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-[12px] border border-cyan-500 bg-cyan-500 px-3.5 text-[13px] font-semibold text-white shadow-[0_10px_24px_rgba(6,182,212,0.18)] transition hover:border-cyan-600 hover:bg-cyan-600 disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300 disabled:text-white disabled:shadow-none"
+              onClick={() => {
+                void runPostprocessStep();
+              }}
+              disabled={postprocessStep.status === "loading"}
+            >
+              {postprocessStep.status === "loading" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
+              畸变修复
+            </button>
+
+            {postprocessStep.error ? (
+              <div className="text-[12px] leading-5 text-rose-600">{postprocessStep.error}</div>
+            ) : null}
+
+            {postprocessStep.resultUrl ? (
+              <div className="overflow-hidden rounded-[16px] border border-slate-200 bg-white shadow-[0_12px_28px_rgba(15,23,42,0.06)]">
+                <div className="border-b border-slate-200 px-3 py-2.5 text-[12px] font-medium text-slate-700">修复结果</div>
+                <button
+                  type="button"
+                  className="block w-full bg-slate-100"
+                  onClick={() => handlePreviewImage(postprocessStep.resultUrl, "畸变修复结果")}
+                >
+                  <img
+                    src={postprocessStep.resultUrl}
+                    alt="畸变修复结果"
+                    className="block h-32 w-full object-cover transition hover:opacity-95"
+                  />
+                </button>
+                <div className="flex gap-2 border-t border-slate-200 p-3">
+                  <button
+                    type="button"
+                    className="inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-[12px] border border-slate-200 bg-white px-3 text-[12px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+                    onClick={() => {
+                      void downloadMedia(postprocessStep.resultUrl, "panorama-postprocess.png");
+                    }}
+                  >
+                    <Download className="h-4 w-4" />
+                    下载
+                  </button>
+                  <button
+                    type="button"
+                    className="inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-[12px] border border-slate-200 bg-white px-3 text-[12px] font-medium text-slate-700 transition hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-700"
+                    onClick={() => {
+                      setViewerAsset({ url: postprocessStep.resultUrl, label: "畸变修复结果" });
+                      setIframeNonce((prev) => prev + 1);
+                    }}
+                  >
+                    <Eye className="h-4 w-4" />
+                    载入
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
       {previewAsset?.url ? (
         <div

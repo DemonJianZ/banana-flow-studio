@@ -1508,12 +1508,13 @@ const buildApiDebugDetailText = (event) => {
   return lines.join("\n").trim();
 };
 
-const API_DEBUG_DETAIL_KEYS = new Set(["aiChatLang", "aiChatImage", "userAuths", "aiChatAnchor"]);
+const API_DEBUG_DETAIL_KEYS = new Set(["aiChatLang", "aiChatImage", "userAuths", "aiChatAnchor", "agentPlanner"]);
 
 const API_DEBUG_STATUS_LABEL = {
   idle: "待执行",
   loading: "请求中",
   success: "成功",
+  warning: "警告",
   error: "失败",
   timeout: "超时",
   login_required: "需登录",
@@ -6837,6 +6838,7 @@ const Workbench = () => {
     aiChatAnchor: { status: "idle", message: "", detail: "", updatedAt: 0 },
     aiChatLang: { status: "idle", message: "", detail: "", updatedAt: 0 },
     aiChatImage: { status: "idle", message: "", detail: "", updatedAt: 0 },
+    agentPlanner: { status: "idle", message: "", detail: "", updatedAt: 0 },
   }));
   const aiChatModelParamsCacheRef = useRef(new Map());
   const aiChatSessionIdRef = useRef("");
@@ -10488,8 +10490,13 @@ const handleNodeMouseDown = (e, nid) => {
 
   const runCanvasPlanMission = useCallback(
     async (userText, routeMeta = {}, requestOptions = {}) => {
-      const response = await planAgentCanvas(
-        {
+      updateApiDebugStatus("agentPlanner", {
+        status: "loading",
+        message: "POST /api/agent/plan",
+        detail: "",
+      });
+      try {
+        const requestPayload = {
           prompt: userText,
           supplementalPrompt: String(requestOptions?.supplementalPrompt || "").trim(),
           currentNodes: cloneDeep(nodesRef.current || []),
@@ -10505,23 +10512,61 @@ const handleNodeMouseDown = (e, nid) => {
             : null,
           canvasId,
           threadId: canvasId,
-        },
-        apiFetch,
-        routeMeta,
-      );
+        };
+        const response = await planAgentCanvas(
+          requestPayload,
+          apiFetch,
+          routeMeta,
+        );
 
-      const patch = Array.isArray(response?.patch) ? response.patch : [];
-      if (!patch.length && !parseCanvasClarification(response)) {
-        throw new Error("Agent 未返回可执行的画布补丁");
-      }
+        const plannerDebug = response?.debug?.planner || {};
+        const plannerPath = String(plannerDebug?.planner_path || "unknown");
+        updateApiDebugStatus("agentPlanner", {
+          status: plannerPath.includes("fallback") || plannerPath === "legacy" ? "warning" : "success",
+          message: `${plannerPath} · thread=${plannerDebug?.thread_id || canvasId || "--"}`,
+        });
+        pushApiDebugDetail("agentPlanner", {
+          type: "response",
+          path: "/api/agent/plan",
+          payload: {
+            prompt: requestPayload.prompt,
+            supplementalPrompt: requestPayload.supplementalPrompt || "",
+            currentNodes: requestPayload.currentNodes.length,
+            currentConnections: requestPayload.currentConnections.length,
+            canvasId: requestPayload.canvasId || "",
+          },
+          response: {
+            debug: plannerDebug,
+            patch_count: Array.isArray(response?.patch) ? response.patch.length : 0,
+            summary: response?.summary || "",
+            thought: response?.thought || "",
+          },
+        });
 
-      if (patch.length) {
-        pushHistory();
-        _applyPatch(patch);
+        const patch = Array.isArray(response?.patch) ? response.patch : [];
+        if (!patch.length && !parseCanvasClarification(response)) {
+          throw new Error("Agent 未返回可执行的画布补丁");
+        }
+
+        if (patch.length) {
+          pushHistory();
+          _applyPatch(patch);
+        }
+        return response;
+      } catch (error) {
+        updateApiDebugStatus("agentPlanner", {
+          status: "error",
+          message: error?.message || "POST /api/agent/plan failed",
+        });
+        pushApiDebugDetail("agentPlanner", {
+          type: "error",
+          path: "/api/agent/plan",
+          message: error?.message || String(error || ""),
+        });
+        throw error;
       }
-      return response;
     },
-    [activeArtifact, apiFetch, canvasId, _applyPatch, pushHistory],
+    [activeArtifact, apiFetch, canvasId, _applyPatch, pushApiDebugDetail, pushHistory, updateApiDebugStatus],
   );
 
   const getLatestResultTurn = useCallback(() => {
@@ -13425,11 +13470,13 @@ const handleNodeMouseDown = (e, nid) => {
     { key: "aiChatAnchor", label: "aiChatAnchor(module=3)" },
     { key: "aiChatLang", label: "aiChat(part=1 语言)" },
     { key: "aiChatImage", label: "aiChat(module=3 图片/视频)" },
+    { key: "agentPlanner", label: "Agent Planner(LangGraph)" },
   ];
 
   const getApiDebugStatusClass = (status) => {
     if (status === "success") return "text-emerald-700 border-emerald-200 bg-emerald-50";
     if (status === "loading") return "text-cyan-700 border-cyan-200 bg-cyan-50";
+    if (status === "warning") return "text-amber-700 border-amber-200 bg-amber-50";
     if (status === "timeout" || status === "error" || status === "login_required") {
       return "text-rose-700 border-rose-200 bg-rose-50";
     }

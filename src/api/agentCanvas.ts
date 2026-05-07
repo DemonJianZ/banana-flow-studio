@@ -117,7 +117,7 @@ const buildAgentHeaders = (meta) => {
   return headers;
 };
 
-const AGENT_IDEA_SCRIPT_TIMEOUT_MS = 90_000;
+const AGENT_IDEA_SCRIPT_TIMEOUT_MS = 240_000;
 const AGENT_DRAMA_TIMEOUT_MS = 90_000;
 const VIDEO_LINEART_POLL_INTERVAL_MS = 1200;
 const VIDEO_LINEART_TIMEOUT_MS = 600_000;
@@ -201,7 +201,7 @@ export async function generateIdeaScriptMission(payload, apiFetch, meta) {
     body: JSON.stringify(reqBody),
     headers: buildAgentHeaders(meta),
     signal,
-  }), AGENT_IDEA_SCRIPT_TIMEOUT_MS, "生成脚本超时，请稍后重试。");
+  }), AGENT_IDEA_SCRIPT_TIMEOUT_MS, "生成脚本耗时较长，请稍后重试或减少本次需求复杂度。");
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
     throw new Error(extractApiError(data));

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
+from datetime import datetime, timezone
 import inspect
 import json
 import time
@@ -117,6 +118,7 @@ class IdeaScriptOrchestrator:
         self._tracer = _otel_trace.get_tracer(__name__) if _otel_trace else None
         self._cache: OrderedDict[str, IdeaScriptResponse] = OrderedDict()
         self._last_trajectory: Optional[Trajectory] = None
+        self._last_trace: list[Dict[str, Any]] = []
 
     @contextmanager
     def _span(self, name: str, attributes: Optional[Dict[str, Any]] = None) -> Iterator[Any]:
@@ -155,6 +157,157 @@ class IdeaScriptOrchestrator:
         if self._last_trajectory is None:
             return None
         return self._last_trajectory.to_dict()
+
+    def get_last_trace(self) -> list[Dict[str, Any]]:
+        return list(self._last_trace or [])
+
+    def _trace_now(self) -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    def _trace_max_chars(self) -> int:
+        try:
+            return max(200, min(20000, int(getattr(self.config, "agent_trace_max_chars", 4000) or 4000)))
+        except Exception:
+            return 4000
+
+    def _trace_sanitize(self, value: Any, depth: int = 0) -> Any:
+        if depth > 5:
+            return "<max_depth>"
+        if hasattr(value, "model_dump"):
+            try:
+                return self._trace_sanitize(value.model_dump(mode="json"), depth=depth + 1)
+            except Exception:
+                return str(value)
+        if isinstance(value, dict):
+            out: Dict[str, Any] = {}
+            for key, item in value.items():
+                key_text = str(key)
+                lowered = key_text.lower()
+                if any(token in lowered for token in ("secret", "token", "password", "authorization", "cookie", "api_key")):
+                    out[key_text] = "<redacted>"
+                    continue
+                out[key_text] = self._trace_sanitize(item, depth=depth + 1)
+            return out
+        if isinstance(value, (list, tuple)):
+            items = list(value)
+            sanitized = [self._trace_sanitize(item, depth=depth + 1) for item in items[:50]]
+            if len(items) > 50:
+                sanitized.append({"truncated_items": len(items) - 50})
+            return sanitized
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
+
+    def _trace_preview(self, value: Any, max_chars: Optional[int] = None) -> Dict[str, Any]:
+        limit = max_chars or self._trace_max_chars()
+        sanitized = self._trace_sanitize(value)
+        try:
+            text = json.dumps(sanitized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            is_json = True
+        except Exception:
+            text = str(sanitized)
+            is_json = False
+        truncated = len(text) > limit
+        if truncated:
+            text = text[: max(0, limit - 3)] + "..."
+        payload: Dict[str, Any] = {
+            "format": "json" if is_json else "text",
+            "truncated": truncated,
+            "char_count": len(text),
+        }
+        if not truncated and is_json:
+            payload["value"] = sanitized
+        else:
+            payload["text"] = text
+        return payload
+
+    def _trace_args_summary(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        summary: Dict[str, Any] = {}
+        for key, value in dict(kwargs or {}).items():
+            if key == "context_pack":
+                summary[key] = bool(value)
+                continue
+            if key in {"topics", "previous_topics"}:
+                summary[f"{key}_count"] = len(list(value or []))
+                continue
+            if key in {"shots", "risky_spans", "reviewer_blocking_issues"}:
+                summary[f"{key}_count"] = len(list(value or []))
+                continue
+            if key == "audience_context":
+                summary["persona_present"] = bool((getattr(value, "persona", "") or "").strip())
+                summary["product"] = str(getattr(value, "product", "") or "")
+                continue
+            if key == "topic":
+                summary["topic_angle"] = str(getattr(value, "angle", "") or "")
+                summary["topic_title"] = str(getattr(value, "title", "") or "")[:120]
+                continue
+            if key == "previous":
+                summary["previous_present"] = value is not None
+                continue
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                summary[key] = value
+        return summary
+
+    def _append_trace_event(
+        self,
+        trace_events: Optional[list[Dict[str, Any]]],
+        *,
+        stage_name: str,
+        node: Any,
+        args: Optional[Dict[str, Any]] = None,
+        output: Any = None,
+        success: bool = True,
+        duration: float = 0.0,
+        error: Optional[str] = None,
+        llm_call_id_before: Optional[int] = None,
+    ) -> None:
+        if not bool(getattr(self.config, "agent_trace_enabled", False)):
+            return
+        if not isinstance(trace_events, list):
+            return
+        llm_client = getattr(node, "llm_client", None)
+        llm_call_id_after = getattr(llm_client, "last_call_id", None) if llm_client is not None else None
+        model_config = getattr(node, "model_config", None)
+        payload: Dict[str, Any] = {
+            "seq": len(trace_events) + 1,
+            "timestamp": self._trace_now(),
+            "stage_name": str(stage_name or ""),
+            "node_name": node.__class__.__name__ if node is not None else "",
+            "model": (
+                str(getattr(model_config, "model", "") or "").strip()
+                or str(getattr(llm_client, "model", "") or "").strip()
+                or None
+            ),
+            "allow_llm": bool((args or {}).get("allow_llm", False)),
+            "used_llm": bool(
+                llm_client is not None
+                and llm_call_id_after is not None
+                and llm_call_id_before is not None
+                and llm_call_id_after != llm_call_id_before
+            ),
+            "success": bool(success),
+            "duration_ms": max(0, int(float(duration or 0.0) * 1000)),
+            "args_summary": self._trace_args_summary(args or {}),
+        }
+        if bool(getattr(self.config, "agent_trace_inputs_enabled", False)):
+            payload["input"] = self._trace_preview(args or {})
+        if success:
+            payload["output"] = self._trace_preview(output)
+        else:
+            payload["error"] = str(error or "")
+
+        if (
+            payload.get("used_llm")
+            and bool(getattr(self.config, "agent_trace_raw_output_enabled", True))
+            and llm_client is not None
+        ):
+            raw_text = str(getattr(llm_client, "last_raw_text", "") or "")
+            json_payload = getattr(llm_client, "last_json_payload", None)
+            if raw_text:
+                payload["raw_model_output"] = self._trace_preview(raw_text)
+            if json_payload is not None:
+                payload["parsed_model_output"] = self._trace_preview(json_payload)
+        trace_events.append(payload)
 
     def _risk_at_least(self, level: str, target: str) -> bool:
         return _RISK_ORDER.get(level or "low", 0) >= _RISK_ORDER.get(target or "low", 0)
@@ -245,15 +398,45 @@ class IdeaScriptOrchestrator:
             sig = inspect.signature(run_func)
         except Exception:
             return run_func(**kwargs)
-        if ("allow_llm" in kwargs and "allow_llm" not in sig.parameters) or (
-            "context_pack" in kwargs and "context_pack" not in sig.parameters
-        ):
-            kwargs = dict(kwargs)
-        if "allow_llm" not in sig.parameters and "allow_llm" in kwargs:
-            kwargs.pop("allow_llm", None)
-        if "context_pack" not in sig.parameters and "context_pack" in kwargs:
-            kwargs.pop("context_pack", None)
+        if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            kwargs = {key: value for key, value in kwargs.items() if key in sig.parameters}
         return run_func(**kwargs)
+
+    def _call_run_traced(
+        self,
+        trace_events: Optional[list[Dict[str, Any]]],
+        stage_name: str,
+        node: Any,
+        **kwargs: Any,
+    ) -> Any:
+        llm_client = getattr(node, "llm_client", None)
+        llm_call_id_before = getattr(llm_client, "last_call_id", None) if llm_client is not None else None
+        started = time.perf_counter()
+        try:
+            out = self._call_run(node, **kwargs)
+        except Exception as e:
+            self._append_trace_event(
+                trace_events,
+                stage_name=stage_name,
+                node=node,
+                args=kwargs,
+                success=False,
+                duration=float(time.perf_counter() - started),
+                error=str(e),
+                llm_call_id_before=llm_call_id_before,
+            )
+            raise
+        self._append_trace_event(
+            trace_events,
+            stage_name=stage_name,
+            node=node,
+            args=kwargs,
+            output=out,
+            success=True,
+            duration=float(time.perf_counter() - started),
+            llm_call_id_before=llm_call_id_before,
+        )
+        return out
 
     def _build_context_pack_for_llm(
         self,
@@ -433,6 +616,85 @@ class IdeaScriptOrchestrator:
         tool_hash = str(out.get("tool_hash") or MATCH_ASSETS_TOOL_HASH)
         return matched_assets, stats, tool_version, tool_hash, mcp_server_name, mcp_registry_used
 
+    def _asset_match_local(self, topics: list[Any]) -> tuple[dict[str, list[AssetCandidate]], dict[str, Any]]:
+        matched_assets: dict[str, list[AssetCandidate]] = {}
+        shot_segments: dict[str, str] = {}
+        bucket_distribution = {"best_match": 0, "partial_match": 0, "fallback": 0}
+        segment_total = {"HOOK": 0, "VIEW": 0, "STEPS": 0, "PRODUCT": 0, "CTA": 0}
+        segment_matched = {"HOOK": 0, "VIEW": 0, "STEPS": 0, "PRODUCT": 0, "CTA": 0}
+
+        for topic in list(topics or []):
+            for shot in list(getattr(topic, "shots", []) or []):
+                shot_id = str(getattr(shot, "shot_id", "") or "").strip()
+                if not shot_id:
+                    continue
+                segment = str(getattr(shot, "segment", "") or "").strip().upper()
+                shot_segments[shot_id] = segment
+                if segment in segment_total:
+                    segment_total[segment] += 1
+                try:
+                    query = self.shot_query_builder.build(shot)
+                    candidates = self.asset_index_tool.search(query, top_k=int(self.config.asset_match_top_k))
+                except Exception:
+                    candidates = []
+                parsed = [item for item in (self._to_asset_candidate(c) for c in list(candidates or [])) if item is not None]
+                matched_assets[shot_id] = parsed
+                if parsed and segment in segment_matched:
+                    segment_matched[segment] += 1
+                for cand in parsed:
+                    bucket = str(getattr(cand, "bucket", "") or "")
+                    if bucket in bucket_distribution:
+                        bucket_distribution[bucket] += 1
+
+        shot_count = len(matched_assets)
+        matched_shot_count = sum(1 for items in matched_assets.values() if items)
+        total_candidates = sum(len(items or []) for items in matched_assets.values())
+        segment_match_rate = {
+            segment: (
+                round(float(segment_matched[segment]) / float(total), 3)
+                if (total := int(segment_total[segment])) > 0
+                else 0.0
+            )
+            for segment in segment_total.keys()
+        }
+        stats = {
+            "shot_count": shot_count,
+            "matched_shot_count": matched_shot_count,
+            "shot_match_rate": round(float(matched_shot_count) / float(shot_count), 3) if shot_count else 0.0,
+            "avg_candidates_per_shot": round(float(total_candidates) / float(shot_count), 3) if shot_count else 0.0,
+            "segment_match_rate": segment_match_rate,
+            "bucket_distribution": bucket_distribution,
+        }
+        return matched_assets, stats
+
+    def _topics_from_review(self, review_result: IdeaScriptReviewResult, fallback: list[Any]) -> list[Any]:
+        normalized = list(getattr(review_result, "normalized_topics", None) or [])
+        legacy = list(getattr(review_result, "topics", None) or [])
+        if normalized:
+            return normalized
+        if legacy:
+            return legacy
+        if bool(getattr(review_result, "passed", False)):
+            return list(fallback or [])
+        return []
+
+    def _coerce_storyboard_shots(self, raw: Any) -> list[Any]:
+        if raw is None:
+            return []
+        if isinstance(raw, dict):
+            for key in ("shots", "storyboard"):
+                value = raw.get(key)
+                if isinstance(value, list):
+                    return value
+            if raw.get("shot_id"):
+                return [raw]
+            return []
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, tuple):
+            return list(raw)
+        return []
+
     def run(
         self,
         req: IdeaScriptRequest,
@@ -441,9 +703,14 @@ class IdeaScriptOrchestrator:
         tenant_id: Optional[str] = None,
         user_id: Optional[str] = None,
         trajectory_sink: Optional[list[Dict[str, Any]]] = None,
+        trace_sink: Optional[list[Dict[str, Any]]] = None,
     ) -> IdeaScriptResponse:
         run_started_at = time.perf_counter()
         trajectory_enabled = bool(getattr(self.config, "trajectory_eval_enabled", False))
+        trace_events: Optional[list[Dict[str, Any]]] = (
+            [] if bool(getattr(self.config, "agent_trace_enabled", False)) else None
+        )
+        self._last_trace = []
         trajectory: Optional[Trajectory] = (
             Trajectory(
                 session_id=str(session_id or ""),
@@ -474,6 +741,15 @@ class IdeaScriptOrchestrator:
         cache_key = self._cache_key(req)
         cached = self._cache_get(cache_key)
         if cached is not None:
+            self._append_trace_event(
+                trace_events,
+                stage_name="finalize",
+                node=self,
+                args={"cache_key": cache_key},
+                output={"cache_hit": True, "topic_count": len(cached.topics or [])},
+                success=True,
+                duration=max(0.0, float(time.perf_counter() - run_started_at)),
+            )
             if trajectory is not None:
                 trajectory.add_stage(
                     stage_name="finalize",
@@ -487,6 +763,10 @@ class IdeaScriptOrchestrator:
                 self._last_trajectory = trajectory
                 if isinstance(trajectory_sink, list):
                     trajectory_sink.append(trajectory.to_dict())
+            if isinstance(trace_events, list):
+                self._last_trace = list(trace_events)
+                if isinstance(trace_sink, list):
+                    trace_sink.extend(trace_events)
             return cached
 
         retry_count = 0
@@ -544,7 +824,9 @@ class IdeaScriptOrchestrator:
                     else None
                 )
                 self._collect_context_span_metrics(context_metrics, infer_context_pack)
-                inference_result = self._call_run(
+                inference_result = self._call_run_traced(
+                    trace_events,
+                    "audience_inference",
                     self.inference_node,
                     product=req.product,
                     retry=False,
@@ -569,6 +851,55 @@ class IdeaScriptOrchestrator:
 
             inference_warning = False
             warning_reason = None
+            if float(getattr(inference_result, "confidence", 0.0) or 0.0) < INFERENCE_CONFIDENCE_THRESHOLD:
+                allow_retry = not budget_exhausted
+                if allow_retry:
+                    retry_count = 1
+                    infer_retry_started = time.perf_counter()
+                    with self._span("idea_script.infer.retry", {"product": req.product, "retry_count": retry_count}):
+                        allow_llm, total_llm_calls, budget_exhausted, budget_exhausted_reason = self._reserve_llm_call(
+                            node=self.inference_node,
+                            llm_method_name="infer_audience",
+                            step_name="infer_retry",
+                            total_llm_calls=total_llm_calls,
+                            budget_exhausted=budget_exhausted,
+                            budget_exhausted_reason=budget_exhausted_reason,
+                        )
+                        retry_context_pack = (
+                            self._build_context_pack_for_llm(
+                                tenant_id=tenant_id,
+                                user_id=user_id,
+                                session_id=session_id,
+                                base_system="idea_script.infer.retry",
+                            )
+                            if allow_llm
+                            else None
+                        )
+                        self._collect_context_span_metrics(context_metrics, retry_context_pack)
+                        inference_result = self._call_run_traced(
+                            trace_events,
+                            "audience_inference_retry",
+                            self.inference_node,
+                            product=req.product,
+                            retry=True,
+                            previous=inference_result,
+                            allow_llm=allow_llm,
+                            context_pack=retry_context_pack,
+                            brief_context=brief_context,
+                        )
+                    if trajectory is not None:
+                        trajectory.add_stage(
+                            stage_name="audience_inference_retry",
+                            tool_name="AudienceInferenceNode.run",
+                            args={"product": req.product, "retry": True, "allow_llm": bool(allow_llm)},
+                            result={"confidence": float(getattr(inference_result, "confidence", 0.0) or 0.0)},
+                            success=True,
+                            reason="low_confidence_retry",
+                            duration=float(time.perf_counter() - infer_retry_started),
+                        )
+                if float(getattr(inference_result, "confidence", 0.0) or 0.0) < INFERENCE_CONFIDENCE_THRESHOLD:
+                    inference_warning = True
+                    warning_reason = "low_confidence_inference"
 
             generate_stage_started = time.perf_counter()
             with self._span(
@@ -599,7 +930,9 @@ class IdeaScriptOrchestrator:
                     else None
                 )
                 self._collect_context_span_metrics(context_metrics, generate_context_pack)
-                topics = self._call_run(
+                topics = self._call_run_traced(
+                    trace_events,
+                    "idea_generation",
                     self.generator_node,
                     audience_context=inference_result,
                     retry=False,
@@ -626,42 +959,388 @@ class IdeaScriptOrchestrator:
                 )
 
             raw_skill_payload = dict(getattr(self.generator_node, "last_skill_payload", {}) or {})
-            final_topics = list(topics or [])
             generation_warning = False
             generation_warning_reason = None
+
+            review_started = time.perf_counter()
+            review_result = self._call_run_traced(
+                trace_events,
+                "idea_review",
+                self.reviewer_node,
+                audience_context=inference_result,
+                topics=list(topics or []),
+            )
+            final_topics = self._topics_from_review(review_result, list(topics or []))
+            if trajectory is not None:
+                trajectory.add_stage(
+                    stage_name="idea_review",
+                    tool_name="IdeaScriptReviewerNode.run",
+                    args={"topic_count": len(topics or [])},
+                    result={"passed": bool(review_result.passed), "blocking_count": len(review_result.blocking_issues or [])},
+                    success=bool(review_result.passed),
+                    reason="review_completed",
+                    duration=float(time.perf_counter() - review_started),
+                )
+
+            if review_result.blocking_issues and not budget_exhausted:
+                generation_retry_count = 1
+                retry_generate_started = time.perf_counter()
+                allow_llm, total_llm_calls, budget_exhausted, budget_exhausted_reason = self._reserve_llm_call(
+                    node=self.generator_node,
+                    llm_method_name="generate_idea_scripts",
+                    step_name="generate_retry",
+                    total_llm_calls=total_llm_calls,
+                    budget_exhausted=budget_exhausted,
+                    budget_exhausted_reason=budget_exhausted_reason,
+                )
+                retry_context_pack = (
+                    self._build_context_pack_for_llm(
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                        base_system="idea_script.generate.retry",
+                    )
+                    if allow_llm
+                    else None
+                )
+                self._collect_context_span_metrics(context_metrics, retry_context_pack)
+                retry_topics = self._call_run_traced(
+                    trace_events,
+                    "idea_generation_retry",
+                    self.generator_node,
+                    audience_context=inference_result,
+                    retry=True,
+                    reviewer_blocking_issues=list(review_result.blocking_issues or []),
+                    previous_topics=final_topics,
+                    allow_llm=allow_llm,
+                    context_pack=retry_context_pack,
+                    brief_context=brief_context,
+                )
+                review_result = self._call_run_traced(
+                    trace_events,
+                    "idea_review_retry",
+                    self.reviewer_node,
+                    audience_context=inference_result,
+                    topics=list(retry_topics or []),
+                )
+                final_topics = self._topics_from_review(review_result, list(retry_topics or []))
+                if trajectory is not None:
+                    trajectory.add_stage(
+                        stage_name="idea_generation_retry",
+                        tool_name="IdeaScriptGeneratorNode.run",
+                        args={"retry": True, "blocking_count": len(review_result.blocking_issues or [])},
+                        result={"topic_count": len(final_topics), "passed": bool(review_result.passed)},
+                        success=bool(review_result.passed),
+                        reason="review_blocking_retry",
+                        duration=float(time.perf_counter() - retry_generate_started),
+                    )
+
+            if review_result.blocking_issues:
+                generation_warning = True
+                generation_warning_reason = "blocking_review_issues_after_retry"
+
             compliance_result = ComplianceScanResult(
                 risk_level=str(raw_skill_payload.get("risk_level") or inference_result.unsafe_claim_risk or "low"),
                 risky_spans=[],
             )
+            if final_topics and not budget_exhausted:
+                allow_llm, total_llm_calls, budget_exhausted, budget_exhausted_reason = self._reserve_llm_call(
+                    node=self.risk_scanner_node,
+                    llm_method_name="scan_compliance_risk",
+                    step_name="risk_scan",
+                    total_llm_calls=total_llm_calls,
+                    budget_exhausted=budget_exhausted,
+                    budget_exhausted_reason=budget_exhausted_reason,
+                )
+                compliance_result = self._call_run_traced(
+                    trace_events,
+                    "risk_scan",
+                    self.risk_scanner_node,
+                    product=req.product,
+                    persona=inference_result.persona,
+                    topics=final_topics,
+                    allow_llm=allow_llm,
+                )
+
             compliance_warning = False
             compliance_warning_reason = None
             safe_rewrite_applied = False
+            if (
+                self._risk_at_least(compliance_result.risk_level, "medium")
+                and list(compliance_result.risky_spans or [])
+                and not budget_exhausted
+            ):
+                allow_llm, total_llm_calls, budget_exhausted, budget_exhausted_reason = self._reserve_llm_call(
+                    node=self.safe_rewrite_node,
+                    llm_method_name="safe_rewrite_topics",
+                    step_name="safe_rewrite",
+                    total_llm_calls=total_llm_calls,
+                    budget_exhausted=budget_exhausted,
+                    budget_exhausted_reason=budget_exhausted_reason,
+                )
+                rewrite_result = self._call_run_traced(
+                    trace_events,
+                    "safe_rewrite",
+                    self.safe_rewrite_node,
+                    product=req.product,
+                    persona=inference_result.persona,
+                    topics=final_topics,
+                    risky_spans=compliance_result.risky_spans,
+                    allow_llm=allow_llm,
+                )
+                safe_rewrite_applied = True
+                final_topics = list(rewrite_result.rewritten_topics or final_topics)
+                review_result = self._call_run_traced(
+                    trace_events,
+                    "idea_review_after_safe_rewrite",
+                    self.reviewer_node,
+                    audience_context=inference_result,
+                    topics=final_topics,
+                )
+                final_topics = self._topics_from_review(review_result, final_topics)
+                allow_llm, total_llm_calls, budget_exhausted, budget_exhausted_reason = self._reserve_llm_call(
+                    node=self.risk_scanner_node,
+                    llm_method_name="scan_compliance_risk",
+                    step_name="risk_scan_after_rewrite",
+                    total_llm_calls=total_llm_calls,
+                    budget_exhausted=budget_exhausted,
+                    budget_exhausted_reason=budget_exhausted_reason,
+                )
+                compliance_result = self._call_run_traced(
+                    trace_events,
+                    "risk_scan_after_rewrite",
+                    self.risk_scanner_node,
+                    product=req.product,
+                    persona=inference_result.persona,
+                    topics=final_topics,
+                    allow_llm=allow_llm,
+                )
+
+            if self._risk_at_least(compliance_result.risk_level, "high"):
+                compliance_warning = True
+                compliance_warning_reason = (
+                    "high_risk_after_safe_rewrite" if safe_rewrite_applied else "high_risk_detected"
+                )
+
             rubric_scores = None
-            review_result = IdeaScriptReviewResult(
-                passed=True,
-                blocking_issues=[],
-                non_blocking_issues=[],
-                failure_tags=[],
-                normalized_topics=final_topics,
-                issues=[],
-                topics=final_topics,
-            )
+            if final_topics and self.config.scoring_enabled and not budget_exhausted:
+                allow_llm, total_llm_calls, budget_exhausted, budget_exhausted_reason = self._reserve_llm_call(
+                    node=self.scoring_node,
+                    llm_method_name="score_idea_scripts",
+                    step_name="score",
+                    total_llm_calls=total_llm_calls,
+                    budget_exhausted=budget_exhausted,
+                    budget_exhausted_reason=budget_exhausted_reason,
+                )
+                if allow_llm:
+                    rubric_scores = self._call_run_traced(
+                        trace_events,
+                        "score",
+                        self.scoring_node,
+                        audience_context=inference_result,
+                        topics=final_topics,
+                        review_result=review_result,
+                        compliance_result=compliance_result,
+                        allow_llm=allow_llm,
+                    )
 
             storyboard_issues: list[str] = []
             storyboard_failure_tags: list[str] = []
             storyboard_warning = False
             storyboard_warning_reason = None
             storyboard_retry_count = 0
+            if self.config.storyboard_enabled:
+                storyboard_started = time.perf_counter()
+                first_pass_topics: list[Any] = []
+                first_pass_issues: list[str] = []
+                for topic in final_topics:
+                    shots = self._coerce_storyboard_shots(
+                        self._call_run_traced(
+                            trace_events,
+                            "storyboard_generate",
+                            self.storyboard_node,
+                            audience_context=inference_result,
+                            topic=topic,
+                            retry=False,
+                            allow_llm=False,
+                        )
+                    )
+                    story_review = self._call_run_traced(
+                        trace_events,
+                        "storyboard_review",
+                        self.storyboard_reviewer_node,
+                        audience_context=inference_result,
+                        topic=topic,
+                        shots=shots,
+                    )
+                    item = topic.model_copy(deep=True) if hasattr(topic, "model_copy") else TopicItem(**topic)
+                    item.shots = list(story_review.normalized_shots or shots or [])
+                    first_pass_topics.append(item)
+                    first_pass_issues.extend(list(story_review.blocking_issues or []))
+                    storyboard_issues.extend(list(story_review.blocking_issues or []) + list(story_review.non_blocking_issues or []))
+                    storyboard_failure_tags.extend(list(story_review.failure_tags or []))
+
+                final_topics = first_pass_topics
+                if first_pass_issues and not budget_exhausted:
+                    storyboard_retry_count = 1
+                    retry_topics: list[Any] = []
+                    retry_issues: list[str] = []
+                    storyboard_issues = []
+                    storyboard_failure_tags = []
+                    for topic in final_topics:
+                        shots = self._coerce_storyboard_shots(
+                            self._call_run_traced(
+                                trace_events,
+                                "storyboard_generate_retry",
+                                self.storyboard_node,
+                                audience_context=inference_result,
+                                topic=topic,
+                                retry=True,
+                                reviewer_blocking_issues=first_pass_issues,
+                                allow_llm=False,
+                            )
+                        )
+                        story_review = self._call_run_traced(
+                            trace_events,
+                            "storyboard_review_retry",
+                            self.storyboard_reviewer_node,
+                            audience_context=inference_result,
+                            topic=topic,
+                            shots=shots,
+                        )
+                        item = topic.model_copy(deep=True) if hasattr(topic, "model_copy") else TopicItem(**topic)
+                        item.shots = list(story_review.normalized_shots or shots or [])
+                        retry_topics.append(item)
+                        retry_issues.extend(list(story_review.blocking_issues or []))
+                        storyboard_issues.extend(list(story_review.blocking_issues or []) + list(story_review.non_blocking_issues or []))
+                        storyboard_failure_tags.extend(list(story_review.failure_tags or []))
+                    final_topics = retry_topics
+                    if retry_issues:
+                        storyboard_warning = True
+                        storyboard_warning_reason = "storyboard_blocking_issues_after_retry"
+                elif first_pass_issues:
+                    storyboard_warning = True
+                    storyboard_warning_reason = "storyboard_blocking_issues_budget_exhausted"
+                if trajectory is not None:
+                    trajectory.add_stage(
+                        stage_name="storyboard",
+                        tool_name="StoryboardAgentNode.run",
+                        args={"topic_count": len(final_topics), "retry_count": storyboard_retry_count},
+                        result={"warning": storyboard_warning, "issue_count": len(storyboard_issues)},
+                        success=not storyboard_warning,
+                        reason="storyboard_completed",
+                        duration=float(time.perf_counter() - storyboard_started),
+                    )
+
             matched_assets: dict[str, list[Any]] = {}
             asset_match_warning = False
             asset_match_warning_reason: Optional[str] = None
             shot_match_rate = 0.0
             avg_candidates_per_shot = 0.0
             segment_match_rate: dict[str, float] = {}
+            asset_match_mcp = False
+            mcp_tool_error_count = 0
+            shot_count = sum(len(getattr(topic, "shots", []) or []) for topic in final_topics)
+            if self.config.asset_match_enabled and shot_count > 0:
+                asset_match_started = time.perf_counter()
+                try:
+                    if self.config.asset_match_use_mcp:
+                        (
+                            matched_assets,
+                            asset_stats,
+                            _tool_version,
+                            _tool_hash,
+                            _mcp_server_name,
+                            asset_match_mcp,
+                        ) = self._asset_match_via_mcp(final_topics, self.config.asset_db_path)
+                    else:
+                        matched_assets, asset_stats = self._asset_match_local(final_topics)
+                    shot_match_rate = float(asset_stats.get("shot_match_rate") or 0.0)
+                    avg_candidates_per_shot = float(asset_stats.get("avg_candidates_per_shot") or 0.0)
+                    segment_match_rate = dict(asset_stats.get("segment_match_rate") or {})
+                    self._append_trace_event(
+                        trace_events,
+                        stage_name="asset_match",
+                        node=self.asset_index_tool,
+                        args={
+                            "shot_count": shot_count,
+                            "asset_match_use_mcp": bool(self.config.asset_match_use_mcp),
+                            "top_k": int(self.config.asset_match_top_k),
+                            "allow_llm": False,
+                        },
+                        output={
+                            "shot_match_rate": shot_match_rate,
+                            "avg_candidates_per_shot": avg_candidates_per_shot,
+                            "segment_match_rate": segment_match_rate,
+                            "matched_shot_count": sum(1 for items in matched_assets.values() if items),
+                        },
+                        success=True,
+                        duration=float(time.perf_counter() - asset_match_started),
+                    )
+                except Exception as e:
+                    asset_match_warning = True
+                    asset_match_warning_reason = "asset_match_mcp_failed" if self.config.asset_match_use_mcp else "asset_match_failed"
+                    asset_match_mcp = bool(self.config.asset_match_use_mcp)
+                    mcp_tool_error_count = 1 if self.config.asset_match_use_mcp else 0
+                    self._append_trace_event(
+                        trace_events,
+                        stage_name="asset_match",
+                        node=self.asset_index_tool,
+                        args={
+                            "shot_count": shot_count,
+                            "asset_match_use_mcp": bool(self.config.asset_match_use_mcp),
+                            "top_k": int(self.config.asset_match_top_k),
+                            "allow_llm": False,
+                        },
+                        success=False,
+                        duration=float(time.perf_counter() - asset_match_started),
+                        error=str(e),
+                    )
+                    sys_logger.warning(f"idea_script.asset_match_failed: err={e}")
+
             edit_plans: list[Any] = []
             edit_plan_warning = False
             edit_plan_warning_reason: Optional[str] = None
-            asset_match_mcp = False
+            if self.config.edit_plan_enabled and shot_count > 0:
+                edit_plan_started = time.perf_counter()
+                try:
+                    edit_plan_out = self.edit_plan_builder.run(
+                        product=req.product,
+                        topics=final_topics,
+                        matched_assets=matched_assets,
+                        prompt_version=prompt_version,
+                        policy_version=policy_version,
+                        config_hash=config_hash,
+                    )
+                    edit_plans = list(edit_plan_out.get("edit_plans") or [])
+                    edit_plan_warning = bool(edit_plan_out.get("edit_plan_warning"))
+                    edit_plan_warning_reason = edit_plan_out.get("edit_plan_warning_reason")
+                    self._append_trace_event(
+                        trace_events,
+                        stage_name="edit_plan_build",
+                        node=self.edit_plan_builder,
+                        args={"topic_count": len(final_topics), "shot_count": shot_count, "allow_llm": False},
+                        output={
+                            "edit_plan_count": len(edit_plans or []),
+                            "edit_plan_warning": edit_plan_warning,
+                            "edit_plan_warning_reason": edit_plan_warning_reason,
+                        },
+                        success=not edit_plan_warning,
+                        duration=float(time.perf_counter() - edit_plan_started),
+                    )
+                except Exception as e:
+                    edit_plan_warning = True
+                    edit_plan_warning_reason = "edit_plan_build_failed"
+                    self._append_trace_event(
+                        trace_events,
+                        stage_name="edit_plan_build",
+                        node=self.edit_plan_builder,
+                        args={"topic_count": len(final_topics), "shot_count": shot_count, "allow_llm": False},
+                        success=False,
+                        duration=float(time.perf_counter() - edit_plan_started),
+                        error=str(e),
+                    )
+                    sys_logger.warning(f"idea_script.edit_plan_failed: err={e}")
 
             response = IdeaScriptResponse(
                 audience_context=inference_result,
@@ -727,6 +1406,16 @@ class IdeaScriptOrchestrator:
                 total_llm_calls=total_llm_calls,
             )
             latency_ms = max(0, int((time.perf_counter() - run_started_at) * 1000))
+            total_tool_calls = (
+                3  # inference, generation, review
+                + (1 if generation_retry_count else 0)
+                + (1 if safe_rewrite_applied else 0)
+                + (1 if rubric_scores is not None else 0)
+                + (2 * len(final_topics) if self.config.storyboard_enabled else 0)
+                + (2 * len(final_topics) if storyboard_retry_count else 0)
+                + (1 if self.config.asset_match_enabled and shot_count > 0 else 0)
+                + (1 if self.config.edit_plan_enabled and shot_count > 0 else 0)
+            )
             quality_metrics = build_quality_metrics(
                 response=response,
                 session_id=str(session_id or ""),
@@ -735,11 +1424,11 @@ class IdeaScriptOrchestrator:
                 prompt_version=prompt_version,
                 policy_version=policy_version,
                 config_hash=config_hash,
-                total_tool_calls=2,
-                mcp_calls_count=0,
-                mcp_tool_error_count=0,
+                total_tool_calls=total_tool_calls,
+                mcp_calls_count=(1 if asset_match_mcp else 0),
+                mcp_tool_error_count=mcp_tool_error_count,
                 latency_ms=latency_ms,
-                asset_match_use_mcp=False,
+                asset_match_use_mcp=asset_match_mcp,
             )
             if trajectory is not None:
                 trajectory.metadata = {
@@ -752,7 +1441,7 @@ class IdeaScriptOrchestrator:
                 trajectory.add_stage(
                     stage_name="finalize",
                     tool_name="IdeaScriptOrchestrator.run",
-                    args={"topic_count": len(response.topics or []), "edit_plan_count": 0},
+                    args={"topic_count": len(response.topics or []), "edit_plan_count": len(edit_plans or [])},
                     result={
                         "task_success": bool(quality_metrics.effectiveness.task_success),
                         "compliance_risk": str(response.risk_level or "low"),
@@ -761,6 +1450,38 @@ class IdeaScriptOrchestrator:
                     reason="response_built",
                     duration=float(max(0.0, time.perf_counter() - run_started_at)),
                 )
+            self._append_trace_event(
+                trace_events,
+                stage_name="finalize",
+                node=self,
+                args={
+                    "topic_count": len(response.topics or []),
+                    "edit_plan_count": len(edit_plans or []),
+                    "allow_llm": False,
+                },
+                output={
+                    "topic_count": len(response.topics or []),
+                    "edit_plan_count": len(edit_plans or []),
+                    "risk_level": response.risk_level,
+                    "warning_count": len(
+                        [
+                            item
+                            for item in (
+                                response.warning_reason,
+                                response.generation_warning_reason,
+                                response.compliance_warning_reason,
+                                response.storyboard_warning_reason,
+                                response.asset_match_warning_reason,
+                                response.edit_plan_warning_reason,
+                            )
+                            if item
+                        ]
+                    ),
+                    "total_llm_calls": total_llm_calls,
+                },
+                success=True,
+                duration=float(max(0.0, time.perf_counter() - run_started_at)),
+            )
 
             self._set_span_attrs(
                 run_span,
@@ -774,20 +1495,20 @@ class IdeaScriptOrchestrator:
                     "compliance_warning": response.compliance_warning,
                     "topic_count": len(response.topics or []),
                     "scoring_enabled": self.config.scoring_enabled,
-                    "storyboard_warning": False,
-                    "storyboard_retry_count": 0,
-                    "shot_match_rate": 0.0,
-                    "avg_candidates_per_shot": 0.0,
-                    "segment_match_rate_hook": 0.0,
-                    "segment_match_rate_view": 0.0,
-                    "segment_match_rate_steps": 0.0,
-                    "segment_match_rate_product": 0.0,
-                    "segment_match_rate_cta": 0.0,
-                    "asset_match_warning": False,
-                    "asset_match_warning_reason": "",
-                    "edit_plan_count": 0,
-                    "edit_plan_warning": False,
-                    "edit_plan_warning_reason": "",
+                    "storyboard_warning": storyboard_warning,
+                    "storyboard_retry_count": storyboard_retry_count,
+                    "shot_match_rate": shot_match_rate,
+                    "avg_candidates_per_shot": avg_candidates_per_shot,
+                    "segment_match_rate_hook": float(segment_match_rate.get("HOOK") or 0.0),
+                    "segment_match_rate_view": float(segment_match_rate.get("VIEW") or 0.0),
+                    "segment_match_rate_steps": float(segment_match_rate.get("STEPS") or 0.0),
+                    "segment_match_rate_product": float(segment_match_rate.get("PRODUCT") or 0.0),
+                    "segment_match_rate_cta": float(segment_match_rate.get("CTA") or 0.0),
+                    "asset_match_warning": asset_match_warning,
+                    "asset_match_warning_reason": asset_match_warning_reason or "",
+                    "edit_plan_count": len(edit_plans or []),
+                    "edit_plan_warning": edit_plan_warning,
+                    "edit_plan_warning_reason": edit_plan_warning_reason or "",
                     "prompt_version": prompt_version,
                     "policy_version": policy_version,
                     "config_hash": config_hash,
@@ -830,6 +1551,21 @@ class IdeaScriptOrchestrator:
                         {
                             "event": "idea_script.trajectory",
                             "trajectory": trajectory_payload,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            if isinstance(trace_events, list):
+                self._last_trace = list(trace_events)
+                if isinstance(trace_sink, list):
+                    trace_sink.extend(trace_events)
+                sys_logger.info(
+                    json.dumps(
+                        {
+                            "event": "idea_script.agent_trace",
+                            "session_id": str(session_id or ""),
+                            "trace_count": len(trace_events),
+                            "stages": [str(item.get("stage_name") or "") for item in trace_events],
                         },
                         ensure_ascii=False,
                     )

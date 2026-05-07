@@ -31,12 +31,20 @@ from prompts.refine import cached_refine_prompt, simple_refine_prompt
 from agent.checkpointer import create_checkpointer
 
 # --- LangGraph optional import ---
+# 必须与运行 uvicorn/main 的同一个解释器环境里安装：`python -m pip install langgraph ...`
+_LANGGRAPH_IMPORT_ERROR: Optional[str] = None
 try:
-    from langgraph.graph import StateGraph, END  # type: ignore
+    from langgraph.graph import StateGraph, START, END  # type: ignore
 
     _LANGGRAPH_OK = True
-except Exception:
+except Exception as e:
     _LANGGRAPH_OK = False
+    _LANGGRAPH_IMPORT_ERROR = f"{type(e).__name__}: {e}"
+    sys_logger.warning(
+        "LangGraph is not importable (%s); agent planner falls back unless USE_LANGGRAPH=0. "
+        "Install into the API venv: .venv/bin/python -m pip install -r requirements.txt",
+        _LANGGRAPH_IMPORT_ERROR,
+    )
 
 _GRAPH_CLOSER = None
 _GRAPH = None
@@ -439,7 +447,7 @@ def build_graph():
     g.add_node("fallback", _node_fallback)
     g.add_node("normalize", _node_normalize)
 
-    g.set_entry_point("context")
+    g.add_edge(START, "context")
     g.add_edge("context", "refine")
     g.add_edge("refine", "gen")
     g.add_edge("gen", "validate")
@@ -467,6 +475,15 @@ def build_graph():
 _GRAPH = build_graph()
 
 
+def langgraph_startup_diagnostics() -> Dict[str, Any]:
+    """供 /api/agent/plan debug：区分「缺包」与运行时失败。"""
+    return {
+        "langgraph_import_ok": _LANGGRAPH_OK,
+        "langgraph_import_error": _LANGGRAPH_IMPORT_ERROR,
+        "compiled_graph_ok": _GRAPH is not None,
+    }
+
+
 def plan_with_langgraph(
     req_id: str,
     user_prompt: str,
@@ -477,7 +494,16 @@ def plan_with_langgraph(
     thread_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     if _GRAPH is None:
-        raise RuntimeError("LangGraph not available. Please install langgraph.")
+        detail = (
+            _LANGGRAPH_IMPORT_ERROR
+            or "graph did not compile; see server logs."
+        )
+        raise RuntimeError(
+            "LangGraph not available for this Python process. "
+            "Install deps into the same interpreter that runs the API "
+            "(e.g. `.venv/bin/python -m pip install -r requirements.txt`), then restart. "
+            f"Detail: {detail}"
+        )
 
     resolved_supplemental_prompt = extract_supplemental_prompt(user_prompt, supplemental_prompt)
     init_state: PlanState = {

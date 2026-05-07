@@ -86,13 +86,8 @@ ensure_backend_env() {
     log "create python venv"
     python3 -m venv "$WORKTREE_ROOT/.venv"
   fi
-  if ! "$WORKTREE_ROOT/.venv/bin/python" - <<'PY' >/dev/null 2>&1
-import fastapi, uvicorn  # noqa: F401
-PY
-  then
-    log "install backend dependencies"
-    "$WORKTREE_ROOT/.venv/bin/pip" install -r "$WORKTREE_ROOT/requirements.txt" >/dev/null
-  fi
+  log "sync backend dependencies (requirements.txt)"
+  "$WORKTREE_ROOT/.venv/bin/pip" install -r "$WORKTREE_ROOT/requirements.txt" >/dev/null
 }
 
 ensure_auth_db_path() {

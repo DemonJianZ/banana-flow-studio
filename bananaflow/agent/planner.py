@@ -20,6 +20,20 @@ def _planner_provider(model: str) -> str:
     return "ollama" if str(model or "").strip().lower().startswith("ollama:") else "google"
 
 
+def _with_planner_debug(out: dict, **debug) -> dict:
+    payload = out if isinstance(out, dict) else {}
+    current_debug = payload.get("debug") if isinstance(payload.get("debug"), dict) else {}
+    payload["debug"] = {
+        **current_debug,
+        "planner": {
+            "provider": _planner_provider(MODEL_AGENT),
+            "model": MODEL_AGENT,
+            **debug,
+        },
+    }
+    return payload
+
+
 def agent_plan_impl(req: AgentRequest, request: Request) -> dict:
     req_id = getattr(request.state, "req_id", "noid")
     user_text = (req.prompt or "").strip()
@@ -46,7 +60,15 @@ def agent_plan_impl(req: AgentRequest, request: Request) -> dict:
             conns,
             fallback_refine=False,
         )
-        return normalize_patch(out, structure_only=True)
+        return _with_planner_debug(
+            normalize_patch(out, structure_only=True),
+            planner_path="preflight",
+            use_langgraph=os.getenv("USE_LANGGRAPH", "0") == "1",
+            langgraph_attempted=False,
+            thread_id=None,
+            canvas_id=(getattr(req, "canvas_id", "") or "").strip() or None,
+            structure_only=True,
+        )
 
     # ✅ 多画布：统一计算 thread_id（优先 canvas_id）
     canvas_id = (getattr(req, "canvas_id", "") or "").strip()
@@ -57,6 +79,8 @@ def agent_plan_impl(req: AgentRequest, request: Request) -> dict:
         thread_id = f"t_{req_id}"
 
     use_langgraph = os.getenv("USE_LANGGRAPH", "0") == "1"
+    langgraph_error = None
+    langgraph_diag: dict = {}
     if use_langgraph:
         try:
             from agent.graph import plan_with_langgraph
@@ -75,9 +99,22 @@ def agent_plan_impl(req: AgentRequest, request: Request) -> dict:
                 f"[{req_id}] agent_plan path=langgraph thread_id={thread_id} "
                 f"provider={_planner_provider(MODEL_AGENT)} model={MODEL_AGENT}"
             )
-            return normalize_patch(out)
+            return _with_planner_debug(
+                normalize_patch(out),
+                planner_path="langgraph",
+                use_langgraph=True,
+                langgraph_attempted=True,
+                langgraph_fallback=False,
+                thread_id=thread_id,
+                canvas_id=canvas_id or None,
+                structure_only=False,
+            )
 
         except Exception as e:
+            langgraph_error = str(e)
+            from agent.graph import langgraph_startup_diagnostics
+
+            langgraph_diag = langgraph_startup_diagnostics()
             sys_logger.error(f"[{req_id}] LangGraph plan failed, fallback to legacy: {e}")
 
     # legacy
@@ -86,8 +123,31 @@ def agent_plan_impl(req: AgentRequest, request: Request) -> dict:
             f"[{req_id}] agent_plan path=legacy thread_id={thread_id} "
             f"provider={_planner_provider(MODEL_AGENT)} model={MODEL_AGENT}"
         )
-        return agent_plan_legacy_impl(req, request)
+        return _with_planner_debug(
+            normalize_patch(agent_plan_legacy_impl(req, request)),
+            planner_path=("legacy_after_langgraph_fallback" if langgraph_error else "legacy"),
+            use_langgraph=use_langgraph,
+            langgraph_attempted=bool(use_langgraph),
+            langgraph_fallback=bool(langgraph_error),
+            langgraph_error=langgraph_error,
+            **langgraph_diag,
+            thread_id=thread_id,
+            canvas_id=canvas_id or None,
+            structure_only=False,
+        )
     except Exception as e:
         sys_logger.error(f"[{req_id}] Legacy agent plan failed: {e}")
         out = deterministic_plan_or_patch(user_text, selected, nodes, conns, fallback_refine=True)
-        return normalize_patch(out)
+        return _with_planner_debug(
+            normalize_patch(out),
+            planner_path="deterministic_fallback",
+            use_langgraph=use_langgraph,
+            langgraph_attempted=bool(use_langgraph),
+            langgraph_fallback=bool(langgraph_error),
+            langgraph_error=langgraph_error,
+            **langgraph_diag,
+            legacy_error=str(e),
+            thread_id=thread_id,
+            canvas_id=canvas_id or None,
+            structure_only=False,
+        )

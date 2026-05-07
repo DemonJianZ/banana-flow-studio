@@ -64,13 +64,10 @@ ensure_backend_env() {
     log "create python venv"
     python3 -m venv "$WORKTREE_ROOT/.venv"
   fi
-  if ! "$WORKTREE_ROOT/.venv/bin/python" - <<'PY' >/dev/null 2>&1
-import fastapi, uvicorn  # noqa: F401
-PY
-  then
-    log "install backend dependencies"
-    "$WORKTREE_ROOT/.venv/bin/pip" install -r "$WORKTREE_ROOT/requirements.txt" >/dev/null
-  fi
+  # 每次同步 requirements：旧逻辑只在「缺少 fastapi/uvicorn」时才 pip install，
+  # requirements 里新增依赖（如 langgraph）不会触发安装，易导致与运行中的 .venv 不一致。
+  log "sync backend dependencies (requirements.txt)"
+  "$WORKTREE_ROOT/.venv/bin/pip" install -r "$WORKTREE_ROOT/requirements.txt" >/dev/null
 }
 
 ensure_frontend_env() {

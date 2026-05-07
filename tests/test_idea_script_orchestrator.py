@@ -266,6 +266,41 @@ def _storyboard_review_result(
 
 
 class IdeaScriptOrchestratorTests(unittest.TestCase):
+    def test_agent_trace_collects_stage_outputs_when_enabled(self):
+        topics = [
+            TopicItem(angle="persona", title="A", hook="先看适不适合", script_60s="你先别急，先看你自己适不适合，再决定。评论区打清单。"),
+            TopicItem(angle="scene", title="B", hook="先看场景", script_60s="你在早晚高峰地铁通勤场景里用时，先看这个指标。先收藏。"),
+            TopicItem(angle="misconception", title="C", hook="这个误区最坑", script_60s="你先别急，很多人看错了方向，先看需求再看参数。关注我。"),
+        ]
+        orchestrator = IdeaScriptOrchestrator(
+            inference_node=_StubInferenceNode([0.90]),
+            generator_node=_StubGeneratorNode(outputs=[topics]),
+            reviewer_node=_StubReviewerNode([_review_result(normalized_topics=topics)]),
+            risk_scanner_node=_StubRiskScannerNode(outputs=[_compliance_result("low", [])]),
+            config=IdeaScriptAgentConfig(
+                agent_trace_enabled=True,
+                storyboard_enabled=False,
+                asset_match_enabled=False,
+                edit_plan_enabled=False,
+            ),
+        )
+        trace_sink = []
+
+        out = orchestrator.run(IdeaScriptRequest(product="耳机"), trace_sink=trace_sink)
+
+        self.assertEqual(len(out.topics), 3)
+        stage_names = [str(item.get("stage_name") or "") for item in trace_sink]
+        self.assertIn("audience_inference", stage_names)
+        self.assertIn("idea_generation", stage_names)
+        self.assertIn("idea_review", stage_names)
+        self.assertIn("risk_scan", stage_names)
+        self.assertIn("finalize", stage_names)
+        generation_event = next(item for item in trace_sink if item.get("stage_name") == "idea_generation")
+        self.assertEqual(generation_event["node_name"], "_StubGeneratorNode")
+        self.assertIn("output", generation_event)
+        self.assertFalse(generation_event["output"]["truncated"])
+        self.assertEqual(orchestrator.get_last_trace(), trace_sink)
+
     def test_inference_retry_once_and_warn_when_confidence_still_low(self):
         orchestrator = IdeaScriptOrchestrator(
             inference_node=_StubInferenceNode([0.60, 0.70]),
