@@ -3,79 +3,13 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any, Dict, List, Tuple
 
-try:
-    from google.genai import types
-except Exception:  # pragma: no cover - test environments may not install google-genai
-    class _FallbackPart:
-        def __init__(self, text: str = "") -> None:
-            self.text = text
-
-    class _FallbackGenerateContentConfig:
-        def __init__(self, **kwargs: Any) -> None:
-            for key, value in kwargs.items():
-                setattr(self, key, value)
-
-    class _FallbackTypes:
-        Part = _FallbackPart
-        GenerateContentConfig = _FallbackGenerateContentConfig
-
-    types = _FallbackTypes()
-
-try:
-    from ...core.config import (
-        AGENT_CHAT_HTTP_PROXY,
-        AGENT_CHAT_HTTPS_PROXY,
-        MODEL_AGENT_CHAT,
-        MODEL_COMFYUI_QWEN_I2V,
-        MODEL_PROMPT_POLISH,
-    )
-    from ...prompts.refine import ollama_prompt_polish
-    from ...schemas.api import AgentDramaRequest
-    from ...services.genai_client import call_genai_retry_with_proxy
-    from ...services.comfyui import (
-        run_image_z_image_turbo_workflow,
-        run_qwen_i2v_workflow,
-        run_rmbg_workflow,
-    )
-    from ...utils.images import bytes_to_data_url, parse_data_url
-    from ...utils.size import calculate_target_resolution
-    from ..drama_creator import DramaCreatorClient
-    from ..idea_script.instance import idea_script_orchestrator
-    from ..idea_script.schemas import IdeaScriptRequest
-    from ...mcp.tool_asset_match import execute_asset_match_tool
-    from ...mcp.tool_export_ffmpeg import execute_export_ffmpeg_tool
-    from ...quality.harvester import harvest_eval_case
-except Exception:  # pragma: no cover - compatible with python bananaflow/main.py
-    from core.config import (
-        AGENT_CHAT_HTTP_PROXY,
-        AGENT_CHAT_HTTPS_PROXY,
-        MODEL_AGENT_CHAT,
-        MODEL_COMFYUI_QWEN_I2V,
-        MODEL_PROMPT_POLISH,
-    )
-    from prompts.refine import ollama_prompt_polish
-    from schemas.api import AgentDramaRequest
-    from services.genai_client import call_genai_retry_with_proxy
-    from services.comfyui import (
-        run_image_z_image_turbo_workflow,
-        run_qwen_i2v_workflow,
-        run_rmbg_workflow,
-    )
-    from utils.images import bytes_to_data_url, parse_data_url
-    from utils.size import calculate_target_resolution
-    from agent.drama_creator import DramaCreatorClient
-    from agent.idea_script.instance import idea_script_orchestrator
-    from agent.idea_script.schemas import IdeaScriptRequest
-    from mcp.tool_asset_match import execute_asset_match_tool
-    from mcp.tool_export_ffmpeg import execute_export_ffmpeg_tool
-    from quality.harvester import harvest_eval_case
-
 from .executor import AgentToolContext, AgentToolExecutor
 from .registry import AgentToolRegistry
 from .specs import AgentToolSpec
 
 
 def _parse_dimensions(size: str | None, ratio: str | None) -> Tuple[int, int]:
+    calculate_target_resolution = _load_calculate_target_resolution()
     target = calculate_target_resolution(size or "1024x1024", ratio or "1:1")
     if "x" not in target:
         return 1024, 1024
@@ -96,12 +30,158 @@ def _build_agent_chitchat_prompt(message: str) -> str:
     )
 
 
+def _load_config():
+    try:
+        from ...core.config import (
+            AGENT_CHAT_HTTP_PROXY,
+            AGENT_CHAT_HTTPS_PROXY,
+            MODEL_AGENT_CHAT,
+            MODEL_COMFYUI_QWEN_I2V,
+            MODEL_PROMPT_POLISH,
+        )
+    except Exception:  # pragma: no cover
+        from core.config import (
+            AGENT_CHAT_HTTP_PROXY,
+            AGENT_CHAT_HTTPS_PROXY,
+            MODEL_AGENT_CHAT,
+            MODEL_COMFYUI_QWEN_I2V,
+            MODEL_PROMPT_POLISH,
+        )
+    return {
+        "AGENT_CHAT_HTTP_PROXY": AGENT_CHAT_HTTP_PROXY,
+        "AGENT_CHAT_HTTPS_PROXY": AGENT_CHAT_HTTPS_PROXY,
+        "MODEL_AGENT_CHAT": MODEL_AGENT_CHAT,
+        "MODEL_COMFYUI_QWEN_I2V": MODEL_COMFYUI_QWEN_I2V,
+        "MODEL_PROMPT_POLISH": MODEL_PROMPT_POLISH,
+    }
+
+
+def _load_ollama_prompt_polish():
+    try:
+        from ...prompts.refine import ollama_prompt_polish
+    except Exception:  # pragma: no cover
+        from prompts.refine import ollama_prompt_polish
+    return ollama_prompt_polish
+
+
+def _load_agent_drama_request():
+    try:
+        from ...schemas.api import AgentDramaRequest
+    except Exception:  # pragma: no cover
+        from schemas.api import AgentDramaRequest
+    return AgentDramaRequest
+
+
+def _load_call_genai_retry_with_proxy():
+    try:
+        from ...services.genai_client import call_genai_retry_with_proxy
+    except Exception:  # pragma: no cover
+        from services.genai_client import call_genai_retry_with_proxy
+    return call_genai_retry_with_proxy
+
+
+def _load_comfyui_functions():
+    try:
+        from ...services.comfyui import (
+            run_image_z_image_turbo_workflow,
+            run_qwen_i2v_workflow,
+            run_rmbg_workflow,
+        )
+    except Exception:  # pragma: no cover
+        from services.comfyui import (
+            run_image_z_image_turbo_workflow,
+            run_qwen_i2v_workflow,
+            run_rmbg_workflow,
+        )
+    return run_image_z_image_turbo_workflow, run_qwen_i2v_workflow, run_rmbg_workflow
+
+
+def _load_media_utils():
+    try:
+        from ...utils.images import bytes_to_data_url, parse_data_url
+    except Exception:  # pragma: no cover
+        from utils.images import bytes_to_data_url, parse_data_url
+    return bytes_to_data_url, parse_data_url
+
+
+def _load_calculate_target_resolution():
+    try:
+        from ...utils.size import calculate_target_resolution
+    except Exception:  # pragma: no cover
+        from utils.size import calculate_target_resolution
+    return calculate_target_resolution
+
+
+def _load_drama_creator_client():
+    try:
+        from ..drama_creator import DramaCreatorClient
+    except Exception:  # pragma: no cover
+        from agent.drama_creator import DramaCreatorClient
+    return DramaCreatorClient
+
+
+def _load_idea_script_components():
+    try:
+        from ..idea_script.instance import idea_script_orchestrator
+        from ..idea_script.schemas import IdeaScriptRequest
+    except Exception:  # pragma: no cover
+        from agent.idea_script.instance import idea_script_orchestrator
+        from agent.idea_script.schemas import IdeaScriptRequest
+    return idea_script_orchestrator, IdeaScriptRequest
+
+
+def _load_asset_match_tool():
+    try:
+        from ...mcp.tool_asset_match import execute_asset_match_tool
+    except Exception:  # pragma: no cover
+        from mcp.tool_asset_match import execute_asset_match_tool
+    return execute_asset_match_tool
+
+
+def _load_export_tool():
+    try:
+        from ...mcp.tool_export_ffmpeg import execute_export_ffmpeg_tool
+    except Exception:  # pragma: no cover
+        from mcp.tool_export_ffmpeg import execute_export_ffmpeg_tool
+    return execute_export_ffmpeg_tool
+
+
+def _load_harvest_eval_case():
+    try:
+        from ...quality.harvester import harvest_eval_case
+    except Exception:  # pragma: no cover
+        from quality.harvester import harvest_eval_case
+    return harvest_eval_case
+
+
+def _load_google_types():
+    try:
+        from google.genai import types
+        return types
+    except Exception:  # pragma: no cover
+        class _FallbackPart:
+            def __init__(self, text: str = "") -> None:
+                self.text = text
+
+        class _FallbackGenerateContentConfig:
+            def __init__(self, **kwargs: Any) -> None:
+                for key, value in kwargs.items():
+                    setattr(self, key, value)
+
+        class _FallbackTypes:
+            Part = _FallbackPart
+            GenerateContentConfig = _FallbackGenerateContentConfig
+
+        return _FallbackTypes()
+
+
 def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
     return [
         (
             AgentToolSpec(
                 name="agent_prompt_polish",
                 description="Polish a creative prompt for image or video generation.",
+                aliases=["prompt.polish"],
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -124,6 +204,11 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
                     "additionalProperties": True,
                 },
                 annotations={"readOnlyHint": True, "idempotentHint": True, "destructiveHint": False},
+                category="prompt",
+                timeout_seconds=30.0,
+                retry={"max_attempts": 2},
+                cost_level="low",
+                tags=["prompt", "polish", "agent"],
             ),
             _handle_prompt_polish,
         ),
@@ -156,6 +241,11 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
                     "additionalProperties": True,
                 },
                 annotations={"readOnlyHint": True, "idempotentHint": False, "destructiveHint": False},
+                category="script",
+                timeout_seconds=60.0,
+                retry={"max_attempts": 1},
+                cost_level="medium",
+                tags=["drama", "script", "agent"],
             ),
             _handle_drama_generate,
         ),
@@ -189,6 +279,11 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
                     "additionalProperties": True,
                 },
                 annotations={"readOnlyHint": True, "idempotentHint": False, "destructiveHint": False},
+                category="script",
+                timeout_seconds=120.0,
+                retry={"max_attempts": 1},
+                cost_level="medium",
+                tags=["idea_script", "agent", "workflow"],
             ),
             _handle_idea_script_generate,
         ),
@@ -220,6 +315,11 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
                     "additionalProperties": True,
                 },
                 annotations={"readOnlyHint": True, "idempotentHint": True, "destructiveHint": False},
+                category="assets",
+                timeout_seconds=10.0,
+                retry={"max_attempts": 1},
+                cost_level="low",
+                tags=["assets", "search", "deterministic"],
             ),
             _handle_asset_match,
         ),
@@ -227,6 +327,7 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
             AgentToolSpec(
                 name="comfyui_text2img",
                 description="Generate an image via the local ComfyUI text-to-image workflow.",
+                aliases=["comfyui.text2img"],
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -253,6 +354,11 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
                     "additionalProperties": True,
                 },
                 annotations={"readOnlyHint": False, "idempotentHint": False, "destructiveHint": False},
+                category="comfyui",
+                timeout_seconds=180.0,
+                retry={"max_attempts": 1},
+                cost_level="medium",
+                tags=["comfyui", "image", "generation"],
             ),
             _handle_comfyui_text2img,
         ),
@@ -293,6 +399,11 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
                     "additionalProperties": True,
                 },
                 annotations={"readOnlyHint": False, "idempotentHint": False, "destructiveHint": False},
+                category="comfyui",
+                timeout_seconds=300.0,
+                retry={"max_attempts": 1},
+                cost_level="high",
+                tags=["comfyui", "video", "i2v"],
             ),
             _handle_comfyui_local_img2video,
         ),
@@ -300,6 +411,7 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
             AgentToolSpec(
                 name="comfyui_rmbg",
                 description="Remove image background via the local ComfyUI RMBG workflow.",
+                aliases=["comfyui.rmbg"],
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -321,6 +433,11 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
                     "additionalProperties": True,
                 },
                 annotations={"readOnlyHint": False, "idempotentHint": False, "destructiveHint": False},
+                category="comfyui",
+                timeout_seconds=180.0,
+                retry={"max_attempts": 1},
+                cost_level="medium",
+                tags=["comfyui", "image", "rmbg"],
             ),
             _handle_comfyui_rmbg,
         ),
@@ -375,6 +492,11 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
                     "additionalProperties": True,
                 },
                 annotations={"readOnlyHint": False, "idempotentHint": True, "destructiveHint": False},
+                category="artifacts",
+                timeout_seconds=15.0,
+                retry={"max_attempts": 1},
+                cost_level="low",
+                tags=["artifact", "ffmpeg", "export"],
             ),
             _handle_export_ffmpeg_bundle,
         ),
@@ -411,6 +533,11 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
                     "additionalProperties": True,
                 },
                 annotations={"readOnlyHint": False, "idempotentHint": True, "destructiveHint": False},
+                category="eval",
+                timeout_seconds=15.0,
+                retry={"max_attempts": 1},
+                cost_level="low",
+                tags=["eval", "harvest", "quality"],
             ),
             _handle_harvest_eval_case,
         ),
@@ -436,6 +563,11 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
                     "additionalProperties": True,
                 },
                 annotations={"readOnlyHint": True, "idempotentHint": False, "destructiveHint": False},
+                category="chat",
+                timeout_seconds=30.0,
+                retry={"max_attempts": 1},
+                cost_level="low",
+                tags=["chat", "assistant"],
             ),
             _handle_agent_chitchat,
         ),
@@ -443,6 +575,8 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
 
 
 def _handle_prompt_polish(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
+    ollama_prompt_polish = _load_ollama_prompt_polish()
+    config = _load_config()
     prompt = str(args.get("prompt") or "").strip()
     mode = str(args.get("mode") or "text2img").strip() or "text2img"
     payload = ollama_prompt_polish(prompt, mode=mode, req_id=f"prompt_polish:{context.req_id}")
@@ -451,12 +585,14 @@ def _handle_prompt_polish(args: Dict[str, Any], context: AgentToolContext) -> Di
         raise RuntimeError("prompt_polish returned empty response")
     return {
         "text": text,
-        "model": MODEL_PROMPT_POLISH,
+        "model": config["MODEL_PROMPT_POLISH"],
         "variants": list(payload.get("variants") or []),
     }
 
 
 def _handle_drama_generate(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
+    AgentDramaRequest = _load_agent_drama_request()
+    DramaCreatorClient = _load_drama_creator_client()
     req = AgentDramaRequest.model_validate(args)
     client = DramaCreatorClient()
     payload = client.generate(
@@ -474,6 +610,7 @@ def _handle_drama_generate(args: Dict[str, Any], context: AgentToolContext) -> D
 
 
 def _handle_idea_script_generate(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
+    idea_script_orchestrator, IdeaScriptRequest = _load_idea_script_components()
     req = IdeaScriptRequest.model_validate(args)
     response = idea_script_orchestrator.run(
         req,
@@ -488,10 +625,13 @@ def _handle_idea_script_generate(args: Dict[str, Any], context: AgentToolContext
 
 
 def _handle_asset_match(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
+    execute_asset_match_tool = _load_asset_match_tool()
     return execute_asset_match_tool(arguments=args)
 
 
 def _handle_comfyui_text2img(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
+    run_image_z_image_turbo_workflow, _, _ = _load_comfyui_functions()
+    bytes_to_data_url, _ = _load_media_utils()
     width, height = _parse_dimensions(str(args.get("size") or ""), str(args.get("aspect_ratio") or ""))
     image_bytes = run_image_z_image_turbo_workflow(
         req_id=context.req_id,
@@ -510,6 +650,9 @@ def _handle_comfyui_text2img(args: Dict[str, Any], context: AgentToolContext) ->
 
 
 def _handle_comfyui_local_img2video(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
+    _, run_qwen_i2v_workflow, _ = _load_comfyui_functions()
+    bytes_to_data_url, parse_data_url = _load_media_utils()
+    config = _load_config()
     _, image_bytes = parse_data_url(str(args.get("image") or ""))
     fps = max(1, int(args.get("fps") or 16))
     duration = max(1, int(args.get("duration") or 5))
@@ -531,7 +674,7 @@ def _handle_comfyui_local_img2video(args: Dict[str, Any], context: AgentToolCont
     return {
         "video": bytes_to_data_url(video_bytes, mime_type=mime_type),
         "mime_type": mime_type,
-        "model": MODEL_COMFYUI_QWEN_I2V,
+        "model": config["MODEL_COMFYUI_QWEN_I2V"],
         "width": width,
         "height": height,
         "fps": fps,
@@ -540,6 +683,8 @@ def _handle_comfyui_local_img2video(args: Dict[str, Any], context: AgentToolCont
 
 
 def _handle_comfyui_rmbg(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
+    _, run_rmbg_workflow, = _load_comfyui_functions()[1:]
+    bytes_to_data_url, _ = _load_media_utils()
     image_bytes = run_rmbg_workflow(
         req_id=context.req_id,
         image_data_url=str(args.get("image") or ""),
@@ -550,10 +695,12 @@ def _handle_comfyui_rmbg(args: Dict[str, Any], context: AgentToolContext) -> Dic
 
 
 def _handle_export_ffmpeg_bundle(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
+    execute_export_ffmpeg_tool = _load_export_tool()
     return execute_export_ffmpeg_tool(arguments=args, plan_lookup=context.plan_lookup)
 
 
 def _handle_harvest_eval_case(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
+    harvest_eval_case = _load_harvest_eval_case()
     result = harvest_eval_case(
         session_id=str(args.get("session_id") or "").strip(),
         tenant_id=str(args.get("tenant_id") or "").strip(),
@@ -573,19 +720,22 @@ def _handle_harvest_eval_case(args: Dict[str, Any], context: AgentToolContext) -
 
 
 def _handle_agent_chitchat(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
+    types = _load_google_types()
+    call_genai_retry_with_proxy = _load_call_genai_retry_with_proxy()
+    config = _load_config()
     prompt = _build_agent_chitchat_prompt(str(args.get("message") or ""))
     response = call_genai_retry_with_proxy(
         contents=[types.Part(text=prompt)],
         config=types.GenerateContentConfig(temperature=0.7),
         req_id=f"agent_chitchat:{context.req_id}",
-        model=MODEL_AGENT_CHAT,
-        http_proxy=AGENT_CHAT_HTTP_PROXY,
-        https_proxy=AGENT_CHAT_HTTPS_PROXY,
+        model=config["MODEL_AGENT_CHAT"],
+        http_proxy=config["AGENT_CHAT_HTTP_PROXY"],
+        https_proxy=config["AGENT_CHAT_HTTPS_PROXY"],
     )
     text = str(getattr(response, "text", "") or "").strip()
     if not text:
         text = "我在。你可以继续告诉我你想聊什么，或者直接让我做脚本、短剧、导出。"
-    return {"text": text, "model": MODEL_AGENT_CHAT}
+    return {"text": text, "model": config["MODEL_AGENT_CHAT"]}
 
 
 def register_builtin_tools(registry: AgentToolRegistry) -> AgentToolRegistry:

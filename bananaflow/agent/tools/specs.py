@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .errors import AgentToolValidationError
@@ -24,9 +24,16 @@ def _path_join(path: str, part: str) -> str:
     return f"{path}.{part}"
 
 
-def _validate_schema(schema: Dict[str, Any], value: Any, path: str = "") -> None:
+def _is_object_schema(schema: Dict[str, Any]) -> bool:
     schema_type = str(schema.get("type") or "").strip()
     if schema_type == "object":
+        return True
+    return any(key in schema for key in ("required", "properties", "additionalProperties"))
+
+
+def _validate_schema(schema: Dict[str, Any], value: Any, path: str = "") -> None:
+    schema_type = str(schema.get("type") or "").strip()
+    if _is_object_schema(schema):
         if not isinstance(value, dict):
             raise AgentToolValidationError(f"{path or 'args'} must be an object")
         required = [str(item) for item in list(schema.get("required") or []) if str(item)]
@@ -95,7 +102,9 @@ def _validate_schema(schema: Dict[str, Any], value: Any, path: str = "") -> None
             except AgentToolValidationError as exc:
                 child_errors.append(str(exc))
         else:
-            raise AgentToolValidationError(child_errors[0] if child_errors else f"{path or 'args'} failed anyOf validation")
+            raise AgentToolValidationError(
+                child_errors[0] if child_errors else f"{path or 'args'} failed anyOf validation"
+            )
 
     one_of = schema.get("oneOf")
     if isinstance(one_of, list) and one_of:
@@ -120,6 +129,13 @@ class AgentToolSpec:
     output_schema: Dict[str, Any]
     annotations: Dict[str, Any]
     tool_version: str = "1.0.0"
+    aliases: List[str] = field(default_factory=list)
+    category: str = "general"
+    enabled: bool = True
+    timeout_seconds: Optional[float] = None
+    retry: Dict[str, Any] = field(default_factory=lambda: {"max_attempts": 1})
+    cost_level: str = "low"
+    tags: List[str] = field(default_factory=list)
 
     def definition_base(self) -> Dict[str, Any]:
         return {
@@ -129,6 +145,13 @@ class AgentToolSpec:
             "outputSchema": dict(self.output_schema),
             "annotations": dict(self.annotations),
             "tool_version": self.tool_version,
+            "aliases": list(self.aliases),
+            "category": self.category,
+            "enabled": bool(self.enabled),
+            "timeout_seconds": self.timeout_seconds,
+            "retry": dict(self.retry),
+            "cost_level": self.cost_level,
+            "tags": list(self.tags),
         }
 
     @property
@@ -139,6 +162,21 @@ class AgentToolSpec:
         payload = self.definition_base()
         payload["tool_hash"] = self.tool_hash
         return payload
+
+    def to_prompt_catalog(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "aliases": list(self.aliases),
+            "description": self.description,
+            "category": self.category,
+            "enabled": bool(self.enabled),
+            "timeout_seconds": self.timeout_seconds,
+            "retry": dict(self.retry),
+            "cost_level": self.cost_level,
+            "tags": list(self.tags),
+            "annotations": dict(self.annotations),
+            "input_schema": dict(self.input_schema),
+        }
 
     def validate_input(self, args: Dict[str, Any]) -> Dict[str, Any]:
         payload = dict(args or {})
