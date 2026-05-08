@@ -105,6 +105,8 @@ from prompts.business import build_business_prompt
 
 from agent.idea_script.instance import idea_script_orchestrator
 from agent.idea_script.schemas import EditPlan, IdeaScriptRequest, IdeaScriptResponse
+from agent.gateway.schemas import AgentMessageRequest, AgentMessageResponse
+from agent.gateway.service import handle_agent_message
 from agent.planner import agent_plan_impl
 from agent.capability_executors import (
     SKILL_CHITCHAT,
@@ -3026,6 +3028,16 @@ def get_ai_chat_image_task_status(task_id: str):
 @router.post("/api/agent/plan", response_model=Dict[str, Any])
 def agent_plan(req: AgentRequest, request: Request):
     return agent_plan_impl(req, request)
+
+
+@router.post("/api/agent/message", response_model=AgentMessageResponse)
+def agent_message(
+    req: AgentMessageRequest,
+    request: Request,
+    current_user=Depends(_get_current_user_optional),
+) -> AgentMessageResponse:
+    tenant_id, user_id = _resolve_agent_actor(request, current_user)
+    return handle_agent_message(req, request=request, tenant_id=tenant_id, user_id=user_id)
 
 
 @router.post("/api/local/text2img", response_model=Text2ImgResponse)
