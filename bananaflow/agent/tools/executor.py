@@ -72,6 +72,20 @@ def _remove_none_values(value: Any) -> Any:
     return value
 
 
+def _load_observability_tracer():
+    try:
+        from ...observability import get_tracer
+    except Exception:  # pragma: no cover
+        try:
+            from observability import get_tracer  # type: ignore
+        except Exception:
+            return None
+    try:
+        return get_tracer()
+    except Exception:
+        return None
+
+
 @dataclass
 class AgentToolContext:
     req_id: str = "tool"
@@ -196,6 +210,21 @@ class AgentToolExecutor:
                 cost_level=cost_level,
                 timeout_seconds=timeout_seconds,
             )
+            self._emit_observability_tool_call(
+                call_context,
+                tool_name=str(tool_name or "").strip(),
+                canonical_tool_name=canonical_name,
+                input_payload=payload if isinstance(payload, dict) else {},
+                output_payload=None,
+                error=error_text,
+                latency_ms=latency_ms,
+                retry_count=0,
+                tool_version=tool_version,
+                tool_hash=tool_hash,
+                category=category,
+                cost_level=cost_level,
+                timeout_seconds=timeout_seconds,
+            )
             return AgentToolResult(
                 ok=False,
                 tool_name=str(tool_name or "").strip(),
@@ -244,6 +273,21 @@ class AgentToolExecutor:
                     ok=True,
                     args=payload,
                     output=output,
+                    error=None,
+                    latency_ms=latency_ms,
+                    retry_count=retry_count,
+                    tool_version=tool_version,
+                    tool_hash=tool_hash,
+                    category=category,
+                    cost_level=cost_level,
+                    timeout_seconds=timeout_seconds,
+                )
+                self._emit_observability_tool_call(
+                    call_context,
+                    tool_name=str(tool_name or "").strip(),
+                    canonical_tool_name=canonical_name,
+                    input_payload=payload,
+                    output_payload=output,
                     error=None,
                     latency_ms=latency_ms,
                     retry_count=retry_count,
@@ -304,6 +348,21 @@ class AgentToolExecutor:
             cost_level=cost_level,
             timeout_seconds=timeout_seconds,
         )
+        self._emit_observability_tool_call(
+            call_context,
+            tool_name=str(tool_name or "").strip(),
+            canonical_tool_name=canonical_name,
+            input_payload=payload,
+            output_payload=None,
+            error=error_text,
+            latency_ms=latency_ms,
+            retry_count=retry_count,
+            tool_version=tool_version,
+            tool_hash=tool_hash,
+            category=category,
+            cost_level=cost_level,
+            timeout_seconds=timeout_seconds,
+        )
         return AgentToolResult(
             ok=False,
             tool_name=str(tool_name or "").strip(),
@@ -319,6 +378,56 @@ class AgentToolExecutor:
             timeout_seconds=timeout_seconds,
             exception=last_error,
         )
+
+    def _emit_observability_tool_call(
+        self,
+        context: AgentToolContext,
+        *,
+        tool_name: str,
+        canonical_tool_name: str,
+        input_payload: Optional[Dict[str, Any]],
+        output_payload: Optional[Dict[str, Any]],
+        error: Optional[str],
+        latency_ms: int,
+        retry_count: int,
+        tool_version: str,
+        tool_hash: str,
+        category: str,
+        cost_level: str,
+        timeout_seconds: Optional[float],
+    ) -> None:
+        extra = dict(context.extra or {})
+        run_id = str(extra.get("run_id") or "").strip()
+        if not run_id:
+            return
+        tracer = extra.get("tracer") or _load_observability_tracer()
+        if tracer is None or not hasattr(tracer, "tool_call"):
+            return
+        metadata = {
+            "req_id": context.req_id,
+            "session_id": context.session_id,
+            "tenant_id": context.tenant_id,
+            "user_id": context.user_id,
+            "canonical_tool_name": canonical_tool_name,
+            "tool_version": tool_version,
+            "tool_hash": tool_hash,
+            "category": category,
+            "cost_level": cost_level,
+            "timeout_seconds": timeout_seconds,
+            "latency_ms": latency_ms,
+            "retry_count": retry_count,
+        }
+        try:
+            tracer.tool_call(
+                tool_name,
+                run_id=run_id,
+                input_data=input_payload or {},
+                output_data=output_payload,
+                error=error,
+                metadata=metadata,
+            )
+        except Exception:
+            return
 
     def _append_trace(
         self,

@@ -154,6 +154,14 @@ def _load_harvest_eval_case():
     return harvest_eval_case
 
 
+def _load_retrieval_service():
+    try:
+        from ...retrieval.service import build_default_retrieval_service
+    except Exception:  # pragma: no cover
+        from retrieval.service import build_default_retrieval_service
+    return build_default_retrieval_service
+
+
 def _load_google_types():
     try:
         from google.genai import types
@@ -322,6 +330,117 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
                 tags=["assets", "search", "deterministic"],
             ),
             _handle_asset_match,
+        ),
+        (
+            AgentToolSpec(
+                name="retrieval_search_assets",
+                description="Search indexed assets through the retrieval layer.",
+                aliases=["retrieval.search_assets"],
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "top_k": {"type": "integer", "minimum": 1, "maximum": 20},
+                        "db_path": {"type": "string"},
+                        "tag_normalize_enabled": {"type": "boolean"},
+                        "filters": {"type": "object"},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                output_schema={
+                    "type": "object",
+                    "properties": {
+                        "collection": {"type": "string"},
+                        "query": {"type": "string"},
+                        "items": {"type": "array", "items": {"type": "object"}},
+                        "tool_version": {"type": "string"},
+                        "tool_hash": {"type": "string"},
+                    },
+                    "required": ["collection", "query", "items", "tool_version", "tool_hash"],
+                    "additionalProperties": True,
+                },
+                annotations={"readOnlyHint": True, "idempotentHint": True, "destructiveHint": False},
+                category="retrieval",
+                timeout_seconds=10.0,
+                retry={"max_attempts": 1},
+                cost_level="low",
+                tags=["retrieval", "assets", "search"],
+            ),
+            _handle_retrieval_search_assets,
+        ),
+        (
+            AgentToolSpec(
+                name="retrieval_search_knowledge",
+                description="Search indexed knowledge through the retrieval layer.",
+                aliases=["retrieval.search_knowledge"],
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "top_k": {"type": "integer", "minimum": 1, "maximum": 20},
+                        "filters": {"type": "object"},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                output_schema={
+                    "type": "object",
+                    "properties": {
+                        "collection": {"type": "string"},
+                        "query": {"type": "string"},
+                        "items": {"type": "array", "items": {"type": "object"}},
+                        "tool_version": {"type": "string"},
+                        "tool_hash": {"type": "string"},
+                    },
+                    "required": ["collection", "query", "items", "tool_version", "tool_hash"],
+                    "additionalProperties": True,
+                },
+                annotations={"readOnlyHint": True, "idempotentHint": True, "destructiveHint": False},
+                category="retrieval",
+                timeout_seconds=10.0,
+                retry={"max_attempts": 1},
+                cost_level="low",
+                tags=["retrieval", "knowledge", "search"],
+            ),
+            _handle_retrieval_search_knowledge,
+        ),
+        (
+            AgentToolSpec(
+                name="retrieval_search_eval_cases",
+                description="Search harvested eval cases through the retrieval layer.",
+                aliases=["retrieval.search_eval_cases"],
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "top_k": {"type": "integer", "minimum": 1, "maximum": 20},
+                        "filters": {"type": "object"},
+                        "eval_cases_path": {"type": "string"},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                output_schema={
+                    "type": "object",
+                    "properties": {
+                        "collection": {"type": "string"},
+                        "query": {"type": "string"},
+                        "items": {"type": "array", "items": {"type": "object"}},
+                        "tool_version": {"type": "string"},
+                        "tool_hash": {"type": "string"},
+                    },
+                    "required": ["collection", "query", "items", "tool_version", "tool_hash"],
+                    "additionalProperties": True,
+                },
+                annotations={"readOnlyHint": True, "idempotentHint": True, "destructiveHint": False},
+                category="retrieval",
+                timeout_seconds=10.0,
+                retry={"max_attempts": 1},
+                cost_level="low",
+                tags=["retrieval", "eval", "search"],
+            ),
+            _handle_retrieval_search_eval_cases,
         ),
         (
             AgentToolSpec(
@@ -627,6 +746,39 @@ def _handle_idea_script_generate(args: Dict[str, Any], context: AgentToolContext
 def _handle_asset_match(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
     execute_asset_match_tool = _load_asset_match_tool()
     return execute_asset_match_tool(arguments=args)
+
+
+def _handle_retrieval_search_assets(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
+    build_default_retrieval_service = _load_retrieval_service()
+    service = (context.extra or {}).get("retrieval_service") or build_default_retrieval_service()
+    return service.search_assets(
+        str(args.get("query") or "").strip(),
+        top_k=int(args.get("top_k") or 5),
+        db_path=(str(args.get("db_path") or "").strip() or None),
+        tag_normalize_enabled=args.get("tag_normalize_enabled"),
+        filters=dict(args.get("filters") or {}),
+    )
+
+
+def _handle_retrieval_search_knowledge(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
+    build_default_retrieval_service = _load_retrieval_service()
+    service = (context.extra or {}).get("retrieval_service") or build_default_retrieval_service()
+    return service.search_knowledge(
+        str(args.get("query") or "").strip(),
+        top_k=int(args.get("top_k") or 5),
+        filters=dict(args.get("filters") or {}),
+    )
+
+
+def _handle_retrieval_search_eval_cases(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
+    build_default_retrieval_service = _load_retrieval_service()
+    service = (context.extra or {}).get("retrieval_service") or build_default_retrieval_service()
+    return service.search_eval_cases(
+        str(args.get("query") or "").strip(),
+        top_k=int(args.get("top_k") or 5),
+        filters=dict(args.get("filters") or {}),
+        eval_cases_path=(str(args.get("eval_cases_path") or "").strip() or None),
+    )
 
 
 def _handle_comfyui_text2img(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
