@@ -117,29 +117,12 @@ const buildAgentHeaders = (meta) => {
   return headers;
 };
 
-const AGENT_IDEA_SCRIPT_TIMEOUT_MS = 240_000;
-const AGENT_DRAMA_TIMEOUT_MS = 90_000;
 const VIDEO_LINEART_POLL_INTERVAL_MS = 1200;
 const VIDEO_LINEART_TIMEOUT_MS = 600_000;
 const VIDEO_RMBG_POLL_INTERVAL_MS = 1200;
 const VIDEO_RMBG_TIMEOUT_MS = 600_000;
 const VIDEO_SPLIT_POLL_INTERVAL_MS = 1200;
 const VIDEO_SPLIT_TIMEOUT_MS = 600_000;
-
-const withAbortTimeout = async (task, timeoutMs, timeoutMessage) => {
-  const controller = new AbortController();
-  const timerId = window.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await task(controller.signal);
-  } catch (error) {
-    if (error?.name === "AbortError") {
-      throw new Error(timeoutMessage);
-    }
-    throw error;
-  } finally {
-    window.clearTimeout(timerId);
-  }
-};
 
 export function extractProductKeyword(text) {
   const source = String(text || "").trim();
@@ -182,62 +165,34 @@ function normalizeProductCandidate(value) {
   return text;
 }
 
-export async function generateIdeaScriptMission(payload, apiFetch, meta) {
+export async function sendAgentMessage(payload, apiFetch, meta) {
   const call = createCaller(apiFetch);
-  const reqBody =
-    typeof payload === "string"
-      ? { product: String(payload || "").trim() }
-      : {
-          product: String(payload?.product || "").trim(),
-          audience: String(payload?.audience || "").trim() || undefined,
-          price_band: String(payload?.priceBand || "").trim() || undefined,
-          conversion_goal: String(payload?.conversionGoal || "").trim() || undefined,
-          primary_platform: String(payload?.primaryPlatform || "").trim() || undefined,
-          secondary_platform: String(payload?.secondaryPlatform || "").trim() || undefined,
-          selected_angle: String(payload?.selectedAngle || "").trim() || undefined,
-        };
-  const resp = await withAbortTimeout((signal) => call("/api/agent/idea_script", {
+  const reqBody = {
+    message: String(payload?.message || "").trim(),
+    force_action: payload?.forceAction || undefined,
+    ui_action: payload?.uiAction || undefined,
+    recent_messages: Array.isArray(payload?.recentMessages) ? payload.recentMessages : [],
+    supplemental_prompt: String(payload?.supplementalPrompt || "").trim() || undefined,
+    current_nodes: Array.isArray(payload?.currentNodes) ? payload.currentNodes : [],
+    current_connections: Array.isArray(payload?.currentConnections) ? payload.currentConnections : [],
+    selected_artifact: payload?.selectedArtifact || undefined,
+    canvas_id: String(payload?.canvasId || "").trim() || undefined,
+    thread_id: String(payload?.threadId || "").trim() || undefined,
+    mode: String(payload?.mode || "").trim() || undefined,
+    product: String(payload?.product || "").trim() || undefined,
+    audience: String(payload?.audience || "").trim() || undefined,
+    price_band: String(payload?.priceBand || "").trim() || undefined,
+    conversion_goal: String(payload?.conversionGoal || "").trim() || undefined,
+    primary_platform: String(payload?.primaryPlatform || "").trim() || undefined,
+    secondary_platform: String(payload?.secondaryPlatform || "").trim() || undefined,
+    selected_angle: String(payload?.selectedAngle || "").trim() || undefined,
+    task_mode: String(payload?.taskMode || "").trim() || undefined,
+    episode_count: Number.isFinite(Number(payload?.episodeCount)) ? Number(payload.episodeCount) : undefined,
+    existing_script: String(payload?.existingScript || "").trim() || undefined,
+  };
+  const resp = await call("/api/agent/message", {
     method: "POST",
     body: JSON.stringify(reqBody),
-    headers: buildAgentHeaders(meta),
-    signal,
-  }), AGENT_IDEA_SCRIPT_TIMEOUT_MS, "生成脚本耗时较长，请稍后重试或减少本次需求复杂度。");
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    throw new Error(extractApiError(data));
-  }
-  return data;
-}
-
-export async function generateDramaMission(payload, apiFetch, meta) {
-  const call = createCaller(apiFetch);
-  const reqBody =
-    typeof payload === "string"
-      ? { prompt: String(payload || "").trim() }
-      : {
-          prompt: String(payload?.prompt || "").trim(),
-          task_mode: String(payload?.taskMode || "").trim() || undefined,
-          episode_count: Number.isFinite(Number(payload?.episodeCount)) ? Number(payload.episodeCount) : undefined,
-          existing_script: String(payload?.existingScript || "").trim() || undefined,
-        };
-  const resp = await withAbortTimeout((signal) => call("/api/agent/drama", {
-    method: "POST",
-    body: JSON.stringify(reqBody),
-    headers: buildAgentHeaders(meta),
-    signal,
-  }), AGENT_DRAMA_TIMEOUT_MS, "生成短剧内容超时，请稍后重试。");
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    throw new Error(extractApiError(data));
-  }
-  return data;
-}
-
-export async function generateAgentChitchat(message, apiFetch, meta) {
-  const call = createCaller(apiFetch);
-  const resp = await call("/api/agent/chitchat", {
-    method: "POST",
-    body: JSON.stringify({ message: String(message || "").trim() }),
     headers: buildAgentHeaders(meta),
   });
   const data = await resp.json().catch(() => ({}));
@@ -248,20 +203,19 @@ export async function generateAgentChitchat(message, apiFetch, meta) {
 }
 
 export async function polishCanvasPrompt(payload, apiFetch, meta) {
-  const call = createCaller(apiFetch);
-  const resp = await call("/api/agent/prompt_polish", {
-    method: "POST",
-    body: JSON.stringify({
-      prompt: String(payload?.prompt || "").trim(),
+  const data = await sendAgentMessage(
+    {
+      message: String(payload?.prompt || "").trim(),
+      uiAction: "prompt_polish",
       mode: String(payload?.mode || "text2img").trim() || "text2img",
-    }),
-    headers: buildAgentHeaders(meta),
-  });
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    throw new Error(extractApiError(data));
+    },
+    apiFetch,
+    meta,
+  );
+  if (!(data?.action === "tool_call" && data?.data && typeof data.data === "object")) {
+    throw new Error(String(data?.response_text || "").trim() || "Agent 未返回提示词润色结果");
   }
-  return data;
+  return data.data;
 }
 
 const delay = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -423,28 +377,4 @@ export async function runVideoSplitTask(payload, apiFetch) {
   }
 
   throw new Error("视频分割超时，请稍后重试");
-}
-
-export async function planAgentCanvas(payload, apiFetch, meta) {
-  const call = createCaller(apiFetch);
-  const reqBody = {
-    prompt: String(payload?.prompt || "").trim(),
-    supplemental_prompt: String(payload?.supplementalPrompt || "").trim() || undefined,
-    current_nodes: Array.isArray(payload?.currentNodes) ? payload.currentNodes : [],
-    current_connections: Array.isArray(payload?.currentConnections) ? payload.currentConnections : [],
-    selected_artifact: payload?.selectedArtifact || null,
-    canvas_id: String(payload?.canvasId || "").trim() || undefined,
-    thread_id: String(payload?.threadId || "").trim() || undefined,
-  };
-
-  const resp = await call("/api/agent/plan", {
-    method: "POST",
-    body: JSON.stringify(reqBody),
-    headers: buildAgentHeaders(meta),
-  });
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    throw new Error(extractApiError(data));
-  }
-  return data;
 }

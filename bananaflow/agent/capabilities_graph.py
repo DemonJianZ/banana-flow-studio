@@ -19,14 +19,16 @@ except Exception as e:  # pragma: no cover - 环境缺包
 
 
 from agent.capability_executors import (
-    SKILL_CHITCHAT,
-    SKILL_DRAMA,
-    SKILL_IDEA_SCRIPT,
-    SKILL_PROMPT_POLISH,
     run_agent_chitchat,
     run_agent_drama,
     run_agent_idea_script_core,
     run_agent_prompt_polish,
+)
+from agent.legacy_capabilities import (
+    SKILL_CHITCHAT,
+    SKILL_DRAMA,
+    SKILL_IDEA_SCRIPT,
+    SKILL_PROMPT_POLISH,
 )
 from schemas.api import AgentDramaRequest, PromptPolishRequest
 from agent.idea_script.schemas import IdeaScriptRequest

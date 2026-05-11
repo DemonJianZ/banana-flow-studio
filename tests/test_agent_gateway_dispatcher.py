@@ -90,6 +90,22 @@ class AgentGatewayDispatcherTests(unittest.TestCase):
         self.assertEqual(execute.call_args.args[0], "prompt.polish")
         self.assertEqual(execute.call_args.args[1]["prompt"], "润色提示词")
 
+    def test_dispatch_tool_call_should_resolve_from_matched_capabilities(self):
+        request = self._make_request()
+        req = AgentMessageRequest(message="帮我查知识库")
+        decision = CoordinatorDecision(
+            action="tool_call",
+            reason="single step",
+            matched_capabilities=["retrieval.search_knowledge"],
+            tool_args={"query": "知识库", "top_k": 2},
+        )
+        with mock.patch("bananaflow.agent.gateway.dispatcher._TOOL_EXECUTOR.execute") as execute:
+            execute.return_value = {"collection": "knowledge", "items": [{"doc_id": "k1"}]}
+            out = dispatch_agent_message(req, decision, request=request, trace_sink=[])
+        self.assertEqual(out["action"], "tool_call")
+        self.assertEqual(execute.call_args.args[0], "retrieval.search_knowledge")
+        self.assertEqual(out["data"]["collection"], "knowledge")
+
     def test_dispatch_canvas_plan_should_call_agent_plan_impl(self):
         request = self._make_request()
         req = AgentMessageRequest(message="加一个文生图节点", current_nodes=[{"id": "n1"}])

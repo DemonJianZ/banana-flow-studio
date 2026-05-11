@@ -80,6 +80,14 @@ def _load_call_genai_retry_with_proxy():
     return call_genai_retry_with_proxy
 
 
+def _load_ai_chat_text_client():
+    try:
+        from ...services.ai_chat_client import call_ai_chat_text
+    except Exception:  # pragma: no cover
+        from services.ai_chat_client import call_ai_chat_text
+    return call_ai_chat_text
+
+
 def _load_comfyui_functions():
     try:
         from ...services.comfyui import (
@@ -160,6 +168,14 @@ def _load_retrieval_service():
     except Exception:  # pragma: no cover
         from retrieval.service import build_default_retrieval_service
     return build_default_retrieval_service
+
+
+def _load_storyboard_components():
+    try:
+        from ...agent_v2.storyboard import design_storyboard
+    except Exception:  # pragma: no cover
+        from agent_v2.storyboard import design_storyboard
+    return design_storyboard
 
 
 def _load_google_types():
@@ -256,6 +272,67 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
                 tags=["drama", "script", "agent"],
             ),
             _handle_drama_generate,
+        ),
+        (
+            AgentToolSpec(
+                name="agent_storyboard_design",
+                description="Design a structured storyboard plan from a creative brief.",
+                aliases=["storyboard.design"],
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "brief": {"type": "string"},
+                        "style": {"type": "string"},
+                        "aspect_ratio": {"type": "string"},
+                        "target_duration_sec": {"type": "number", "minimum": 1},
+                        "shot_duration_sec": {"type": "number", "minimum": 0.5},
+                        "language": {"type": "string"},
+                        "constraints": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["brief"],
+                    "additionalProperties": False,
+                },
+                output_schema={
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "aspect_ratio": {"type": "string"},
+                        "style": {"type": "string"},
+                        "target_duration_sec": {"type": "number"},
+                        "estimated_duration_sec": {"type": "number"},
+                        "shot_default_duration_sec": {"type": "number"},
+                        "entities": {"type": "object"},
+                        "scenes": {"type": "array", "items": {"type": "object"}},
+                        "global_notes": {"type": "array", "items": {"type": "string"}},
+                        "design_rationale": {"type": "string"},
+                        "warnings": {"type": "array", "items": {"type": "string"}},
+                        "tool_version": {"type": "string"},
+                        "tool_hash": {"type": "string"},
+                    },
+                    "required": [
+                        "title",
+                        "aspect_ratio",
+                        "style",
+                        "target_duration_sec",
+                        "estimated_duration_sec",
+                        "shot_default_duration_sec",
+                        "entities",
+                        "scenes",
+                        "global_notes",
+                        "design_rationale",
+                        "tool_version",
+                        "tool_hash",
+                    ],
+                    "additionalProperties": True,
+                },
+                annotations={"readOnlyHint": True, "idempotentHint": False, "destructiveHint": False},
+                category="storyboard",
+                timeout_seconds=90.0,
+                retry={"max_attempts": 1},
+                cost_level="medium",
+                tags=["storyboard", "creative", "agent"],
+            ),
+            _handle_storyboard_design,
         ),
         (
             AgentToolSpec(
@@ -781,6 +858,24 @@ def _handle_retrieval_search_eval_cases(args: Dict[str, Any], context: AgentTool
     )
 
 
+def _handle_storyboard_design(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
+    design_storyboard = _load_storyboard_components()
+    plan = design_storyboard(
+        brief=str(args.get("brief") or "").strip(),
+        style=str(args.get("style") or "").strip(),
+        aspect_ratio=str(args.get("aspect_ratio") or "16:9").strip() or "16:9",
+        target_duration_sec=float(args.get("target_duration_sec") or 30.0),
+        shot_duration_sec=float(args.get("shot_duration_sec") or 4.0),
+        language=str(args.get("language") or "zh-CN").strip() or "zh-CN",
+        constraints=[str(item).strip() for item in list(args.get("constraints") or []) if str(item).strip()],
+        trace_sink=context.trace_sink,
+        req_id=context.req_id,
+        run_id=str((context.extra or {}).get("run_id") or ""),
+        authorization=str((context.extra or {}).get("member_authorization") or ""),
+    )
+    return plan.model_dump(mode="json")
+
+
 def _handle_comfyui_text2img(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
     run_image_z_image_turbo_workflow, _, _ = _load_comfyui_functions()
     bytes_to_data_url, _ = _load_media_utils()
@@ -872,22 +967,32 @@ def _handle_harvest_eval_case(args: Dict[str, Any], context: AgentToolContext) -
 
 
 def _handle_agent_chitchat(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
-    types = _load_google_types()
-    call_genai_retry_with_proxy = _load_call_genai_retry_with_proxy()
     config = _load_config()
     prompt = _build_agent_chitchat_prompt(str(args.get("message") or ""))
-    response = call_genai_retry_with_proxy(
-        contents=[types.Part(text=prompt)],
-        config=types.GenerateContentConfig(temperature=0.7),
-        req_id=f"agent_chitchat:{context.req_id}",
-        model=config["MODEL_AGENT_CHAT"],
-        http_proxy=config["AGENT_CHAT_HTTP_PROXY"],
-        https_proxy=config["AGENT_CHAT_HTTPS_PROXY"],
-    )
-    text = str(getattr(response, "text", "") or "").strip()
+    authorization = str((context.extra or {}).get("member_authorization") or "").strip()
+    text = ""
+    model_name = "gemini-3-flash"
+    if authorization:
+        try:
+            text = _load_ai_chat_text_client()(message=prompt, authorization=authorization).text
+        except Exception:
+            text = ""
+    if not text:
+        types = _load_google_types()
+        call_genai_retry_with_proxy = _load_call_genai_retry_with_proxy()
+        response = call_genai_retry_with_proxy(
+            contents=[types.Part(text=prompt)],
+            config=types.GenerateContentConfig(temperature=0.7),
+            req_id=f"agent_chitchat:{context.req_id}",
+            model=config["MODEL_AGENT_CHAT"],
+            http_proxy=config["AGENT_CHAT_HTTP_PROXY"],
+            https_proxy=config["AGENT_CHAT_HTTPS_PROXY"],
+        )
+        text = str(getattr(response, "text", "") or "").strip()
+        model_name = config["MODEL_AGENT_CHAT"]
     if not text:
         text = "我在。你可以继续告诉我你想聊什么，或者直接让我做脚本、短剧、导出。"
-    return {"text": text, "model": config["MODEL_AGENT_CHAT"]}
+    return {"text": text, "model": model_name}
 
 
 def register_builtin_tools(registry: AgentToolRegistry) -> AgentToolRegistry:

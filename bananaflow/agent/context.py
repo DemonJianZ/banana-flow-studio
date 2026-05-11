@@ -76,10 +76,29 @@ def compact_nodes(
             continue
 
         d = n.get("data") or {}
+        node_type = n.get("type")
+        if node_type == "storyboard_plan":
+            out.append(
+                {
+                    "id": nid,
+                    "type": node_type,
+                    "x": int(n.get("x", 0)),
+                    "y": int(n.get("y", 0)),
+                    "data": {
+                        "label": d.get("label"),
+                        "node_kind": d.get("node_kind"),
+                        "title": d.get("title"),
+                        "storyboard_plan": d.get("storyboard_plan"),
+                    },
+                }
+            )
+            if len(out) >= limit:
+                break
+            continue
         out.append(
             {
                 "id": nid,
-                "type": n.get("type"),
+                "type": node_type,
                 "x": int(n.get("x", 0)),
                 "y": int(n.get("y", 0)),
                 "data": {

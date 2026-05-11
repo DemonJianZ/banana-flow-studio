@@ -410,6 +410,22 @@ class AgentToolExecutorTests(unittest.TestCase):
         execute.assert_called_once()
         self.assertEqual(execute.call_args.args[0], "agent_chitchat")
 
+    def test_builtin_chitchat_should_use_ai_chat_client_when_authorization_exists(self):
+        executor = AgentToolExecutor(register_builtin_tools(AgentToolRegistry()))
+
+        def _fake_call(**kwargs):
+            return type("Resp", (), {"text": "member ai reply"})()
+
+        with mock.patch("bananaflow.agent.tools.builtin._load_ai_chat_text_client", return_value=_fake_call):
+            out = executor.execute(
+                "agent_chitchat",
+                {"message": "你好"},
+                context=AgentToolContext(req_id="req-chat-auth", extra={"member_authorization": "token-123"}),
+            )
+
+        self.assertEqual(out["text"], "member ai reply")
+        self.assertEqual(out["model"], "gemini-3-flash")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,7 @@ from agent.clarify import (
 )
 from agent.normalizer import normalize_patch
 from agent.deterministic import deterministic_plan_or_patch
+from agent.storyboard_local_edit import build_storyboard_local_edit_patch, is_storyboard_local_edit_request
 
 # legacy 原实现你可以保留为 _agent_plan_legacy(req, request)
 from agent.planner_legacy import agent_plan_legacy_impl  # 你也可以不拆文件，自己改名即可
@@ -18,6 +19,18 @@ from agent.planner_legacy import agent_plan_legacy_impl  # 你也可以不拆文
 
 def _planner_provider(model: str) -> str:
     return "ollama" if str(model or "").strip().lower().startswith("ollama:") else "google"
+
+
+def _resolve_member_authorization(request: Request) -> str:
+    for header_name in ("X-AI-Chat-Authorization", "X-Member-Authorization", "Authorization", "authorization"):
+        raw = str(request.headers.get(header_name) or "").strip()
+        if not raw:
+            continue
+        if raw.lower().startswith("bearer "):
+            raw = raw[7:].strip()
+        if raw:
+            return raw
+    return ""
 
 
 def _with_planner_debug(out: dict, **debug) -> dict:
@@ -46,6 +59,44 @@ def agent_plan_impl(req: AgentRequest, request: Request) -> dict:
 
     nodes = req.current_nodes or []
     conns = req.current_connections or []
+
+    member_authorization = _resolve_member_authorization(request)
+    storyboard_local_selection = is_storyboard_local_edit_request(selected, nodes)
+    storyboard_local_edit = build_storyboard_local_edit_patch(
+        user_text,
+        selected,
+        nodes,
+        req_id=req_id,
+        authorization=member_authorization,
+    )
+    if storyboard_local_edit is not None:
+        sys_logger.info(
+            f"[{req_id}] agent_plan path=storyboard_local_edit "
+            f"provider={_planner_provider(MODEL_AGENT)} model={MODEL_AGENT}"
+        )
+        return _with_planner_debug(
+            normalize_patch(storyboard_local_edit),
+            planner_path="storyboard_local_edit",
+            use_langgraph=False,
+            langgraph_attempted=False,
+            thread_id=(getattr(req, "thread_id", "") or "").strip() or None,
+            canvas_id=(getattr(req, "canvas_id", "") or "").strip() or None,
+            structure_only=False,
+        )
+    if storyboard_local_selection:
+        return _with_planner_debug(
+            {
+                "patch": [],
+                "summary": "我识别到你在局部修改当前故事板，但这次没有成功生成可应用的局部更新。请更明确说明要改哪一部分，例如“把橘猫老大的外观改成蓝灰短毛，保留黑色外套和金属项链”。",
+                "thought": "clarify_storyboard_local_edit",
+            },
+            planner_path="storyboard_local_edit_clarify",
+            use_langgraph=False,
+            langgraph_attempted=False,
+            thread_id=(getattr(req, "thread_id", "") or "").strip() or None,
+            canvas_id=(getattr(req, "canvas_id", "") or "").strip() or None,
+            structure_only=False,
+        )
 
     pure_structure_mode = detect_canvas_prompt_gap(user_text, supplemental_prompt="")
     if pure_structure_mode and not supplemental_prompt:

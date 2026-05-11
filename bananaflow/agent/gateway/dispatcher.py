@@ -4,15 +4,24 @@ from typing import Any, Dict, Optional
 
 from fastapi import Request
 
-from agent.capability_executors import run_agent_drama, run_agent_idea_script_core
 from agent.gateway.schemas import AgentMessageRequest, CoordinatorDecision, CoordinatorStep
-from agent.idea_script.schemas import IdeaScriptRequest
 from agent.planner import agent_plan_impl
 from agent.tools import AgentToolContext, build_builtin_executor
-from schemas.api import AgentDramaRequest, AgentRequest
+from schemas.api import AgentRequest
 
 
 _TOOL_EXECUTOR = build_builtin_executor()
+
+
+def _resolve_tool_name(decision: CoordinatorDecision) -> str:
+    tool_name = str(decision.tool_name or "").strip()
+    if tool_name and _TOOL_EXECUTOR.registry.has(tool_name):
+        return tool_name
+    for name in list(decision.matched_capabilities or []):
+        candidate = str(name or "").strip()
+        if candidate and _TOOL_EXECUTOR.registry.has(candidate):
+            return candidate
+    return ""
 
 
 def dispatch_agent_message(
@@ -57,7 +66,7 @@ def dispatch_agent_message(
         return {"planner_result": result, "data": result, "response_text": str(decision.answer or "").strip(), "action": "canvas_plan"}
 
     if decision.action == "tool_call":
-        tool_name = str(decision.tool_name or "").strip()
+        tool_name = _resolve_tool_name(decision)
         tool_args = dict(decision.tool_args or {})
         if not tool_name or not _TOOL_EXECUTOR.registry.has(tool_name):
             payload = _TOOL_EXECUTOR.execute(
@@ -95,41 +104,6 @@ def dispatch_agent_message(
             "response_text": str(decision.answer or "").strip(),
             "action": "workflow_plan",
         }
-
-    idea_capability = "agent_idea_script_generate" if "agent_idea_script_generate" in decision.matched_capabilities else ""
-    drama_capability = "agent_drama_generate" if "agent_drama_generate" in decision.matched_capabilities else ""
-    if idea_capability:
-        idea_req = IdeaScriptRequest(
-            product=str(req.product or req.message or "").strip(),
-            audience=req.audience,
-            price_band=req.price_band,
-            conversion_goal=req.conversion_goal,
-            primary_platform=req.primary_platform,
-            secondary_platform=req.secondary_platform,
-            selected_angle=req.selected_angle,
-        )
-        out = run_agent_idea_script_core(
-            idea_req,
-            session_id=None,
-            session_summary_present=False,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            trajectory_sink=[],
-            trace_sink=trace_sink,
-        )
-        result = out.model_dump(mode="json")
-        return {"data": result, "response_text": str(decision.answer or "").strip(), "action": "tool_call"}
-
-    if drama_capability:
-        drama_req = AgentDramaRequest(
-            prompt=str(req.message or "").strip(),
-            task_mode=str(req.task_mode or "").strip(),
-            episode_count=req.episode_count,
-            existing_script=req.existing_script,
-        )
-        out = run_agent_drama(drama_req, getattr(request.state, "req_id", "noid"))
-        result = out.model_dump(mode="json")
-        return {"data": result, "response_text": str(decision.answer or "").strip(), "action": "tool_call"}
 
     payload = _TOOL_EXECUTOR.execute(
         "agent_chitchat",

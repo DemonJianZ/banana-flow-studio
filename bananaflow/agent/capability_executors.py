@@ -1,5 +1,10 @@
 # bananaflow/agent/capability_executors.py
-"""各 /api/agent/* 能力的纯执行逻辑，供 HTTP 路由与 LangGraph 节点共用。"""
+"""Compatibility execution layer for legacy `/api/agent/*` capability endpoints.
+
+The preferred conversational entrypoint is `agent.gateway.service.handle_agent_message`.
+These helpers remain so older capability-specific routes can keep working while
+sharing the newer ToolExecutor-backed implementations where possible.
+"""
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
@@ -13,13 +18,13 @@ from schemas.api import (
     PromptPolishResponse,
 )
 from agent.idea_script.schemas import IdeaScriptRequest, IdeaScriptResponse
+from agent.legacy_capabilities import (
+    SKILL_CHITCHAT,
+    SKILL_DRAMA,
+    SKILL_IDEA_SCRIPT,
+    SKILL_PROMPT_POLISH,
+)
 from agent.tools import AgentToolContext, build_builtin_executor
-
-SKILL_CHITCHAT = "agent_chitchat"
-SKILL_DRAMA = "agent_drama"
-SKILL_PROMPT_POLISH = "agent_prompt_polish"
-SKILL_IDEA_SCRIPT = "agent_idea_script"
-
 
 _TOOL_EXECUTOR = build_builtin_executor()
 

@@ -18,7 +18,7 @@ Your output JSON shape:
 }}
 
 Allowed patch ops:
-1) {{ "op":"add_node", "node":{{ "id":"...", "type":"text_input|input|processor|post_processor|video_gen|output", "x": int, "y": int, "data": {{...}} }} }}
+1) {{ "op":"add_node", "node":{{ "id":"...", "type":"text_input|storyboard_plan|input|processor|post_processor|video_gen|output", "x": int, "y": int, "data": {{...}} }} }}
 2) {{ "op":"add_connection", "connection":{{ "id":"...", "from":"nodeId", "to":"nodeId" }} }}
 3) {{ "op":"update_node", "id":"nodeId", "data":{{...}} }}
 4) {{ "op":"delete_node", "id":"nodeId" }}
@@ -38,6 +38,11 @@ Rules:
 Node catalog:
 - text_input:
   - data.text: string
+- storyboard_plan:
+  - stores a structured storyboard plan in data.storyboard_plan
+  - when the user is editing a selected storyboard character/subject/scene/shot, prefer
+    updating the existing storyboard_plan node with op=update_node instead of adding a new node
+  - update the affected part inside data.storyboard_plan while preserving the rest of the plan
 - input:
   - data.images: array
 - processor:
@@ -79,6 +84,8 @@ Hard restrictions:
 - Never invent mode names outside the catalog above.
 - Do not use the old synthetic mode "edit".
 - "三合一换图" / "批量动图" / "批量花字" are page workflows, not canvas node types. If the user mentions them while asking for a canvas, build the closest equivalent node chain instead of route operations.
+- If selected_artifact.kind is "storyboard_selection", treat it as a local storyboard edit request.
+- For local storyboard edits, prefer op=update_node on the selected storyboard_plan node and do not add a duplicate storyboard_plan node unless the user explicitly asks for a second plan.
 
 Prompt policy:
 - Always refine the user request into ONE stable English instruction.

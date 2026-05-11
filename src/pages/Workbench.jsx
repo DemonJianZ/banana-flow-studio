@@ -80,14 +80,11 @@ import {
 } from "../lib/aiChatAnchorDebug";
 import {
   extractProductKeyword,
-  generateAgentChitchat,
-  generateDramaMission,
-  generateIdeaScriptMission,
   polishCanvasPrompt,
   runVideoSplitTask,
   runVideoLineartTask,
   runVideoRmbgTask,
-  planAgentCanvas,
+  sendAgentMessage,
 } from "../api/agentCanvas";
 import {
   listPreferences as listMemoryPreferences,
@@ -114,7 +111,6 @@ import {
 } from "../api/aiChat";
 import { viewMemberInfo } from "../api/memberInfo";
 import { viewUserAuths } from "../api/userAuths";
-import { detectIntent } from "../agent/router";
 import { detectPreferenceSuggestions } from "../agent/preferenceSuggestion";
 import { buildHitlFeedbackRows } from "../agent/hitlFeedbackHistory";
 import { AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2 } from "../config";
@@ -254,6 +250,249 @@ const normalizeScriptBrief = (brief = {}) => ({
   secondaryPlatform: String(brief?.secondaryPlatform || "").trim(),
   selectedAngle: String(brief?.selectedAngle || "").trim(),
 });
+
+const buildArtifactSelectionKey = (artifact) => {
+  if (!artifact || typeof artifact !== "object") return "";
+  const kind = String(artifact.kind || "").trim();
+  const fromNodeId = String(artifact.fromNodeId || "").trim();
+  if (kind === "storyboard_selection") {
+    const meta = artifact.meta && typeof artifact.meta === "object" ? artifact.meta : {};
+    const selectionType = String(meta.selectionType || "").trim();
+    const selectionId = String(meta.selectionId || "").trim();
+    return `storyboard:${fromNodeId}:${selectionType}:${selectionId}`;
+  }
+  const url = String(artifact.url || "").trim();
+  if (url) return `url:${url}`;
+  return `${kind}:${fromNodeId}:${String(artifact.createdAt || "").trim()}`;
+};
+
+const isSameArtifactSelection = (left, right) =>
+  !!buildArtifactSelectionKey(left) &&
+  buildArtifactSelectionKey(left) === buildArtifactSelectionKey(right);
+
+const isPreviewableArtifact = (artifact) => {
+  if (!artifact || typeof artifact !== "object") return false;
+  const kind = String(artifact.kind || "").trim();
+  const url = String(artifact.url || "").trim();
+  return !!url && (kind === "image" || kind === "video");
+};
+
+const stripStoryboardDisplayIds = (value) =>
+  String(value || "")
+    .replace(/[（(]\s*(?:[A-Za-z]{1,16}_\d{1,6}|[A-Z]\d{2,6}|char[_-]?\d{1,6}|scene[_-]?\d{1,6}|shot[_-]?\d{1,6}|loc[_-]?\d{1,6}|subj[_-]?\d{1,6}|entity[_-]?\d{1,6})\s*[)）]/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+
+const escapeRegExp = (value) => String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const collectStoryboardMentionTerms = (storyboardPlan = {}) => {
+  const entities = storyboardPlan?.entities || {};
+  const scenes = Array.isArray(storyboardPlan?.scenes) ? storyboardPlan.scenes : [];
+  const locations = Array.isArray(entities?.locations) ? entities.locations : [];
+  const locationEntityByName = new Map(
+    locations
+      .map((item) => [stripStoryboardDisplayIds(item?.name || ""), item])
+      .filter(([name]) => !!name),
+  );
+  const sceneByLocation = new Map();
+  scenes.forEach((scene, index) => {
+    const locationName = stripStoryboardDisplayIds(scene?.location || "");
+    if (!locationName || sceneByLocation.has(locationName)) return;
+    const matchedLocation = locationEntityByName.get(locationName);
+    sceneByLocation.set(locationName, {
+      assetType: "locations",
+      assetId: String(matchedLocation?.entity_id || locationName).trim(),
+      assetName: locationName,
+      selectionType: "scene",
+      selectionId: String(scene?.scene_id || `scene-${index + 1}`).trim(),
+      selectionLabel: `场景 ${scene?.scene_no || index + 1} · ${locationName}`,
+      selectionSummary: String(scene?.scene_notes || scene?.summary || "").trim(),
+      payload: {
+        sceneId: String(scene?.scene_id || `scene-${index + 1}`).trim(),
+        sceneNo: scene?.scene_no || index + 1,
+        sceneTitle: String(scene?.title || "").trim(),
+        sceneLocation: String(scene?.location || "").trim(),
+      },
+    });
+  });
+  const seen = new Map();
+  const pushEntry = (rawTerm, type, selection = null) => {
+    const term = stripStoryboardDisplayIds(rawTerm);
+    if (!term) return;
+    if (!seen.has(term)) seen.set(term, { term, type, ...(selection || {}) });
+  };
+  (Array.isArray(entities?.characters) ? entities.characters : []).forEach((item) => {
+    pushEntry(item?.name, "character", {
+      assetType: "characters",
+      assetId: String(item?.entity_id || "").trim(),
+      assetName: stripStoryboardDisplayIds(item?.name || ""),
+      selectionType: "entity",
+      selectionId: String(item?.entity_id || "").trim(),
+      selectionLabel: `角色 · ${String(item?.name || "").trim()}`,
+      selectionSummary: String(item?.core_description || item?.description || "").trim(),
+      payload: {
+        entityId: String(item?.entity_id || "").trim(),
+        entityName: String(item?.name || "").trim(),
+        entityType: "角色",
+      },
+    });
+  });
+  (Array.isArray(entities?.subjects) ? entities.subjects : []).forEach((item) => {
+    pushEntry(item?.name, "subject", {
+      assetType: "subjects",
+      assetId: String(item?.entity_id || "").trim(),
+      assetName: stripStoryboardDisplayIds(item?.name || ""),
+      selectionType: "entity",
+      selectionId: String(item?.entity_id || "").trim(),
+      selectionLabel: `主体 · ${String(item?.name || "").trim()}`,
+      selectionSummary: String(item?.core_description || item?.description || "").trim(),
+      payload: {
+        entityId: String(item?.entity_id || "").trim(),
+        entityName: String(item?.name || "").trim(),
+        entityType: "主体",
+      },
+    });
+  });
+  locations.forEach((item) => {
+    const locationName = stripStoryboardDisplayIds(item?.name || "");
+    pushEntry(item?.name, "scene", sceneByLocation.get(locationName) || {
+      assetType: "locations",
+      assetId: String(item?.entity_id || "").trim(),
+      assetName: locationName,
+      selectionType: "scene",
+      selectionId: String(item?.entity_id || locationName).trim(),
+      selectionLabel: `场景 · ${String(item?.name || "").trim()}`,
+      selectionSummary: String(item?.core_description || item?.description || "").trim(),
+      payload: {
+        sceneId: "",
+        sceneNo: null,
+        sceneTitle: String(item?.name || "").trim(),
+        sceneLocation: String(item?.name || "").trim(),
+        locationId: String(item?.entity_id || "").trim(),
+      },
+    });
+  });
+  scenes.forEach((item, index) => {
+    const selection = {
+      selectionType: "scene",
+      selectionId: String(item?.scene_id || `scene-${index + 1}`).trim(),
+      selectionLabel: `场景 ${item?.scene_no || index + 1} · ${stripStoryboardDisplayIds(item?.location || "") || `场景 ${index + 1}`}`,
+      selectionSummary: String(item?.scene_notes || item?.summary || "").trim(),
+      payload: {
+        sceneId: String(item?.scene_id || `scene-${index + 1}`).trim(),
+        sceneNo: item?.scene_no || index + 1,
+        sceneTitle: String(item?.title || "").trim(),
+        sceneLocation: String(item?.location || "").trim(),
+      },
+    };
+    const locationName = stripStoryboardDisplayIds(item?.location || "");
+    pushEntry(item?.location, "scene", sceneByLocation.get(locationName) || selection);
+  });
+  return Array.from(seen.values())
+    .sort((a, b) => b.term.length - a.term.length);
+};
+
+const renderStoryboardMentionText = (
+  value,
+  mentionTerms = [],
+  onMentionSelect = null,
+  onMentionHover = null,
+  onMentionLeave = null,
+  storyboardNode = null,
+) => {
+  const text = stripStoryboardDisplayIds(value);
+  if (!text) return "";
+  const termEntries = Array.from(
+    new Map(
+      (mentionTerms || [])
+        .map((item) => {
+          const term = stripStoryboardDisplayIds(item?.term || "");
+          if (!term) return null;
+          return {
+            ...item,
+            term,
+            type: String(item?.type || "").trim() || "default",
+          };
+        })
+        .filter(Boolean)
+        .map((item) => [item.term, item]),
+    ).values(),
+  ).sort((a, b) => b.term.length - a.term.length);
+  const terms = termEntries.map((item) => item.term);
+  if (!terms.length) return text;
+  const pattern = new RegExp(`(${terms.map((item) => escapeRegExp(item)).join("|")})`, "g");
+  const parts = text.split(pattern);
+  if (parts.length <= 1) return text;
+  const mentionTypeByTerm = new Map(termEntries.map((item) => [item.term, item.type]));
+  return parts.map((part, index) => {
+    if (!part) return null;
+    const matched = terms.some((term) => term === part);
+    if (!matched) {
+      return <React.Fragment key={`storyboard-text-${index}`}>{part}</React.Fragment>;
+    }
+    const mentionType = mentionTypeByTerm.get(part) || "default";
+    const mentionClassName =
+      mentionType === "character"
+        ? "bg-cyan-50 text-cyan-700 ring-cyan-200/80"
+        : mentionType === "subject"
+        ? "bg-violet-50 text-violet-700 ring-violet-200/80"
+        : mentionType === "scene"
+        ? "bg-amber-50 text-amber-700 ring-amber-200/80"
+        : "bg-slate-100 text-slate-700 ring-slate-200/80";
+    const mentionEntry = termEntries.find((item) => item.term === part) || null;
+    return (
+      <span
+        key={`storyboard-mention-${index}`}
+        className={`rounded-md px-1 py-0.5 font-medium ring-1 ${mentionClassName} ${mentionEntry && typeof onMentionSelect === "function" ? "cursor-pointer hover:brightness-95" : ""}`}
+        role={mentionEntry && typeof onMentionSelect === "function" ? "button" : undefined}
+        tabIndex={mentionEntry && typeof onMentionSelect === "function" ? 0 : undefined}
+        onMouseDown={
+          mentionEntry && typeof onMentionSelect === "function"
+            ? (event) => {
+                event.stopPropagation();
+              }
+            : undefined
+        }
+        onClick={
+          mentionEntry && typeof onMentionSelect === "function"
+            ? (event) => {
+                event.stopPropagation();
+                onMentionSelect(mentionEntry);
+              }
+            : undefined
+        }
+        onMouseEnter={
+          mentionEntry && typeof onMentionHover === "function"
+            ? (event) => {
+                event.stopPropagation();
+                onMentionHover(storyboardNode, mentionEntry, event);
+              }
+            : undefined
+        }
+        onMouseLeave={
+          mentionEntry && typeof onMentionLeave === "function"
+            ? (event) => {
+                event.stopPropagation();
+                onMentionLeave();
+              }
+            : undefined
+        }
+        onKeyDown={
+          mentionEntry && typeof onMentionSelect === "function"
+            ? (event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                event.stopPropagation();
+                onMentionSelect(mentionEntry);
+              }
+            : undefined
+        }
+      >
+        @{part}
+      </span>
+    );
+  });
+};
 
 const extractScriptPlatform = (text) => {
   const source = String(text || "");
@@ -508,11 +747,17 @@ const HIDDEN_IMAGE_CONFIG_MODES = new Set([
 
 const makeAgentId = () => Math.random().toString(36).slice(2, 10);
 
-const buildRouteDebug = (route, backendCalled) => ({
+const buildRouteDebug = (route, backendCalled, backendDecision = null) => ({
   intent: route?.intent || "UNKNOWN",
   product: route?.product || "",
   reason: route?.reason || "",
   backendCalled: !!backendCalled,
+  backendAction: backendDecision?.action || "",
+  backendIntent: backendDecision?.intent || "",
+  backendRule: backendDecision?.decision?.matched_rule || "",
+  backendCapabilities: Array.isArray(backendDecision?.decision?.matched_capabilities)
+    ? backendDecision.decision.matched_capabilities
+    : [],
 });
 
 const getRouteIntentLabel = (intent) => {
@@ -524,6 +769,17 @@ const getRouteIntentLabel = (intent) => {
     UNKNOWN: "未知",
   };
   return labelMap[intent] || String(intent || "未知");
+};
+
+const getDecisionLabel = (action) => {
+  const labelMap = {
+    answer_only: "直接回答",
+    clarify: "澄清",
+    tool_call: "工具调用",
+    canvas_plan: "画布规划",
+    workflow_plan: "工作流规划",
+  };
+  return labelMap[action] || String(action || "-");
 };
 
 const getFeedbackStatusLabel = (status) => {
@@ -538,26 +794,6 @@ const getFeedbackStatusLabel = (status) => {
   };
   return labelMap[status] || String(status || "-");
 };
-
-const getChitchatReply = (text) => {
-  const message = String(text || "").toLowerCase();
-  if (message.includes("谢谢")) return "不客气，我在这儿，随时可以开始做脚本。";
-  if (message.includes("晚安")) return "晚安，明天继续做内容也可以。";
-  if (message.includes("拜拜") || message.includes("bye")) return "回头见，需要时直接叫我。";
-  return "我在。你可以让我生成脚本、创作短剧，或者搭建画布工作流。";
-};
-
-const AGENT_HELP_TEXT = [
-  "我可以帮你做：",
-  "0) 自动搭画布：输入“帮我搭一个文生图接图生视频流程”",
-  "1) 爆款脚本：输入“帮我做一个洗面奶爆款脚本”",
-  "2) 短剧创作：输入“帮我写一个竖屏短剧大纲”",
-  "",
-  "示例：",
-  "• 帮我写一个防晒的口播脚本",
-  "• 帮我设计一个隐藏总裁装穷的短剧打脸场景",
-  "• 帮我搭一个上传商品图后做多角度镜头的画布",
-].join("\n");
 
 const CANVAS_CLARIFY_THOUGHT_PREFIX = "clarify_missing_prompt:";
 const CANVAS_PROMPT_EXAMPLES = [
@@ -731,6 +967,23 @@ const renderPersonaMentionText = (text, personaNames = EMPTY_LIST) => {
     index += mentionText.length;
   }
   return parts;
+};
+
+const buildStoryboardAssetGenerationPrompt = (assetType, asset, storyboardPlan = {}) => {
+  const style = String(storyboardPlan?.style || "").trim();
+  const aspectRatio = String(storyboardPlan?.aspect_ratio || "16:9").trim() || "16:9";
+  const name = stripStoryboardDisplayIds(asset?.name || "");
+  const coreDescription = String(asset?.core_description || asset?.description || "").trim();
+  const visualTraits = Array.isArray(asset?.visual_traits) ? asset.visual_traits.filter(Boolean).join("，") : "";
+  const detail = [coreDescription, visualTraits].filter(Boolean).join("，");
+
+  if (assetType === "characters") {
+    return `请生成一张故事板角色设定图，主体为${name}。角色描述：${detail || name}。要求：只表现该角色本人，不加入其他角色和无关主体；保持故事板既定服装、配饰、毛发/体态与气质；画面适合作为后续镜头统一参考，风格保持${style || "故事板原始风格"}，比例${aspectRatio}。`;
+  }
+  if (assetType === "subjects") {
+    return `请生成一张故事板主体设定图，主体为${name}。主体描述：${detail || name}。要求：只表现该主体本身，突出材质、结构、颜色和关键细节，不加入无关角色；适合作为后续镜头统一参考，风格保持${style || "故事板原始风格"}，比例${aspectRatio}。`;
+  }
+  return `请生成一张故事板场景设定图，场景为${name}。场景描述：${detail || name}。要求：只表现环境本身，不加入角色动作和剧情事件；重点体现空间结构、光线、材质、空气、水迹、反射和整体氛围；适合作为后续镜头统一参考，风格保持${style || "故事板原始风格"}，比例${aspectRatio}。`;
 };
 
 const PersonaMentionTextarea = React.forwardRef(({
@@ -1296,6 +1549,27 @@ const loadAssetLibraryStore = () => {
   }
 };
 
+const saveAssetLibraryStore = (store, preferredCanvasId = "") => {
+  try {
+    const normalized = normalizeAssetLibraryStore(store);
+    const drafts = Array.isArray(normalized?.drafts) ? normalized.drafts : [];
+    const preferredDraft = preferredCanvasId
+      ? drafts.find((item) => item?.canvasId === preferredCanvasId) || null
+      : null;
+    const fallbackDraft = preferredDraft || drafts[0] || null;
+    const compactStore = {
+      drafts: fallbackDraft ? [fallbackDraft] : [],
+      works: [],
+      workVersions: [],
+      assets: [],
+      personas: [],
+    };
+    localStorage.setItem(ASSET_LIBRARY_STORE_KEY, JSON.stringify(compactStore));
+  } catch (error) {
+    console.warn("[Workbench] asset_library_localstorage_save_skipped", error);
+  }
+};
+
 const shortenSessionTitle = (text, maxLen = 16) => {
   const value = String(text || "").trim();
   if (!value) return "新会话";
@@ -1319,7 +1593,6 @@ const loadAgentStore = () => {
       ...session,
       turns: Array.isArray(session?.turns)
         ? session.turns
-          .filter((turn) => turn?.intent !== "STORYBOARD")
           .map((turn) =>
             turn?.status === "running"
               ? {
@@ -1330,7 +1603,7 @@ const loadAgentStore = () => {
               : turn,
           )
         : [],
-      pendingTask: session?.pendingTask?.intent === "STORYBOARD" ? null : session?.pendingTask || null,
+      pendingTask: session?.pendingTask || null,
     }));
     return {
       sessions,
@@ -1742,6 +2015,7 @@ const extractAIChatDoneError = (resp) => {
 const NODE_TYPES = {
   INPUT: "input",
   TEXT_INPUT: "text_input",
+  STORYBOARD_PLAN: "storyboard_plan",
   ROLE_INPUT: "role_input",
   ROLE_STRUCTURER: "role_structurer",
   PROCESSOR: "processor",
@@ -2457,6 +2731,7 @@ const getDownstreamNodes = (startNodeIds, nodes, connections) => {
 const checkNodeReady = (node, nodes, connections) => {
   if (node.type === NODE_TYPES.INPUT) return (node.data.images?.length || 0) > 0;
   if (node.type === NODE_TYPES.TEXT_INPUT) return (node.data.text?.length || 0) > 0;
+  if (node.type === NODE_TYPES.STORYBOARD_PLAN) return true;
   if (node.type === NODE_TYPES.ROLE_INPUT) return Boolean(node.data.personaId || node.data.referenceImage || node.data.text);
   if (node.type === NODE_TYPES.ROLE_STRUCTURER) {
     return Boolean(
@@ -2880,7 +3155,9 @@ const InlineDropdown = ({
 };
 
 const getNodeAnchorPosition = (node, nodeElement, direction = "output", handle = VIDEO_GEN_INPUT_HANDLE_MAIN) => {
-  const width = nodeElement?.offsetWidth || (node?.type === NODE_TYPES.TEXT_INPUT ? 320 : 280);
+  const width =
+    nodeElement?.offsetWidth ||
+    (node?.type === NODE_TYPES.STORYBOARD_PLAN ? 1280 : node?.type === NODE_TYPES.TEXT_INPUT ? 320 : 280);
   const height = nodeElement?.offsetHeight || 160;
   const isLastFrameHandle = normalizeConnectionTargetHandle(handle) === VIDEO_GEN_INPUT_HANDLE_LAST_FRAME;
   const lastFrameHandleY = Math.min(height - 24, Math.max(36, height / 2 + 40));
@@ -3109,6 +3386,7 @@ const PropertyPanel = ({
     NODE_TYPES.INPUT,
     NODE_TYPES.OUTPUT,
     NODE_TYPES.TEXT_INPUT,
+    NODE_TYPES.STORYBOARD_PLAN,
     NODE_TYPES.ROLE_INPUT,
     NODE_TYPES.ROLE_STRUCTURER,
     NODE_TYPES.PANORAMA_VIEWER,
@@ -4324,6 +4602,8 @@ const NodeComponent = ({
   shouldAutoOpenUploadPicker = false,
   onAutoOpenUploadPickerHandled,
   onNodeElementChange,
+  onStoryboardMentionHover,
+  onStoryboardMentionLeave,
 }) => {
   const [showCopied, setShowCopied] = useState(false);
   const [compactActiveIndex, setCompactActiveIndex] = useState(0);
@@ -4476,6 +4756,7 @@ const NodeComponent = ({
   const isInput = node.type === NODE_TYPES.INPUT;
   const isOutput = node.type === NODE_TYPES.OUTPUT;
   const isTextInputNode = node.type === NODE_TYPES.TEXT_INPUT;
+  const isStoryboardPlanNode = node.type === NODE_TYPES.STORYBOARD_PLAN;
   const isRoleInputNode = node.type === NODE_TYPES.ROLE_INPUT;
   const isRoleStructurerNode = node.type === NODE_TYPES.ROLE_STRUCTURER;
   const isPanoramaViewerNode = node.type === NODE_TYPES.PANORAMA_VIEWER;
@@ -5122,7 +5403,14 @@ const NodeComponent = ({
   );
 
   const renderArtifactThumb = (img, i, meta = {}) => {
-    const isActive = activeArtifact?.url === img;
+    const next = {
+      url: img,
+      kind: isVideoContent(img) ? "video" : "image",
+      fromNodeId: node.id,
+      createdAt: Date.now(),
+      meta,
+    };
+    const isActive = isSameArtifactSelection(activeArtifact, next);
 
     return (
       <div
@@ -5156,16 +5444,8 @@ const NodeComponent = ({
           onClick={(e) => {
             e.stopPropagation();
 
-            const next = {
-              url: img,
-              kind: isVideoContent(img) ? "video" : "image",
-              fromNodeId: node.id,
-              createdAt: Date.now(),
-              meta,
-            };
-
             // ✅ 再点一次同一个：取消选中
-            onSelectArtifact?.(activeArtifact?.url === img ? null : next);
+            onSelectArtifact?.(isActive ? null : next);
           }}
 
           title="选中为 Agent 上下文"
@@ -5204,6 +5484,17 @@ const NodeComponent = ({
   const showFloatingDeleteButton = Boolean(onDelete);
   const showFloatingRetryButton = !isCompactInput && !isTextInputNode && !isRoleInputNode && !isRoleStructurerNode && !isSimpleMediaInputNode && !isInlineImageGenNode && !isOutput && node.data.status === "error";
   const nodeZIndex = isVideoGen ? 120 : selected ? 20 : undefined;
+  const nodeShellStyle = {
+    left: node.x,
+    top: node.y,
+    zIndex: nodeZIndex,
+    ...(isStoryboardPlanNode ? { width: 1280, maxWidth: 1280 } : {}),
+  };
+  const handleStoryboardWheelCapture = isStoryboardPlanNode
+    ? (event) => {
+        event.stopPropagation();
+      }
+    : undefined;
   const nodeShellClass = isTextInputNode
     ? `absolute w-[320px] overflow-visible rounded-[16px] border bg-white shadow-[0_18px_42px_rgba(15,23,42,0.08)] flex flex-col transition-colors duration-200 ${
         node.data.status === "error" ? "border-rose-300" : selected ? "border-cyan-300" : "border-slate-200"
@@ -5224,6 +5515,10 @@ const NodeComponent = ({
     ? `absolute w-[min(520px,calc(100vw-48px))] overflow-visible rounded-[18px] border bg-white shadow-[0_18px_42px_rgba(15,23,42,0.08)] flex flex-col transition-colors duration-200 ${
         node.data.status === "error" ? "border-rose-300" : selected ? "border-cyan-300" : "border-[#E5E7EB]"
       } ${selectedNodeShellClass}`
+    : isStoryboardPlanNode
+    ? `absolute w-[1280px] max-w-[1280px] overflow-visible rounded-[18px] border bg-white shadow-[0_24px_56px_rgba(15,23,42,0.10)] flex flex-col transition-colors duration-200 ${
+        node.data.status === "error" ? "border-rose-300" : selected ? "border-cyan-300" : "border-slate-200"
+      } ${selectedNodeShellClass}`
     : isInlineImageGenNode
     ? `absolute w-[280px] overflow-visible rounded-[16px] border bg-white shadow-[0_14px_30px_rgba(15,23,42,0.06)] flex flex-col transition-colors duration-200 ${
         selected ? "border-cyan-300" : "border-[#E5E7EB]"
@@ -5238,8 +5533,9 @@ const NodeComponent = ({
     <div
       ref={nodeRootRef}
       className={`${nodeShellClass} group/node`}
-      style={{ left: node.x, top: node.y, zIndex: nodeZIndex }}
+      style={nodeShellStyle}
       onMouseDown={onMouseDown}
+      onWheelCapture={handleStoryboardWheelCapture}
     >
       {!isCompactInput && !isRoleInputNode && (
         <div className="absolute -top-5 left-0 cursor-grab select-none text-[11px] font-medium tracking-[0.08em] text-slate-500 active:cursor-grabbing">
@@ -6206,7 +6502,11 @@ const NodeComponent = ({
             {node.data.images?.length > 0 ? (
               <div className="max-h-[520px] overflow-y-auto custom-scrollbar">
 	                {node.data.images.slice(0, MAX_RENDERED_MEDIA_ITEMS_PER_NODE).map((img, i) => {
-	                  const isActive = activeArtifact?.url === img;
+	                  const isActive = isSameArtifactSelection(activeArtifact, {
+                      url: img,
+                      kind: isVideoContent(img) ? "video" : "image",
+                      fromNodeId: node.id,
+                    });
 	                  const isVideoItem = isVideoContent(img);
 	                  const showVideoActions = isVideoItem && simpleMediaActionIndex === i;
 	                  const showImageActions = !isVideoItem && simpleMediaActionIndex === i;
@@ -6623,11 +6923,371 @@ const NodeComponent = ({
             {promptPolishError ? <div className="px-1 text-[10px] text-rose-500">{promptPolishError}</div> : null}
           </div>
         )}
+
+        {isStoryboardPlanNode && (
+          <div className="nodrag space-y-3 p-3">
+            <div className="rounded-[14px] border border-violet-200 bg-[linear-gradient(180deg,#fcfaff,#f4f1ff)] p-3 shadow-[0_12px_28px_rgba(76,29,149,0.08)]">
+              {(() => {
+                const storyboardPlan = node.data?.storyboard_plan || {};
+                const storyboardMentionTerms = collectStoryboardMentionTerms(storyboardPlan);
+                const locationList = Array.isArray(storyboardPlan?.entities?.locations) ? storyboardPlan.entities.locations : [];
+                const locationByName = new Map(
+                  locationList
+                    .map((item) => [String(item?.name || "").trim(), item])
+                    .filter(([name]) => !!name)
+                );
+                const selectStoryboardTarget = (selectionType, selectionId, selectionLabel, selectionSummary, payload = {}) => {
+                  const next = {
+                    kind: "storyboard_selection",
+                    fromNodeId: node.id,
+                    createdAt: Date.now(),
+                    meta: {
+                      nodeKind: "storyboard_plan",
+                      selectionType,
+                      selectionId,
+                      selectionLabel,
+                      selectionSummary,
+                      storyboardTitle: String(storyboardPlan?.title || node.data?.title || "").trim(),
+                      sceneTitle: String(payload?.sceneTitle || "").trim() || null,
+                      sceneLocation: String(payload?.sceneLocation || "").trim() || null,
+                      payload,
+                    },
+                  };
+                  onSelectArtifact?.(isSameArtifactSelection(activeArtifact, next) ? null : next);
+                };
+                const selectStoryboardMention = (mentionEntry) => {
+                  if (!mentionEntry?.selectionType || !mentionEntry?.selectionId) return;
+                  selectStoryboardTarget(
+                    mentionEntry.selectionType,
+                    mentionEntry.selectionId,
+                    mentionEntry.selectionLabel || mentionEntry.term || "故事板片段",
+                    mentionEntry.selectionSummary || "",
+                    mentionEntry.payload || {},
+                  );
+                };
+                const isStoryboardTargetActive = (selectionType, selectionId) =>
+                  isSameArtifactSelection(activeArtifact, {
+                    kind: "storyboard_selection",
+                    fromNodeId: node.id,
+                    meta: { selectionType, selectionId },
+                  });
+                return (
+                  <>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 space-y-1">
+                  <div className="text-[13px] font-semibold text-slate-900 break-words">
+                    {String(node.data?.storyboard_plan?.title || node.data?.title || "Storyboard Plan").trim() || "Storyboard Plan"}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 text-[10px] text-slate-700">
+                    <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5">
+                      比例 {String(node.data?.storyboard_plan?.aspect_ratio || "16:9").trim() || "16:9"}
+                    </span>
+                    <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5">
+                      风格 {String(node.data?.storyboard_plan?.style || "-").trim() || "-"}
+                    </span>
+                    <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5">
+                      时长 {String(node.data?.storyboard_plan?.estimated_duration_sec || node.data?.storyboard_plan?.target_duration_sec || "-")}
+                    </span>
+                  </div>
+                </div>
+                <div className="rounded-full border border-violet-200 bg-white px-2 py-1 text-[10px] font-medium text-violet-700">
+                  故事板
+                </div>
+              </div>
+
+              {Array.isArray(node.data?.storyboard_plan?.warnings) && node.data.storyboard_plan.warnings.length > 0 ? (
+                <div className="mt-3 rounded-[10px] border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10px] text-amber-800">
+                  {node.data.storyboard_plan.warnings.join(" | ")}
+                </div>
+              ) : null}
+
+              <div className="mt-3 grid grid-cols-[240px_240px_minmax(0,1fr)] gap-3 items-start">
+                <div className="min-h-0 rounded-[12px] border border-slate-200 bg-white p-2.5">
+                  <div className="text-[11px] font-semibold text-slate-700">角色与主体设定</div>
+                  <div className="custom-scrollbar mt-2 max-h-[520px] space-y-2 overflow-y-auto pr-1">
+                    {(() => {
+                      const characters = Array.isArray(node.data?.storyboard_plan?.entities?.characters)
+                        ? node.data.storyboard_plan.entities.characters
+                        : [];
+                      const subjects = Array.isArray(node.data?.storyboard_plan?.entities?.subjects)
+                        ? node.data.storyboard_plan.entities.subjects
+                        : [];
+                      const items = [
+                        ...characters.map((item) => ({ ...item, _sectionLabel: "角色" })),
+                        ...subjects.map((item) => ({ ...item, _sectionLabel: "主体" })),
+                      ];
+                      if (!items.length) {
+                        return (
+                          <div className="rounded-[10px] border border-dashed border-slate-200 bg-slate-50 px-3 py-4 text-[11px] text-slate-500">
+                            暂无角色与主体设定
+                          </div>
+                        );
+                      }
+                      return items.map((item, index) => {
+                        const selectionId = String(item?.entity_id || `${item?._sectionLabel || "entity"}-${index}`).trim();
+                        const isActive = isStoryboardTargetActive("entity", selectionId);
+                        return (
+                          <button
+                            type="button"
+                            key={selectionId}
+                            onClick={() =>
+                              selectStoryboardTarget(
+                                "entity",
+                                selectionId,
+                                `${item?._sectionLabel || "设定"} · ${String(item?.name || "").trim() || `项目 ${index + 1}`}`,
+                                String(item?.core_description || item?.description || item?.story_function || "").trim(),
+                                {
+                                  entityId: selectionId,
+                                  entityName: String(item?.name || "").trim(),
+                                  entityType: item?._sectionLabel || "设定",
+                                  coreDescription: String(item?.core_description || item?.description || "").trim(),
+                                  storyFunction: String(item?.story_function || "").trim(),
+                                },
+                              )
+                            }
+                            className={`w-full rounded-[10px] border px-2.5 py-2 text-left transition-colors ${
+                              isActive
+                                ? "border-cyan-300 bg-cyan-50 shadow-[0_0_0_1px_rgba(34,211,238,0.18)]"
+                                : "border-slate-100 bg-slate-50 hover:border-slate-200 hover:bg-white"
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="text-[12px] font-semibold text-slate-800 break-words">
+                                  {renderStoryboardMentionText(
+                                    String(item?.name || "").trim() || `${item?._sectionLabel || "设定"} ${index + 1}`,
+                                    storyboardMentionTerms,
+                                    selectStoryboardMention,
+                                    onStoryboardMentionHover,
+                                    onStoryboardMentionLeave,
+                                    node,
+                                  )}
+                                </div>
+                              </div>
+                              {isActive ? <span className="shrink-0 text-[10px] text-cyan-700">已选中</span> : null}
+                            </div>
+                            {String(item?.core_description || item?.description || "").trim() ? (
+                              <div className="mt-1 text-[11px] leading-5 text-slate-700 break-words">
+                                {renderStoryboardMentionText(
+                                  String(item.core_description || item.description).trim(),
+                                  storyboardMentionTerms,
+                                  selectStoryboardMention,
+                                  onStoryboardMentionHover,
+                                  onStoryboardMentionLeave,
+                                  node,
+                                )}
+                              </div>
+                            ) : null}
+                            {String(item?.story_function || "").trim() ? (
+                              <div className="mt-1 text-[10px] leading-5 text-slate-500 break-words">
+                                作用: {String(item.story_function).trim()}
+                              </div>
+                            ) : null}
+                          </button>
+                        );
+                      });
+                    })()}
+                  </div>
+                </div>
+
+                <div className="min-h-0 rounded-[12px] border border-slate-200 bg-white p-2.5">
+                  <div className="text-[11px] font-semibold text-slate-700">场景设定</div>
+                  <div className="custom-scrollbar mt-2 max-h-[520px] space-y-2 overflow-y-auto pr-1">
+                    {(() => {
+                      const scenes = Array.isArray(node.data?.storyboard_plan?.scenes)
+                        ? node.data.storyboard_plan.scenes
+                        : [];
+                      const locations = Array.isArray(node.data?.storyboard_plan?.entities?.locations)
+                        ? node.data.storyboard_plan.entities.locations
+                        : [];
+                      if (!scenes.length) {
+                        return (
+                          <div className="rounded-[10px] border border-dashed border-slate-200 bg-slate-50 px-3 py-4 text-[11px] text-slate-500">
+                            暂无场景设定
+                          </div>
+                        );
+                      }
+                      return scenes.map((scene, index) => {
+                        const selectionId = String(scene?.scene_id || `scene-setting-${index}`).trim();
+                        const isActive = isStoryboardTargetActive("scene", selectionId);
+                        const sceneDisplayName = stripStoryboardDisplayIds(scene?.location || scene?.title || "") || `场景 ${index + 1}`;
+                        const matchedLocation = locationByName.get(String(scene?.location || "").trim());
+                        return (
+                          <button
+                            type="button"
+                            key={selectionId}
+                            onClick={() =>
+                              selectStoryboardTarget(
+                                "scene",
+                                selectionId,
+                                `场景 ${scene?.scene_no || index + 1} · ${sceneDisplayName}`,
+                                String(scene?.scene_notes || scene?.summary || matchedLocation?.core_description || matchedLocation?.description || "").trim(),
+                                {
+                                  sceneId: selectionId,
+                                  sceneNo: scene?.scene_no || index + 1,
+                                  sceneTitle: String(scene?.title || "").trim(),
+                                  sceneLocation: String(scene?.location || "").trim(),
+                                  sceneSummary: String(scene?.summary || "").trim(),
+                                  sceneNotes: String(scene?.scene_notes || "").trim(),
+                                  locationDescription: String(matchedLocation?.core_description || matchedLocation?.description || "").trim(),
+                                },
+                              )
+                            }
+                            className={`w-full rounded-[10px] border px-2.5 py-2 text-left transition-colors ${
+                              isActive
+                                ? "border-cyan-300 bg-cyan-50 shadow-[0_0_0_1px_rgba(34,211,238,0.18)]"
+                                : "border-slate-100 bg-slate-50 hover:border-slate-200 hover:bg-white"
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <div className="text-[12px] font-semibold text-slate-800 break-words">
+                                <span>场景 {scene?.scene_no || index + 1} </span>
+                                {renderStoryboardMentionText(
+                                  sceneDisplayName,
+                                  storyboardMentionTerms,
+                                  selectStoryboardMention,
+                                  onStoryboardMentionHover,
+                                  onStoryboardMentionLeave,
+                                  node,
+                                )}
+                              </div>
+                            </div>
+                            {String(matchedLocation?.core_description || matchedLocation?.description || scene?.scene_notes || scene?.summary || "").trim() ? (
+                              <div className="mt-2 rounded-[10px] border border-violet-100 bg-violet-50/70 px-2.5 py-2 text-[11px] leading-5 text-slate-700 break-words">
+                                {renderStoryboardMentionText(
+                                  String(matchedLocation?.core_description || matchedLocation?.description || scene?.scene_notes || scene?.summary).trim(),
+                                  storyboardMentionTerms,
+                                  selectStoryboardMention,
+                                  onStoryboardMentionHover,
+                                  onStoryboardMentionLeave,
+                                  node,
+                                )}
+                              </div>
+                            ) : null}
+                          </button>
+                        );
+                      });
+                    })()}
+                  </div>
+                </div>
+
+              <div className="min-h-0 rounded-[12px] border border-slate-200 bg-white p-2.5">
+                  <div className="text-[11px] font-semibold text-slate-700">镜头列表</div>
+                <div className="custom-scrollbar mt-2 grid max-h-[520px] grid-cols-2 gap-2 overflow-y-auto pr-1">
+                {Array.isArray(node.data?.storyboard_plan?.scenes) && node.data.storyboard_plan.scenes.length > 0 ? (
+                  node.data.storyboard_plan.scenes.map((scene, sceneIndex) => (
+                    <div key={scene?.scene_id || sceneIndex} className="rounded-[12px] border border-slate-200 bg-slate-50/60 p-2.5 shadow-[0_6px_18px_rgba(15,23,42,0.04)]">
+                      {(() => {
+                        const sceneDisplayName = stripStoryboardDisplayIds(scene?.location || scene?.title || "") || `场景 ${sceneIndex + 1}`;
+                        return (
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="text-[12px] font-semibold text-slate-800 break-words">
+                            <span>场景 {scene?.scene_no || sceneIndex + 1} </span>
+                            {renderStoryboardMentionText(
+                              sceneDisplayName,
+                              storyboardMentionTerms,
+                              selectStoryboardMention,
+                              onStoryboardMentionHover,
+                              onStoryboardMentionLeave,
+                              node,
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                        );
+                      })()}
+
+                      <div className="mt-2 space-y-2">
+                        {(Array.isArray(scene?.shots) ? scene.shots : []).map((shot, shotIndex) => {
+                          const selectionId = String(shot?.shot_id || `${scene?.scene_id || sceneIndex}-shot-${shotIndex}`).trim();
+                          const isActive = isStoryboardTargetActive("shot", selectionId);
+                          return (
+                          <button
+                            type="button"
+                            key={selectionId}
+                            onClick={() =>
+                              selectStoryboardTarget(
+                                "shot",
+                                selectionId,
+                                `镜头 ${shot?.shot_no || shotIndex + 1} · ${String(scene?.title || "").trim() || `场景 ${sceneIndex + 1}`}`,
+                                String(shot?.visual_description || "").trim(),
+                                {
+                                  shotId: selectionId,
+                                  shotNo: shot?.shot_no || shotIndex + 1,
+                                  sceneId: String(scene?.scene_id || "").trim(),
+                                  sceneTitle: String(scene?.title || "").trim(),
+                                  sceneLocation: String(scene?.location || "").trim(),
+                                  camera: String(shot?.camera || "").trim(),
+                                  durationSec: shot?.duration_sec ?? null,
+                                  visualDescription: String(shot?.visual_description || "").trim(),
+                                  voiceover: String(shot?.voiceover || "").trim(),
+                                },
+                              )
+                            }
+                            className={`w-full rounded-[10px] border px-2.5 py-2 text-left transition-colors ${
+                              isActive
+                                ? "border-cyan-300 bg-cyan-50 shadow-[0_0_0_1px_rgba(34,211,238,0.18)]"
+                                : "border-slate-100 bg-slate-50 hover:border-slate-200 hover:bg-white"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-[11px] font-medium text-slate-800">
+                                镜头 {shot?.shot_no || shotIndex + 1}
+                              </div>
+                              <div className="flex items-center gap-1.5 text-[10px] text-slate-500">
+                                {String(shot?.camera || "").trim() ? <span>{String(shot.camera).trim()}</span> : null}
+                                {shot?.duration_sec ? <span>{shot.duration_sec}s</span> : null}
+                                {isActive ? <span className="text-cyan-700">已选中</span> : null}
+                              </div>
+                            </div>
+                            <div className="mt-1 text-[11px] leading-5 text-slate-700 break-words">
+                              {renderStoryboardMentionText(
+                                String(shot?.visual_description || "").trim() || "暂无镜头描述",
+                                storyboardMentionTerms,
+                                selectStoryboardMention,
+                                onStoryboardMentionHover,
+                                onStoryboardMentionLeave,
+                                node,
+                              )}
+                            </div>
+                            {String(shot?.voiceover || "").trim() ? (
+                              <div className="mt-1 text-[10px] leading-5 text-slate-500 break-words">
+                                <span>旁白: </span>
+                                {renderStoryboardMentionText(
+                                  String(shot.voiceover).trim(),
+                                  storyboardMentionTerms,
+                                  selectStoryboardMention,
+                                  onStoryboardMentionHover,
+                                  onStoryboardMentionLeave,
+                                  node,
+                                )}
+                              </div>
+                            ) : null}
+                          </button>
+                        )})}
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="col-span-2 rounded-[12px] border border-dashed border-slate-200 bg-white px-3 py-6 text-center text-[11px] text-slate-500">
+                    暂无分镜场景
+                  </div>
+                )}
+                </div>
+              </div>
+              </div>
+                  </>
+                );
+              })()}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Ports */}
       <div className="pointer-events-none absolute top-1/2 w-full -translate-y-1/2 flex justify-between px-0">
-        {node.type !== NODE_TYPES.INPUT && !isTextInputNode && !isRoleInputNode && (
+        {node.type !== NODE_TYPES.INPUT && !isTextInputNode && !isStoryboardPlanNode && !isRoleInputNode && (
           <div className="pointer-events-auto relative -translate-x-1/2">
             <div
               onMouseEnter={() => onConnectTargetHover?.(VIDEO_GEN_INPUT_HANDLE_MAIN)}
@@ -6645,10 +7305,12 @@ const NodeComponent = ({
             ) : null}
           </div>
         )}
-        <div
-          onMouseDown={onConnectStart}
-          className="pointer-events-auto ml-auto translate-x-1/2 h-3 w-3 cursor-crosshair rounded-full border border-slate-300 bg-white shadow-[0_0_0_2px_rgba(255,255,255,0.9)] transition-transform duration-150 hover:scale-[1.55] hover:border-cyan-400 hover:bg-cyan-50 z-20"
-        />
+        {!isStoryboardPlanNode ? (
+          <div
+            onMouseDown={onConnectStart}
+            className="pointer-events-auto ml-auto translate-x-1/2 h-3 w-3 cursor-crosshair rounded-full border border-slate-300 bg-white shadow-[0_0_0_2px_rgba(255,255,255,0.9)] transition-transform duration-150 hover:scale-[1.55] hover:border-cyan-400 hover:bg-cyan-50 z-20"
+          />
+        ) : null}
         {isTextInputNode ? (
           <div className="pointer-events-none absolute left-[calc(100%+10px)] top-1/2 z-30 flex w-[92px] -translate-y-1/2 flex-col gap-3 py-8 opacity-0 transition-all duration-150 group-hover/node:pointer-events-auto group-hover/node:opacity-100 hover:opacity-100">
             <div className="nodrag flex flex-col gap-3">
@@ -6916,6 +7578,45 @@ const Workbench = () => {
     () => assetLibraryDrafts.find((item) => item.canvasId === canvasId) || null,
     [assetLibraryDrafts, canvasId],
   );
+  const upsertCanvasDraftSnapshot = useCallback((snapshotInput) => {
+    const snapshot = cloneAssetLibrarySnapshot(snapshotInput);
+    const digest = buildSnapshotDigest(snapshot);
+    const now = Date.now();
+    const draftRecord = {
+      id: `draft_${canvasId}`,
+      canvasId,
+      title: digest.title,
+      summary: digest.summary,
+      coverUrl: digest.coverUrl,
+      assetCount: digest.assetCount,
+      nodeCount: digest.nodeCount,
+      connectionCount: digest.connectionCount,
+      updatedAt: now,
+      snapshot,
+    };
+    setAssetLibraryStore((prev) => {
+      const current = normalizeAssetLibraryStore(prev);
+      const draftsNext = [draftRecord, ...((current.drafts || []).filter((item) => item.canvasId !== canvasId))].slice(0, 12);
+      const nonDraftAssets = (current.assets || []).filter(
+        (item) => !(item.sourceKind === "draft" && item.canvasId === canvasId),
+      );
+      const draftAssets = buildAssetLibraryAssetsFromSnapshot(snapshot, {
+        sourceKind: "draft",
+        canvasId,
+        createdAt: now,
+      });
+      const nextStore = {
+        ...current,
+        drafts: draftsNext,
+        assets: mergeAssetLibraryAssets(nonDraftAssets, draftAssets),
+      };
+      saveAssetLibraryStore(nextStore, canvasId);
+      void saveAssetLibraryDbStore(nextStore).catch((error) => {
+        console.error("[Workbench] asset_library_indexeddb_save:error", error);
+      });
+      return nextStore;
+    });
+  }, [canvasId]);
   const assetLibraryDetailWork = useMemo(
     () => assetLibraryWorks.find((item) => item.id === assetLibraryDetailWorkId) || null,
     [assetLibraryWorks, assetLibraryDetailWorkId],
@@ -7642,6 +8343,7 @@ const Workbench = () => {
   }, []);
   useEffect(() => {
     if (!assetLibraryLoaded) return;
+    saveAssetLibraryStore(assetLibraryStore, canvasId);
     void saveAssetLibraryDbStore(assetLibraryStore).catch((error) => {
       console.error("[Workbench] asset_library_indexeddb_save:error", error);
     });
@@ -7754,7 +8456,9 @@ const Workbench = () => {
     agentConversationBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [agentTurns]);
   useEffect(() => {
-    const resultTurns = agentTurns.filter((turn) => ["done", "error"].includes(turn?.status));
+    const resultTurns = agentTurns.filter(
+      (turn) => ["done", "error"].includes(turn?.status) && turn?.intent !== "STORYBOARD",
+    );
     setAgentResultCards((prev) => {
       const prevByTurnId = new Map(prev.map((item) => [item.turnId, item]));
       return resultTurns.map((turn, idx) => {
@@ -7781,7 +8485,176 @@ const Workbench = () => {
   useEffect(() => () => {
     agentCardDragRef.current = null;
   }, []);
+  useEffect(() => () => {
+    if (storyboardAssetHoverCloseTimerRef.current) {
+      window.clearTimeout(storyboardAssetHoverCloseTimerRef.current);
+      storyboardAssetHoverCloseTimerRef.current = null;
+    }
+  }, []);
   const [activeArtifact, setActiveArtifact] = useState(null);
+  const [hoveredStoryboardAssetCard, setHoveredStoryboardAssetCard] = useState(null);
+  const storyboardAssetHoverCloseTimerRef = useRef(null);
+  const selectedStoryboardTarget = useMemo(() => {
+    if (String(activeArtifact?.kind || "").trim() !== "storyboard_selection") return null;
+    const meta = activeArtifact?.meta && typeof activeArtifact.meta === "object" ? activeArtifact.meta : {};
+    const typeLabelMap = {
+      entity: "角色/主体",
+      scene: "场景",
+      shot: "镜头",
+    };
+    return {
+      type: String(meta.selectionType || "").trim(),
+      typeLabel: typeLabelMap[String(meta.selectionType || "").trim()] || "故事板片段",
+      label: String(meta.selectionLabel || "").trim() || "故事板片段",
+      summary: String(meta.selectionSummary || "").trim(),
+      fromNodeId: String(activeArtifact?.fromNodeId || "").trim(),
+    };
+  }, [activeArtifact]);
+
+  const activeStoryboardNode = useMemo(() => {
+    const artifactNodeId = String(activeArtifact?.fromNodeId || "").trim();
+    if (artifactNodeId) {
+      const byArtifact = nodes.find((node) => node.id === artifactNodeId && node.type === NODE_TYPES.STORYBOARD_PLAN);
+      if (byArtifact) return byArtifact;
+    }
+    if (selectedNodeIds.size === 1) {
+      const selectedId = Array.from(selectedNodeIds)[0];
+      const bySelection = nodes.find((node) => node.id === selectedId && node.type === NODE_TYPES.STORYBOARD_PLAN);
+      if (bySelection) return bySelection;
+    }
+    return null;
+  }, [activeArtifact, nodes, selectedNodeIds]);
+
+  const selectStoryboardAssetFromPanel = useCallback(
+    (assetType, asset, storyboardNode = activeStoryboardNode) => {
+      if (!storyboardNode || !asset) return;
+      const normalizedType = assetType === "locations" ? "scene" : "entity";
+      const selectionId = String(asset?.entity_id || asset?.name || "").trim();
+      const selectionLabelPrefix = assetType === "characters" ? "角色" : assetType === "subjects" ? "主体" : "场景";
+      setActiveArtifact({
+        kind: "storyboard_selection",
+        fromNodeId: storyboardNode.id,
+        meta: {
+          selectionType: normalizedType,
+          selectionId,
+          selectionLabel: `${selectionLabelPrefix} · ${String(asset?.name || "").trim()}`,
+          selectionSummary: String(asset?.core_description || asset?.description || "").trim(),
+          payload:
+            assetType === "locations"
+              ? {
+                  sceneId: "",
+                  sceneNo: null,
+                  sceneTitle: String(asset?.name || "").trim(),
+                  sceneLocation: String(asset?.name || "").trim(),
+                  locationId: selectionId,
+                }
+              : {
+                  entityId: selectionId,
+                  entityName: String(asset?.name || "").trim(),
+                  entityType: selectionLabelPrefix,
+                },
+        },
+      });
+      setAgentInputFocused(true);
+    },
+    [activeStoryboardNode],
+  );
+
+  const focusRelatedStoryboardShot = useCallback(
+    (assetType, asset, storyboardNode = activeStoryboardNode) => {
+      if (!storyboardNode || !asset) return;
+      const plan = storyboardNode.data?.storyboard_plan || {};
+      const scenes = Array.isArray(plan?.scenes) ? plan.scenes : [];
+      const assetName = String(asset?.name || "").trim();
+      const matchingScene =
+        assetType === "locations"
+          ? scenes.find((scene) => String(scene?.location || "").trim() === assetName)
+          : scenes.find((scene) =>
+              (Array.isArray(scene?.shots) ? scene.shots : []).some((shot) =>
+                (Array.isArray(shot?.referenced_entities) ? shot.referenced_entities : []).includes(assetName),
+              ),
+            );
+      if (matchingScene) {
+        const firstShot = (Array.isArray(matchingScene?.shots) ? matchingScene.shots : [])[0];
+        if (firstShot) {
+          setActiveArtifact({
+            kind: "storyboard_selection",
+            fromNodeId: storyboardNode.id,
+            meta: {
+              selectionType: "shot",
+              selectionId: String(firstShot?.shot_id || "").trim(),
+              selectionLabel: `镜头 ${firstShot?.shot_no || 1} · ${String(matchingScene?.location || matchingScene?.title || "").trim()}`,
+              selectionSummary: String(firstShot?.visual_description || "").trim(),
+              payload: {
+                shotId: String(firstShot?.shot_id || "").trim(),
+                shotNo: firstShot?.shot_no || 1,
+                sceneId: String(matchingScene?.scene_id || "").trim(),
+                sceneTitle: String(matchingScene?.title || "").trim(),
+                sceneLocation: String(matchingScene?.location || "").trim(),
+              },
+            },
+          });
+        }
+      }
+      setSelectedNodeIds(new Set([storyboardNode.id]));
+    },
+    [activeStoryboardNode],
+  );
+
+  const resolveStoryboardAssetForMention = useCallback((storyboardNode, mentionEntry) => {
+    if (!storyboardNode || !mentionEntry?.assetType) return null;
+    const plan = storyboardNode.data?.storyboard_plan || {};
+    const entities = plan?.entities || {};
+    const collection = Array.isArray(entities?.[mentionEntry.assetType]) ? entities[mentionEntry.assetType] : [];
+    const assetId = String(mentionEntry.assetId || "").trim();
+    const assetName = stripStoryboardDisplayIds(mentionEntry.assetName || mentionEntry.term || "");
+    return (
+      collection.find((item) => String(item?.entity_id || "").trim() === assetId) ||
+      collection.find((item) => stripStoryboardDisplayIds(item?.name || "") === assetName) ||
+      null
+    );
+  }, []);
+
+  const closeStoryboardAssetHoverCard = useCallback(() => {
+    if (storyboardAssetHoverCloseTimerRef.current) {
+      window.clearTimeout(storyboardAssetHoverCloseTimerRef.current);
+      storyboardAssetHoverCloseTimerRef.current = null;
+    }
+    setHoveredStoryboardAssetCard(null);
+  }, []);
+
+  const scheduleCloseStoryboardAssetHoverCard = useCallback(() => {
+    if (storyboardAssetHoverCloseTimerRef.current) {
+      window.clearTimeout(storyboardAssetHoverCloseTimerRef.current);
+    }
+    storyboardAssetHoverCloseTimerRef.current = window.setTimeout(() => {
+      setHoveredStoryboardAssetCard((current) => (current?.sticky ? current : null));
+      storyboardAssetHoverCloseTimerRef.current = null;
+    }, 120);
+  }, []);
+
+  const openStoryboardAssetHoverCard = useCallback(
+    (storyboardNode, mentionEntry, event) => {
+      if (!storyboardNode || !mentionEntry?.assetType) return;
+      const asset = resolveStoryboardAssetForMention(storyboardNode, mentionEntry);
+      if (!asset) return;
+      if (storyboardAssetHoverCloseTimerRef.current) {
+        window.clearTimeout(storyboardAssetHoverCloseTimerRef.current);
+        storyboardAssetHoverCloseTimerRef.current = null;
+      }
+      const x = Math.min((event?.clientX || 0) + 14, Math.max(window.innerWidth - 380, 24));
+      const y = Math.min((event?.clientY || 0) + 14, Math.max(window.innerHeight - 420, 24));
+      setHoveredStoryboardAssetCard({
+        nodeId: storyboardNode.id,
+        assetType: mentionEntry.assetType,
+        asset,
+        x,
+        y,
+        sticky: false,
+      });
+    },
+    [resolveStoryboardAssetForMention],
+  );
 
   const _applyPatch = useCallback((patchOps) => {
   if (!Array.isArray(patchOps) || patchOps.length === 0) return;
@@ -7901,6 +8774,7 @@ const Workbench = () => {
     setSelectedConnectionIds(finalSelectedConnectionIds || new Set());
   }
   if (finalViewport) setViewport(finalViewport);
+  return { nodes: nextNodes, connections: nextConns, viewport: finalViewport || viewportRef.current };
 }, [setNodes, setConnections, setSelectedNodeIds, setSelectedConnectionIds, setViewport]);
 
   // Initialize
@@ -7998,6 +8872,73 @@ const Workbench = () => {
     },
     [pushHistory],
   );
+
+  const focusCanvasNode = useCallback((nodeId) => {
+    const focusNode = (targetNode) => {
+      if (!targetNode) return;
+
+      const width =
+        targetNode.type === NODE_TYPES.STORYBOARD_PLAN
+          ? 1280
+          : targetNode.type === NODE_TYPES.TEXT_INPUT
+          ? 320
+          : targetNode.type === NODE_TYPES.ROLE_INPUT
+          ? 76
+          : 280;
+      const height =
+        targetNode.type === NODE_TYPES.STORYBOARD_PLAN
+          ? 620
+          : targetNode.type === NODE_TYPES.ROLE_INPUT
+          ? 76
+          : 200;
+
+      setSelectedNodeIds(new Set([targetNode.id]));
+      setSelectedConnectionIds(new Set());
+      setActiveNodeId(targetNode.id);
+
+      const canvasEl = canvasRef.current;
+      if (!canvasEl) return;
+      const zoom = viewportRef.current?.zoom || 1;
+      const centerX = Number(targetNode.x || 0) + width / 2;
+      const centerY = Number(targetNode.y || 0) + height / 2;
+      setViewport((prev) => ({
+        ...prev,
+        x: canvasEl.clientWidth / 2 - centerX * zoom,
+        y: canvasEl.clientHeight / 2 - centerY * zoom,
+      }));
+    };
+
+    const normalizedNodeId = String(nodeId || "").trim();
+    const currentNodes = nodesRef.current || [];
+    const directTarget = normalizedNodeId
+      ? currentNodes.find((node) => node.id === normalizedNodeId)
+      : null;
+    if (directTarget) {
+      focusNode(directTarget);
+      return;
+    }
+
+    const latestStoryboardNode = [...currentNodes].reverse().find((node) => node.type === NODE_TYPES.STORYBOARD_PLAN);
+    if (latestStoryboardNode) {
+      focusNode(latestStoryboardNode);
+      return;
+    }
+
+    const draftNodes = Array.isArray(activeCanvasDraft?.snapshot?.nodes) ? activeCanvasDraft.snapshot.nodes : [];
+    const draftTarget = normalizedNodeId
+      ? draftNodes.find((node) => node.id === normalizedNodeId)
+      : [...draftNodes].reverse().find((node) => node.type === NODE_TYPES.STORYBOARD_PLAN);
+    if (!draftTarget || !activeCanvasDraft?.snapshot) return;
+
+    restoreSnapshotToCanvas(activeCanvasDraft.snapshot, "已恢复故事板到画布");
+    window.setTimeout(() => {
+      const restoredNodes = nodesRef.current || [];
+      const restoredTarget = normalizedNodeId
+        ? restoredNodes.find((node) => node.id === normalizedNodeId)
+        : [...restoredNodes].reverse().find((node) => node.type === NODE_TYPES.STORYBOARD_PLAN);
+      if (restoredTarget) focusNode(restoredTarget);
+    }, 80);
+  }, [activeCanvasDraft, restoreSnapshotToCanvas]);
 
   const saveCanvasToAssetLibrary = useCallback((forceNewWork = false) => {
     if (nodes.length === 0 && connections.length === 0) {
@@ -8276,8 +9217,8 @@ const Workbench = () => {
         case " ":
           if (
             !e.repeat &&
-            activeArtifact?.url &&
-            !isVideoContent(activeArtifact.url) &&
+            isPreviewableArtifact(activeArtifact) &&
+            activeArtifact?.kind === "image" &&
             !previewImage
           ) {
             e.preventDefault();
@@ -8415,8 +9356,16 @@ const Workbench = () => {
 
     const getNodeSize = (node) => {
       const element = nodeElementMapRef.current.get(node.id);
-      const width = element?.offsetWidth || (node.type === NODE_TYPES.TEXT_INPUT ? 320 : node.type === NODE_TYPES.ROLE_INPUT ? 76 : 280);
-      const height = element?.offsetHeight || (node.type === NODE_TYPES.ROLE_INPUT ? 76 : 180);
+      const width =
+        element?.offsetWidth ||
+        (node.type === NODE_TYPES.STORYBOARD_PLAN
+          ? 1280
+          : node.type === NODE_TYPES.TEXT_INPUT
+          ? 320
+          : node.type === NODE_TYPES.ROLE_INPUT
+          ? 76
+          : 280);
+      const height = element?.offsetHeight || (node.type === NODE_TYPES.STORYBOARD_PLAN ? 620 : node.type === NODE_TYPES.ROLE_INPUT ? 76 : 180);
       return { width, height };
     };
 
@@ -9423,6 +10372,134 @@ const handleNodeMouseDown = (e, nid) => {
     setSelectedConnectionIds(new Set());
   }, [defaultImageModelId, defaultVideoModelId, pushHistory]);
 
+  const updateStoryboardAssetStatus = useCallback((storyboardNodeId, assetType, assetId, patch) => {
+    if (!storyboardNodeId || !assetType || !assetId || !patch || typeof patch !== "object") return;
+    setNodes((prev) =>
+      prev.map((node) => {
+        if (node.id !== storyboardNodeId) return node;
+        const currentState =
+          node?.data?.storyboard_asset_state && typeof node.data.storyboard_asset_state === "object"
+            ? node.data.storyboard_asset_state
+            : { characters: {}, subjects: {}, locations: {} };
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            storyboard_asset_state: {
+              ...currentState,
+              [assetType]: {
+                ...(currentState[assetType] || {}),
+                [assetId]: {
+                  ...((currentState[assetType] || {})[assetId] || {}),
+                  ...patch,
+                },
+              },
+            },
+          },
+        };
+      }),
+    );
+  }, []);
+
+  const runStoryboardAssetDirectGeneration = useCallback(
+    async (storyboardNode, assetType, asset) => {
+      if (!storyboardNode || !asset || !apiFetch) return;
+      const prompt = buildStoryboardAssetGenerationPrompt(assetType, asset, storyboardNode.data?.storyboard_plan || {});
+      const assetId = String(asset?.entity_id || asset?.name || "").trim();
+      updateStoryboardAssetStatus(storyboardNode.id, assetType, assetId, {
+        prompt,
+        status: "running",
+        error: "",
+      });
+      setHoveredStoryboardAssetCard((current) =>
+        current && current.nodeId === storyboardNode.id && current.assetType === assetType && String(current.asset?.entity_id || current.asset?.name || "").trim() === assetId
+          ? { ...current, sticky: true }
+          : current,
+      );
+      try {
+        const preferredNanoModelId = String(AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2 || "").trim();
+        const loadedModelIdSet = new Set(
+          (Array.isArray(imageModelRecords) ? imageModelRecords : [])
+            .map((item) => String(item?.id || item?.value || "").trim())
+            .filter(Boolean),
+        );
+        const targetModelId =
+          (preferredNanoModelId && loadedModelIdSet.has(preferredNanoModelId) ? preferredNanoModelId : "") ||
+          findAIChatModelIdByKeywords(imageModelRecords) ||
+          "";
+        if (!targetModelId) {
+          throw new Error("未找到 nano banana2 对应的图像模型ID");
+        }
+
+        const paramList = await resolveModelParamsForId(targetModelId);
+        const resolvedParamPayload = buildAIChatParamPayload(paramList);
+        const selectedSize = "1k";
+        const selectedRatio = String(storyboardNode.data?.storyboard_plan?.aspect_ratio || "16:9").trim() || "16:9";
+        const matchedSizeId = findAIChatParamValueId(paramList, ["size", "尺寸"], selectedSize);
+        const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比", "画幅", "aspect"], selectedRatio);
+        if (matchedSizeId) {
+          resolvedParamPayload.ai_image_param_size_id = matchedSizeId;
+        }
+        if (matchedRatioId) {
+          resolvedParamPayload.ai_image_param_ratio_id = matchedRatioId;
+        }
+
+        const authorizationInfo = resolveMemberAuthorizationInfo();
+        const proxyPayload = {
+          authorization: authorizationInfo?.value || "",
+          history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
+          module_enum: WORKBENCH_AI_CHAT_MODULE_ENUM,
+          part_enum: String(resolveWorkbenchAIChatPartEnum({ mode: "text2img" })),
+          ai_chat_session_id: aiChatSessionIdRef.current || "",
+          ai_chat_model_id: targetModelId,
+          message: prompt,
+          ...resolvedParamPayload,
+        };
+        if (!proxyPayload.authorization) {
+          throw new Error("缺少 member authorization，无法调用 nano banana2 生成");
+        }
+        const proxyData = await submitAIChatImageTask(apiFetch, proxyPayload);
+        if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
+        if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
+        const resultUrl =
+          pickFirstImageUrl(proxyData?.image_url) ||
+          pickFirstImageUrl(proxyData?.events) ||
+          pickFirstImageUrl(proxyData?.text) ||
+          pickFirstImageUrl(proxyData) ||
+          "";
+        const doneErrMsg = extractAIChatDoneError(proxyData);
+        if (!resultUrl && doneErrMsg) {
+          throw new Error(`AI Chat 返回错误：${doneErrMsg}`);
+        }
+        if (!resultUrl) {
+          const summary = summarizeAIChatResponse(proxyData);
+          throw new Error(`nano banana2 未返回可解析图片${summary ? ` | 响应摘要: ${summary}` : ""}`);
+        }
+        const images = [resultUrl];
+        updateStoryboardAssetStatus(storyboardNode.id, assetType, assetId, {
+          prompt,
+          status: "success",
+          error: "",
+          images,
+          lastGeneratedAt: Date.now(),
+        });
+      } catch (error) {
+        updateStoryboardAssetStatus(storyboardNode.id, assetType, assetId, {
+          prompt,
+          status: "error",
+          error: String(error?.message || error || "生成失败"),
+        });
+      } finally {
+        setHoveredStoryboardAssetCard((current) =>
+          current && current.nodeId === storyboardNode.id && current.assetType === assetType && String(current.asset?.entity_id || current.asset?.name || "").trim() === assetId
+            ? { ...current, sticky: false }
+            : current,
+        );
+      }
+    },
+    [apiFetch, imageModelRecords, resolveModelParamsForId, updateStoryboardAssetStatus],
+  );
+
   const createImageOperationResultNode = useCallback((sourceNodeId, resultImages, title) => {
     const safeImages = (Array.isArray(resultImages) ? resultImages : [])
       .map((item) => String(item || "").trim())
@@ -9913,6 +10990,68 @@ const handleNodeMouseDown = (e, nid) => {
     });
   }, []);
 
+  const appendAgentTurn = useCallback((turnInput = {}) => {
+    const turnId = turnInput?.id || `turn_${makeAgentId()}`;
+    const nextTurn = {
+      id: turnId,
+      userText: String(turnInput?.userText || "").trim(),
+      extractedProduct: String(turnInput?.extractedProduct || "").trim(),
+      status: turnInput?.status || "assistant",
+      assistantText: String(turnInput?.assistantText || ""),
+      quickActions: Array.isArray(turnInput?.quickActions) ? turnInput.quickActions : [],
+      productChips: Array.isArray(turnInput?.productChips) ? turnInput.productChips : [],
+      memorySuggestions: Array.isArray(turnInput?.memorySuggestions)
+        ? turnInput.memorySuggestions.map((item, idx) => ({
+            ...item,
+            id: item?.id || `suggest_${turnId}_${idx}`,
+            status: item?.status || "pending",
+          }))
+        : [],
+      showCancelPending: !!turnInput?.showCancelPending,
+      routeDebug: turnInput?.routeDebug || null,
+      scriptBriefDraft: turnInput?.scriptBriefDraft ? normalizeScriptBrief(turnInput.scriptBriefDraft) : null,
+      scriptBrief: turnInput?.scriptBrief ? normalizeScriptBrief(turnInput.scriptBrief) : null,
+      dramaPayload: turnInput?.dramaPayload || null,
+      response: turnInput?.response || null,
+      intent: turnInput?.intent || "",
+      intentReason: turnInput?.intentReason || "",
+      exports: turnInput?.exports || {},
+      stepIndex: Number(turnInput?.stepIndex || 0),
+      error: String(turnInput?.error || ""),
+      createdAt: Number(turnInput?.createdAt || Date.now()) || Date.now(),
+    };
+    updateActiveAgentSession((session) => ({
+      ...session,
+      title:
+        session.title === "新会话" && nextTurn.userText
+          ? shortenSessionTitle(nextTurn.userText)
+          : session.title,
+      turns: [...(session.turns || []), nextTurn],
+    }));
+    return turnId;
+  }, [updateActiveAgentSession]);
+
+  const updateAgentTurn = useCallback((turnId, updater) => {
+    if (!turnId) return;
+    updateActiveAgentSession((session) => ({
+      ...session,
+      turns: (session.turns || []).map((turn) => {
+        if (turn.id !== turnId) return turn;
+        const patch =
+          typeof updater === "function"
+            ? updater(turn)
+            : (updater && typeof updater === "object" ? updater : {});
+        return {
+          ...turn,
+          ...(patch || {}),
+          routeDebug: patch && Object.prototype.hasOwnProperty.call(patch, "routeDebug")
+            ? patch.routeDebug
+            : turn.routeDebug,
+        };
+      }),
+    }));
+  }, [updateActiveAgentSession]);
+
   const createAgentSession = () => {
     const nextSession = createDefaultAgentSession();
     setAgentStore((prev) => ({
@@ -10235,97 +11374,6 @@ const handleNodeMouseDown = (e, nid) => {
     e.preventDefault();
   }, []);
 
-  const runMissionOnTurn = useCallback(
-    async (turnId, userText, extractedProduct, routeMeta = {}, scriptBrief = null) => {
-      try {
-        const normalizedBrief = normalizeScriptBrief(
-          scriptBrief || { product: extractedProduct },
-        );
-        const response = await generateIdeaScriptMission(
-          normalizedBrief.product ? normalizedBrief : extractedProduct,
-          apiFetch,
-          routeMeta,
-        );
-        updateActiveAgentSession((session) => {
-          const turnsNext = (session.turns || []).map((turn) =>
-            turn.id === turnId
-              ? {
-                  ...turn,
-                  status: "done",
-                  stepIndex: AGENT_RUN_STEPS.length - 1,
-                  response,
-                  exports: turn.exports || {},
-                  scriptBrief: normalizedBrief,
-                  scriptBriefDraft: null,
-                }
-              : turn,
-          );
-          return { ...session, turns: turnsNext };
-        });
-        ensureAgentResultCard(turnId);
-      } catch (error) {
-        updateActiveAgentSession((session) => ({
-          ...session,
-          turns: (session.turns || []).map((turn) =>
-            turn.id === turnId
-              ? {
-                  ...turn,
-                  status: "error",
-                  error: error?.message || String(error) || "请求失败",
-                }
-              : turn,
-          ),
-        }));
-        ensureAgentResultCard(turnId);
-        setRunToast({ message: error?.message || "Idea Script 生成失败", type: "error" });
-      }
-    },
-    [apiFetch, ensureAgentResultCard, updateActiveAgentSession],
-  );
-
-  const runDramaMissionOnTurn = useCallback(
-    async (turnId, dramaPayload, routeMeta = {}) => {
-      try {
-        const payload = dramaPayload && typeof dramaPayload === "object"
-          ? dramaPayload
-          : { prompt: String(dramaPayload || "").trim() };
-        const response = await generateDramaMission(payload, apiFetch, routeMeta);
-        updateActiveAgentSession((session) => ({
-          ...session,
-          turns: (session.turns || []).map((turn) =>
-            turn.id === turnId
-              ? {
-                  ...turn,
-                  status: "done",
-                  stepIndex: AGENT_RUN_STEPS.length - 1,
-                  response,
-                  exports: turn.exports || {},
-                  dramaPayload: payload,
-                }
-              : turn,
-          ),
-        }));
-        ensureAgentResultCard(turnId);
-      } catch (error) {
-        updateActiveAgentSession((session) => ({
-          ...session,
-          turns: (session.turns || []).map((turn) =>
-            turn.id === turnId
-              ? {
-                  ...turn,
-                  status: "error",
-                  error: error?.message || String(error) || "请求失败",
-                }
-              : turn,
-          ),
-        }));
-        ensureAgentResultCard(turnId);
-        setRunToast({ message: error?.message || "短剧创作失败", type: "error" });
-      }
-    },
-    [apiFetch, ensureAgentResultCard, updateActiveAgentSession],
-  );
-
   const appendAssistantTurn = useCallback(
     (userText, assistantText, options = {}) => {
       const {
@@ -10339,38 +11387,20 @@ const handleNodeMouseDown = (e, nid) => {
         scriptBriefDraft = null,
       } = options || {};
       const finalUserText = userTextOverride !== undefined ? String(userTextOverride || "") : String(userText || "");
-      const turnId = `turn_${makeAgentId()}`;
-      updateActiveAgentSession((session) => ({
-        ...session,
-        title:
-          session.title === "新会话" && finalUserText
-            ? shortenSessionTitle(finalUserText)
-            : session.title,
-        turns: [
-          ...(session.turns || []),
-          {
-            id: turnId,
-            userText: finalUserText,
-            extractedProduct: "",
-            status,
-            assistantText,
-            quickActions,
-            productChips,
-            memorySuggestions: (memorySuggestions || []).map((item, idx) => ({
-              ...item,
-              id: item?.id || `suggest_${turnId}_${idx}`,
-              status: item?.status || "pending",
-            })),
-            showCancelPending: !!showCancelPending,
-            routeDebug,
-            scriptBriefDraft: scriptBriefDraft ? normalizeScriptBrief(scriptBriefDraft) : null,
-            createdAt: Date.now(),
-            stepIndex: 0,
-          },
-        ],
-      }));
+      appendAgentTurn({
+        userText: finalUserText,
+        extractedProduct: "",
+        status,
+        assistantText,
+        quickActions,
+        productChips,
+        memorySuggestions,
+        showCancelPending,
+        routeDebug,
+        scriptBriefDraft,
+      });
     },
-    [updateActiveAgentSession],
+    [appendAgentTurn],
   );
 
   const sendAIChatLanguageStream = useCallback(
@@ -10488,11 +11518,174 @@ const handleNodeMouseDown = (e, nid) => {
     [apiFetch, defaultLanguageModelId, pushApiDebugDetail, resolveModelParamsForId, updateActiveAgentSession, updateApiDebugStatus],
   );
 
+  const buildAgentRecentMessages = useCallback(() => {
+    const turns = activeAgentSession?.turns || [];
+    const recent = [];
+    for (const turn of turns.slice(-6)) {
+      const userText = String(turn?.userText || "").trim();
+      const assistantText = String(turn?.assistantText || "").trim();
+      if (userText) recent.push({ role: "user", text: userText });
+      if (assistantText) recent.push({ role: "assistant", text: assistantText });
+    }
+    return recent;
+  }, [activeAgentSession?.turns]);
+
+  const runAgentConversation = useCallback(
+    async (userText, route = null, extraPayload = null) => {
+      const message = String(userText || "").trim();
+      if (!message) return null;
+      const meta = {
+        intent: route?.intent || "",
+        product: route?.product || "",
+        sessionId: activeAgentSession?.id || "",
+      };
+      const response = await sendAgentMessage(
+        {
+          message,
+          recentMessages: buildAgentRecentMessages(),
+          currentNodes: cloneDeep(nodesRef.current || []),
+          currentConnections: cloneDeep(connectionsRef.current || []),
+          selectedArtifact: activeArtifact
+            ? {
+                url: activeArtifact.url,
+                kind: activeArtifact.kind || "image",
+                fromNodeId: activeArtifact.fromNodeId || null,
+                createdAt: activeArtifact.createdAt || Date.now(),
+                meta: activeArtifact.meta || {},
+              }
+            : null,
+          canvasId,
+          threadId: canvasId,
+          ...(extraPayload && typeof extraPayload === "object" ? extraPayload : {}),
+        },
+        apiFetch,
+        meta,
+      );
+      return response;
+    },
+    [activeAgentSession?.id, activeArtifact, apiFetch, buildAgentRecentMessages, canvasId],
+  );
+
+  const runMissionOnTurn = useCallback(
+    async (turnId, userText, extractedProduct, routeMeta = {}, scriptBrief = null) => {
+      try {
+        const normalizedBrief = normalizeScriptBrief(
+          scriptBrief || { product: extractedProduct },
+        );
+        const agentResponse = await runAgentConversation(
+          userText,
+          routeMeta,
+          {
+            product: normalizedBrief.product || extractedProduct || "",
+            audience: normalizedBrief.audience || "",
+            priceBand: normalizedBrief.priceBand || "",
+            conversionGoal: normalizedBrief.conversionGoal || "",
+            primaryPlatform: normalizedBrief.primaryPlatform || "",
+            secondaryPlatform: normalizedBrief.secondaryPlatform || "",
+            selectedAngle: normalizedBrief.selectedAngle || "",
+          },
+        );
+        if (!(agentResponse?.action === "tool_call" && Array.isArray(agentResponse?.data?.topics))) {
+          throw new Error("Agent 未返回脚本结果");
+        }
+        const response = agentResponse.data;
+        updateActiveAgentSession((session) => {
+          const turnsNext = (session.turns || []).map((turn) =>
+            turn.id === turnId
+              ? {
+                  ...turn,
+                  status: "done",
+                  stepIndex: AGENT_RUN_STEPS.length - 1,
+                  response,
+                  exports: turn.exports || {},
+                  scriptBrief: normalizedBrief,
+                  scriptBriefDraft: null,
+                }
+              : turn,
+          );
+          return { ...session, turns: turnsNext };
+        });
+        ensureAgentResultCard(turnId);
+      } catch (error) {
+        updateActiveAgentSession((session) => ({
+          ...session,
+          turns: (session.turns || []).map((turn) =>
+            turn.id === turnId
+              ? {
+                  ...turn,
+                  status: "error",
+                  error: error?.message || String(error) || "请求失败",
+                }
+              : turn,
+          ),
+        }));
+        ensureAgentResultCard(turnId);
+        setRunToast({ message: error?.message || "Idea Script 生成失败", type: "error" });
+      }
+    },
+    [ensureAgentResultCard, runAgentConversation, updateActiveAgentSession],
+  );
+
+  const runDramaMissionOnTurn = useCallback(
+    async (turnId, dramaPayload, routeMeta = {}) => {
+      try {
+        const payload = dramaPayload && typeof dramaPayload === "object"
+          ? dramaPayload
+          : { prompt: String(dramaPayload || "").trim() };
+        const agentResponse = await runAgentConversation(
+          String(payload?.prompt || "").trim(),
+          routeMeta,
+          {
+            taskMode: payload?.taskMode || payload?.task_mode || "",
+            episodeCount: payload?.episodeCount ?? payload?.episode_count,
+            existingScript: payload?.existingScript || payload?.existing_script || "",
+          },
+        );
+        if (!(agentResponse?.action === "tool_call" && typeof agentResponse?.data?.text === "string")) {
+          throw new Error("Agent 未返回短剧结果");
+        }
+        const response = agentResponse.data;
+        updateActiveAgentSession((session) => ({
+          ...session,
+          turns: (session.turns || []).map((turn) =>
+            turn.id === turnId
+              ? {
+                  ...turn,
+                  status: "done",
+                  stepIndex: AGENT_RUN_STEPS.length - 1,
+                  response,
+                  exports: turn.exports || {},
+                  dramaPayload: payload,
+                }
+              : turn,
+          ),
+        }));
+        ensureAgentResultCard(turnId);
+      } catch (error) {
+        updateActiveAgentSession((session) => ({
+          ...session,
+          turns: (session.turns || []).map((turn) =>
+            turn.id === turnId
+              ? {
+                  ...turn,
+                  status: "error",
+                  error: error?.message || String(error) || "请求失败",
+                }
+              : turn,
+          ),
+        }));
+        ensureAgentResultCard(turnId);
+        setRunToast({ message: error?.message || "短剧创作失败", type: "error" });
+      }
+    },
+    [ensureAgentResultCard, runAgentConversation, updateActiveAgentSession],
+  );
+
   const runCanvasPlanMission = useCallback(
     async (userText, routeMeta = {}, requestOptions = {}) => {
       updateApiDebugStatus("agentPlanner", {
         status: "loading",
-        message: "POST /api/agent/plan",
+        message: "POST /api/agent/message -> canvas_plan",
         detail: "",
       });
       try {
@@ -10513,21 +11706,27 @@ const handleNodeMouseDown = (e, nid) => {
           canvasId,
           threadId: canvasId,
         };
-        const response = await planAgentCanvas(
-          requestPayload,
-          apiFetch,
+        const agentResponse = await runAgentConversation(
+          userText,
           routeMeta,
+          {
+            supplementalPrompt: requestPayload.supplementalPrompt || "",
+          },
         );
+        if (!(agentResponse?.action === "canvas_plan" && agentResponse?.data && typeof agentResponse.data === "object")) {
+          throw new Error("Agent 未返回画布规划结果");
+        }
+        const response = agentResponse.data;
 
         const plannerDebug = response?.debug?.planner || {};
         const plannerPath = String(plannerDebug?.planner_path || "unknown");
         updateApiDebugStatus("agentPlanner", {
           status: plannerPath.includes("fallback") || plannerPath === "legacy" ? "warning" : "success",
-          message: `${plannerPath} · thread=${plannerDebug?.thread_id || canvasId || "--"}`,
+          message: `agent_v2 · thread=${plannerDebug?.thread_id || canvasId || "--"}`,
         });
         pushApiDebugDetail("agentPlanner", {
           type: "response",
-          path: "/api/agent/plan",
+          path: "/api/agent/message",
           payload: {
             prompt: requestPayload.prompt,
             supplementalPrompt: requestPayload.supplementalPrompt || "",
@@ -10556,17 +11755,17 @@ const handleNodeMouseDown = (e, nid) => {
       } catch (error) {
         updateApiDebugStatus("agentPlanner", {
           status: "error",
-          message: error?.message || "POST /api/agent/plan failed",
+          message: error?.message || "POST /api/agent/message failed",
         });
         pushApiDebugDetail("agentPlanner", {
           type: "error",
-          path: "/api/agent/plan",
+          path: "/api/agent/message",
           message: error?.message || String(error || ""),
         });
         throw error;
       }
     },
-    [activeArtifact, apiFetch, canvasId, _applyPatch, pushApiDebugDetail, pushHistory, updateApiDebugStatus],
+    [activeArtifact, canvasId, _applyPatch, pushApiDebugDetail, pushHistory, runAgentConversation, updateApiDebugStatus],
   );
 
   const getLatestResultTurn = useCallback(() => {
@@ -10869,7 +12068,7 @@ const handleNodeMouseDown = (e, nid) => {
                 userText: pendingTask.rawText || missionText,
                 extractedProduct: filledProduct,
                 status: "clarify",
-                assistantText: "先确认这次脚本设定，再开始生成。",
+                assistantText: `已识别产品「${filledProduct}」，请确认这次脚本设定。`,
                 createdAt: Date.now(),
                 stepIndex: 0,
                 exports: {},
@@ -10917,7 +12116,7 @@ const handleNodeMouseDown = (e, nid) => {
             }
             appendAssistantTurn(
               missionText,
-              String(response?.summary || "").trim() || "我还需要一点补充信息，才能继续搭建画布。",
+              String(response?.summary || response?.response_text || response?.thought || "").trim(),
               {
                 status: clarification ? "clarify" : "assistant",
                 userTextOverride: "",
@@ -10934,7 +12133,7 @@ const handleNodeMouseDown = (e, nid) => {
             );
             if (clarification) {
               setRunToast({
-                message: String(response?.summary || "").trim() || "还需要你补充一句画面提示词",
+                message: String(response?.summary || response?.response_text || response?.thought || "").trim(),
                 type: "info",
               });
             }
@@ -10956,64 +12155,53 @@ const handleNodeMouseDown = (e, nid) => {
         }
       }
 
-      const detectedRoute = detectIntent(missionText, {
-        activeSessionId: sessionId,
-        turns: activeAgentSession?.turns || [],
-      });
-      const route =
-        options?.forcedIntent === "DRAMA"
-          ? {
-              ...detectedRoute,
-              intent: "DRAMA",
-              reason: "forced:drama_quick_action",
-            }
-          : detectedRoute;
+      const route = {
+        intent: "UNKNOWN",
+        reason: "frontend_router_removed",
+        product: "",
+      };
       const extractedSupplementalPrompt = extractCanvasSupplementalPrompt(missionText);
+      const pendingTurnId = appendAgentTurn({
+        userText: missionText,
+        status: "running",
+        assistantText: "",
+        routeDebug: buildRouteDebug(route, true),
+      });
+      try {
+        const response = await runAgentConversation(
+          missionText,
+          route,
+          {
+            supplementalPrompt: extractedSupplementalPrompt || "",
+          },
+        );
+        const responseText = String(response?.response_text || "").trim();
+        const routeDebug = buildRouteDebug(
+          {
+            ...route,
+            reason: response?.decision?.matched_rule
+              ? `agent_v2:${response.decision.matched_rule}`
+              : `agent_v2:${route.reason || "message"}`,
+          },
+          true,
+          response,
+        );
 
-      if (route.intent === "CHITCHAT") {
-        try {
-          const response = await generateAgentChitchat(missionText, apiFetch, {
-            intent: route.intent,
-            product: route.product || "",
-            sessionId,
-          });
-          appendAssistantTurn(missionText, String(response?.text || "").trim() || getChitchatReply(missionText), {
-            routeDebug: buildRouteDebug(
-              { ...route, reason: "agent_chitchat_gemini_2_5_flash_lite" },
-              true,
-            ),
-          });
-        } catch {
-          appendAssistantTurn(missionText, getChitchatReply(missionText), {
-            routeDebug: buildRouteDebug(
-              { ...route, reason: "local_chitchat_reply_fallback" },
-              false,
-            ),
-          });
-        }
-        return;
-      }
-
-      if (route.intent === "HELP") {
-        appendAssistantTurn(missionText, AGENT_HELP_TEXT, {
-          quickActions: AGENT_DEFAULT_QUICK_ACTION_IDS,
-          routeDebug: buildRouteDebug(route, false),
-        });
-        return;
-      }
-
-      if (route.intent === "CANVAS") {
-        appendAssistantTurn(missionText, "正在按你的要求自动搭建画布组件，请稍等。", {
-          userTextOverride: "",
-          routeDebug: buildRouteDebug(route, true),
-        });
-        try {
-          const response = await runCanvasPlanMission(missionText, {
-            intent: route.intent,
-            product: route.product || "",
-            sessionId,
-          }, extractedSupplementalPrompt ? { supplementalPrompt: extractedSupplementalPrompt } : {});
-          const clarification = parseCanvasClarification(response);
+        if (response?.action === "canvas_plan" && response?.data && typeof response.data === "object") {
+          const plannerResult = response.data;
+          const patch = Array.isArray(plannerResult?.patch) ? plannerResult.patch : [];
+          const clarification = parseCanvasClarification(plannerResult);
+          if (patch.length) {
+            pushHistory();
+            const patchResult = _applyPatch(patch);
+            if (patchResult?.nodes && patchResult?.connections) {
+              upsertCanvasDraftSnapshot({
+                nodes: patchResult.nodes,
+                connections: patchResult.connections,
+                viewport: patchResult.viewport || viewportRef.current,
+              });
+            }
+          }
           if (clarification) {
             setPendingTaskForActiveSession({
               intent: "CANVAS",
@@ -11024,146 +12212,149 @@ const handleNodeMouseDown = (e, nid) => {
               createdAt: Date.now(),
             });
           }
-          appendAssistantTurn(
-            missionText,
-            String(response?.summary || "").trim() || "已根据你的需求完成画布自动搭建。",
-            {
-              status: clarification ? "clarify" : "assistant",
-              userTextOverride: "",
-              showCancelPending: !!clarification,
-              routeDebug: buildRouteDebug(
-                { ...route, reason: response?.thought ? `${route.reason}|${response.thought}` : route.reason },
-                true,
-              ),
-            },
-          );
+          updateAgentTurn(pendingTurnId, {
+            status: clarification ? "clarify" : "assistant",
+            assistantText: String(plannerResult?.summary || plannerResult?.response_text || plannerResult?.thought || responseText).trim(),
+            showCancelPending: !!clarification,
+            routeDebug,
+            response: plannerResult,
+            intent: "CANVAS",
+            intentReason: routeDebug.reason,
+          });
           if (clarification) {
             setRunToast({
-              message: String(response?.summary || "").trim() || "还需要你补充一句画面提示词",
+              message: String(plannerResult?.summary || plannerResult?.response_text || plannerResult?.thought || responseText).trim(),
               type: "info",
             });
           }
-        } catch (error) {
-          appendAssistantTurn(
-            missionText,
-            error?.message || "画布自动搭建失败，请稍后重试。",
-            {
-              userTextOverride: "",
-              routeDebug: buildRouteDebug(route, true),
-            },
-          );
-          setRunToast({ message: error?.message || "画布自动搭建失败", type: "error" });
+          return;
         }
-        return;
-      }
 
-      if (route.intent === "DRAMA") {
-        const turnId = `turn_${makeAgentId()}`;
-        const dramaPayload = {
-          prompt: missionText,
-          taskMode: /大纲/.test(missionText)
-            ? "outline"
-            : /优化|润色|改写/.test(missionText)
-            ? "optimize"
-            : /创意|发想|脑暴/.test(missionText)
-            ? "brainstorm"
-            : "episode_script",
-        };
-        updateActiveAgentSession((session) => ({
-          ...session,
-          title: session.title === "新会话" ? shortenSessionTitle(missionText) : session.title,
-          turns: [
-            ...(session.turns || []),
-            {
-              id: turnId,
-              userText: missionText,
-              extractedProduct: "",
-              status: "running",
-              createdAt: Date.now(),
-              stepIndex: 0,
-              exports: {},
-              intent: "DRAMA",
-              intentReason: route.reason,
-              routeDebug: buildRouteDebug(route, true),
-              dramaPayload,
-            },
-          ],
-        }));
-        runDramaMissionOnTurn(turnId, dramaPayload, {
-          intent: "DRAMA",
-          product: "",
-          sessionId,
-        });
-        return;
-      }
-
-      if (route.intent === "SCRIPT") {
-        const product = route.product || extractProductKeyword(missionText);
-        if (!product) {
-          const routeDebug = buildRouteDebug(route, false);
-          setPendingTaskForActiveSession({
-            intent: "SCRIPT",
-            rawText: missionText,
-            extractedProduct: "",
-            missing: ["product"],
-            createdAt: Date.now(),
-          });
-          appendAssistantTurn(missionText, "你想做哪个产品/品类？", {
-            quickActions: AGENT_DEFAULT_QUICK_ACTION_IDS,
-            productChips: AGENT_PRODUCT_CHIPS,
-            showCancelPending: true,
+        if (
+          response?.action === "tool_call" &&
+          response?.data?.canvas_patch &&
+          typeof response.data.canvas_patch === "object"
+        ) {
+          const canvasPatchResult = response.data.canvas_patch;
+          const patch = Array.isArray(canvasPatchResult?.patch) ? canvasPatchResult.patch : [];
+          const storyboardNodeIds = patch
+            .filter((op) => op?.op === "add_node" && op?.node?.type === NODE_TYPES.STORYBOARD_PLAN)
+            .map((op) => String(op?.node?.id || "").trim())
+            .filter(Boolean);
+          if (patch.length) {
+            pushHistory();
+            const patchResult = _applyPatch(patch);
+            if (patchResult?.nodes && patchResult?.connections) {
+              upsertCanvasDraftSnapshot({
+                nodes: patchResult.nodes,
+                connections: patchResult.connections,
+                viewport: patchResult.viewport || viewportRef.current,
+              });
+            }
+          }
+          updateAgentTurn(pendingTurnId, {
+            status: "done",
+            assistantText: String(
+              responseText ||
+                canvasPatchResult?.summary ||
+                response?.data?.summary ||
+                "已生成可编辑分镜方案。"
+            ).trim(),
             routeDebug,
+            response: {
+              ...(response.data || {}),
+              storyboardNodeIds,
+              summary: String(
+                responseText ||
+                  canvasPatchResult?.summary ||
+                  response?.data?.summary ||
+                  "已生成可编辑分镜方案。"
+              ).trim(),
+            },
+            intent: "STORYBOARD",
+            intentReason: routeDebug.reason,
+            stepIndex: AGENT_RUN_STEPS.length - 1,
           });
           return;
         }
-        const turnId = `turn_${makeAgentId()}`;
-        const routeWithProduct = { ...route, product };
-        const routeDebug = buildRouteDebug(routeWithProduct, false);
-        const initialBrief = buildInitialScriptBrief(missionText, product);
-        updateActiveAgentSession((session) => ({
-          ...session,
-          title: session.title === "新会话" ? shortenSessionTitle(missionText) : session.title,
-          turns: [
-            ...(session.turns || []),
-            {
-              id: turnId,
-              userText: missionText,
-              extractedProduct: product,
-              status: "clarify",
-              assistantText: "先确认这次脚本设定，再开始生成。",
-              createdAt: Date.now(),
-              stepIndex: 0,
-              exports: {},
-              intent: route.intent,
-              intentReason: route.reason,
-              routeDebug,
-              scriptBriefDraft: initialBrief,
-            },
-          ],
-          pendingTask: session?.pendingTask?.intent === "SCRIPT" ? null : session?.pendingTask || null,
-        }));
-        return;
+
+        if (response?.action === "tool_call" && Array.isArray(response?.data?.topics)) {
+          const product = String(
+            response?.data?.audience_context?.product ||
+              extractProductKeyword(missionText) ||
+              "",
+          ).trim();
+          updateAgentTurn(pendingTurnId, {
+            extractedProduct: product,
+            status: "done",
+            stepIndex: AGENT_RUN_STEPS.length - 1,
+            exports: {},
+            intent: "SCRIPT",
+            intentReason: routeDebug.reason,
+            routeDebug,
+            response: response.data,
+            scriptBrief: normalizeScriptBrief({ product }),
+            scriptBriefDraft: null,
+          });
+          return;
+        }
+
+        if (
+          response?.action === "tool_call" &&
+          typeof response?.data?.text === "string" &&
+          (Object.prototype.hasOwnProperty.call(response?.data || {}, "summary") ||
+            Object.prototype.hasOwnProperty.call(response?.data || {}, "mode"))
+        ) {
+          const dramaPayload = {
+            prompt: missionText,
+            taskMode: String(response?.data?.mode || "").trim() || "episode_script",
+          };
+          updateAgentTurn(pendingTurnId, {
+            extractedProduct: "",
+            status: "done",
+            stepIndex: DRAMA_RUN_STEPS.length - 1,
+            exports: {},
+            intent: "DRAMA",
+            intentReason: routeDebug.reason,
+            routeDebug,
+            response: response.data,
+            dramaPayload,
+          });
+          return;
+        }
+
+        updateAgentTurn(pendingTurnId, {
+          status: response?.action === "clarify" ? "clarify" : "assistant",
+          assistantText: responseText || "我在。",
+          routeDebug,
+        });
+      } catch (error) {
+        updateAgentTurn(pendingTurnId, {
+          status: "error",
+          error: error?.message || "请求失败，请稍后重试。",
+          routeDebug: buildRouteDebug({ ...route, reason: "agent_v2_error" }, true),
+        });
       }
 
-      appendAssistantTurn(missionText, "你想要我做脚本、短剧，还是搭建画布工作流？", {
-        quickActions: AGENT_DEFAULT_QUICK_ACTION_IDS,
-        routeDebug: buildRouteDebug(route, false),
-      });
     },
     [
       activeAgentSession?.id,
       activeAgentSession?.pendingTask,
       activeAgentSession?.turns,
       appendAssistantTurn,
+      appendAgentTurn,
       clearPendingTaskForActiveSession,
       resolvePendingProductCandidate,
+      runAgentConversation,
       runDramaMissionOnTurn,
       runMissionOnTurn,
       sendAIChatLanguageStream,
       apiFetch,
       runCanvasPlanMission,
       setPendingTaskForActiveSession,
+      updateAgentTurn,
       updateActiveAgentSession,
+      upsertCanvasDraftSnapshot,
     ],
   );
 
@@ -11191,8 +12382,7 @@ const handleNodeMouseDown = (e, nid) => {
     if (agentUploadInputRef.current) {
       agentUploadInputRef.current.value = "";
     }
-    const forcedIntent = activeComposerActionId === "drama" ? "DRAMA" : "";
-    void sendAgentMissionFromText(`${text}${attachmentNote}`, forcedIntent ? { forcedIntent } : {});
+    void sendAgentMissionFromText(`${text}${attachmentNote}`);
   };
 
   const polishAgentPromptInput = async () => {
@@ -13676,8 +14866,8 @@ const handleNodeMouseDown = (e, nid) => {
                               {turn.userText}
                             </div>
                             {isAdminUser && agentDevMode && routeDebug && (
-                              <div className="rounded-[16px] border border-amber-500/20 bg-amber-500/10 px-2.5 py-1.5 text-[10px] text-amber-100">
-                                意图={getRouteIntentLabel(routeDebug.intent)} | 产品={routeDebug.product || "-"} | 原因={routeDebug.reason || "-"} | 后端调用={routeDebug.backendCalled ? "是" : "否"}
+                              <div className="rounded-[16px] border border-slate-300 bg-slate-100 px-2.5 py-1.5 text-[10px] text-slate-800">
+                                后端决策={getDecisionLabel(routeDebug.backendAction)} | 产品={routeDebug.product || "-"} | 规则={routeDebug.backendRule || routeDebug.reason || "-"} | 能力={(routeDebug.backendCapabilities || []).join(", ") || "-"} | 后端调用={routeDebug.backendCalled ? "是" : "否"}
                               </div>
                             )}
                           </div>
@@ -13801,7 +14991,14 @@ const handleNodeMouseDown = (e, nid) => {
                           )}
                           {turn.status === "done" && (
                             <div className="space-y-1.5">
-                              {turn?.intent === "DRAMA" ? (
+                              {turn?.intent === "STORYBOARD" ? (
+                                <div className="space-y-2">
+                                  <div className="text-slate-600">{turn.assistantText || turn.response?.summary || "已生成故事板"}</div>
+                                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-[11px] leading-6 text-slate-600">
+                                    已将故事板节点加入当前画布，并写入当前会话记录。
+                                  </div>
+                                </div>
+                              ) : turn?.intent === "DRAMA" ? (
                                 <div className="space-y-2">
                                   <div className="text-slate-600">{turn.response?.summary || "短剧内容已生成"}</div>
                                   <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[11px] leading-6 max-h-52 overflow-y-auto">
@@ -13829,14 +15026,29 @@ const handleNodeMouseDown = (e, nid) => {
                                 </>
                               )}
                               <div className="flex gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() => focusAgentResultCard(turn.id)}
-                                  className="rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] text-slate-600 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
-                                >
-                                  {relatedCard?.minimized ? "恢复结果卡片" : "定位结果卡片"}
-                                </button>
-                                {relatedCard && !relatedCard.minimized && (
+                                {turn?.intent === "STORYBOARD" ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const nodeId = Array.isArray(turn?.response?.storyboardNodeIds)
+                                        ? turn.response.storyboardNodeIds.find(Boolean)
+                                        : "";
+                                      if (nodeId) focusCanvasNode(nodeId);
+                                    }}
+                                    className="rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] text-slate-600 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
+                                  >
+                                    定位故事板
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => focusAgentResultCard(turn.id)}
+                                    className="rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] text-slate-600 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
+                                  >
+                                    {relatedCard?.minimized ? "恢复结果卡片" : "定位结果卡片"}
+                                  </button>
+                                )}
+                                {turn?.intent !== "STORYBOARD" && relatedCard && !relatedCard.minimized && (
                                   <button
                                     type="button"
                                     onClick={() => minimizeAgentResultCard(relatedCard.id)}
@@ -15453,6 +16665,8 @@ const handleNodeMouseDown = (e, nid) => {
                   setPendingUploadNodeId((prev) => (prev === nodeId ? "" : prev));
                 }}
                 onNodeElementChange={handleNodeElementChange}
+                onStoryboardMentionHover={openStoryboardAssetHoverCard}
+                onStoryboardMentionLeave={scheduleCloseStoryboardAssetHoverCard}
               />
             ))}
 
@@ -15654,6 +16868,30 @@ const handleNodeMouseDown = (e, nid) => {
                   </div>
                 </div>
               ) : null}
+              {selectedStoryboardTarget ? (
+                <div className="relative mb-3 flex flex-wrap items-start gap-2 rounded-[18px] border border-cyan-200 bg-cyan-50 px-3.5 py-3 text-[12px] text-cyan-800">
+                  <span className="rounded-full border border-cyan-200 bg-white px-2.5 py-1 text-[10px] font-medium text-cyan-700">
+                    正在编辑 {selectedStoryboardTarget.typeLabel}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[12px] font-medium text-slate-800 break-words">
+                      {selectedStoryboardTarget.label}
+                    </div>
+                    {selectedStoryboardTarget.summary ? (
+                      <div className="mt-1 text-[11px] leading-5 text-slate-600 break-words">
+                        {selectedStoryboardTarget.summary}
+                      </div>
+                    ) : null}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveArtifact((current) => (current?.kind === "storyboard_selection" ? null : current))}
+                    className="rounded-full border border-cyan-200 bg-white px-2.5 py-1 text-[10px] text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
+                  >
+                    清除选择
+                  </button>
+                </div>
+              ) : null}
               <div className="relative flex gap-4">
                 <button
                   type="button"
@@ -15686,7 +16924,7 @@ const handleNodeMouseDown = (e, nid) => {
                         ? "请在这里补一句画面提示词，例如：一瓶极简风洗面奶产品图，白底，棚拍光，高清细节。"
                         : activeComposerActionId === "drama"
                         ? "请输入短剧需求，发送后会直接进入短剧创作流程。"
-                        : "输入你的需求，让 Agent 帮你生成脚本、创作短剧，或搭建画布工作流。"
+                        : "输入你的需求，Agent 会先理解你的目标，再决定是直接回答、调用工具还是规划画布。"
                     }
                     className={`w-full resize-none overflow-y-auto bg-transparent text-[15px] leading-7 outline-none placeholder:text-slate-400 ${
                       agentInputFocused || agentInput.trim() ? "min-h-[120px]" : "h-9 min-h-9 pt-[2px] text-[14px] leading-8"
@@ -16222,6 +17460,144 @@ const handleNodeMouseDown = (e, nid) => {
             <div className="fixed inset-0 z-[180] bg-slate-950">
               <Html360Viewer embedded onClose={() => setShowIntegrated360Viewer(false)} />
             </div>,
+            document.body,
+          )
+        : null}
+
+      {hoveredStoryboardAssetCard
+        ? createPortal(
+            (() => {
+              const storyboardNode = nodes.find((item) => item.id === hoveredStoryboardAssetCard.nodeId) || null;
+              const assetType = hoveredStoryboardAssetCard.assetType;
+              const asset = hoveredStoryboardAssetCard.asset || null;
+              const assetId = String(asset?.entity_id || asset?.name || "").trim();
+              const assetState =
+                storyboardNode?.data?.storyboard_asset_state?.[assetType]?.[assetId] || {};
+              const isLocked = !!assetState?.locked;
+              const generatedAt = assetState?.lastGeneratedAt ? new Date(assetState.lastGeneratedAt).toLocaleString() : "";
+              const tabLabel = assetType === "characters" ? "角色" : assetType === "subjects" ? "主体" : "场景";
+              const generatedImages = Array.isArray(assetState?.images) ? assetState.images.filter(Boolean) : [];
+              const generationStatus = String(assetState?.status || "").trim();
+              return (
+                <div
+                  className="fixed z-[190] w-[360px] pointer-events-auto"
+                  style={{ left: hoveredStoryboardAssetCard.x, top: hoveredStoryboardAssetCard.y }}
+                  onMouseEnter={() => {
+                    if (storyboardAssetHoverCloseTimerRef.current) {
+                      window.clearTimeout(storyboardAssetHoverCloseTimerRef.current);
+                      storyboardAssetHoverCloseTimerRef.current = null;
+                    }
+                  }}
+                  onMouseLeave={scheduleCloseStoryboardAssetHoverCard}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onWheel={(event) => event.stopPropagation()}
+                >
+                  <div className="overflow-hidden rounded-[20px] border border-slate-200 bg-white shadow-[0_24px_64px_rgba(15,23,42,0.16)]">
+                    <div className="border-b border-slate-200 px-4 py-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-[11px] font-medium text-slate-500">{tabLabel}</div>
+                          <div className="mt-1 text-[13px] font-semibold text-slate-900 break-words">
+                            {String(asset?.name || "").trim() || tabLabel}
+                          </div>
+                        </div>
+                        {isLocked ? (
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] text-emerald-700">
+                            <CheckCircle2 className="h-3 w-3" />
+                            定稿
+                          </span>
+                        ) : (
+                          <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] text-slate-500">待确认</span>
+                        )}
+                      </div>
+                      {generatedAt ? <div className="mt-2 text-[10px] text-slate-400">最近生成：{generatedAt}</div> : null}
+                    </div>
+                    <div className="space-y-3 p-4">
+                      <div className="text-[11px] leading-5 text-slate-600 break-words">
+                        {String(asset?.core_description || asset?.description || "暂无描述").trim()}
+                      </div>
+                      {generationStatus === "running" ? (
+                        <div className="flex items-center gap-2 rounded-[12px] border border-cyan-200 bg-cyan-50 px-3 py-2 text-[11px] text-cyan-700">
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          正在生成中...
+                        </div>
+                      ) : null}
+                      {generationStatus === "error" && String(assetState?.error || "").trim() ? (
+                        <div className="rounded-[12px] border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] leading-5 text-rose-700">
+                          {String(assetState.error).trim()}
+                        </div>
+                      ) : null}
+                      {generatedImages.length ? (
+                        <div className="grid grid-cols-2 gap-2">
+                          {generatedImages.slice(0, 4).map((image, imageIndex) => (
+                            <button
+                              key={`${assetId}-img-${imageIndex}`}
+                              type="button"
+                              onClick={() => setPreviewImage(image)}
+                              className="overflow-hidden rounded-[12px] border border-slate-200 bg-slate-50"
+                            >
+                              <img src={image} alt={`${asset?.name || tabLabel}-${imageIndex + 1}`} className="h-28 w-full object-cover" />
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                      <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              runStoryboardAssetDirectGeneration(storyboardNode, assetType, asset);
+                            }}
+                            disabled={generationStatus === "running"}
+                            className="inline-flex items-center gap-1.5 rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-[11px] text-cyan-700 transition-colors hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            <Sparkles className="h-3.5 w-3.5" />
+                            {assetState?.lastGeneratedAt ? "重生成" : "生成"}
+                          </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            updateStoryboardAssetStatus(storyboardNode?.id, assetType, assetId, {
+                              locked: !isLocked,
+                              lockedAt: !isLocked ? Date.now() : null,
+                            });
+                          }}
+                          className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] transition-colors ${
+                            isLocked
+                              ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                              : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50"
+                          }`}
+                        >
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          {isLocked ? "取消定稿" : "设为定稿"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            focusRelatedStoryboardShot(assetType, asset, storyboardNode);
+                            closeStoryboardAssetHoverCard();
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] text-slate-700 transition-colors hover:border-slate-300 hover:bg-slate-50"
+                        >
+                          <LinkIcon className="h-3.5 w-3.5" />
+                          查看关联镜头
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            selectStoryboardAssetFromPanel(assetType, asset, storyboardNode);
+                            closeStoryboardAssetHoverCard();
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] text-slate-700 transition-colors hover:border-slate-300 hover:bg-slate-50"
+                        >
+                          <Wand2 className="h-3.5 w-3.5" />
+                          对话微调
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })(),
             document.body,
           )
         : null}

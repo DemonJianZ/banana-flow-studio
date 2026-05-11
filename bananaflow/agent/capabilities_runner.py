@@ -1,4 +1,9 @@
-# bananaflow/agent/capabilities_runner.py
+"""Compatibility runner for legacy capability-specific agent endpoints.
+
+This module exists so older `/api/agent/*` routes can optionally execute through
+their small LangGraph wrapper. The coordinator gateway is the preferred runtime
+path for new conversational agent behavior.
+"""
 from __future__ import annotations
 
 import os
