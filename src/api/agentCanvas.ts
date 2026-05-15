@@ -123,6 +123,8 @@ const VIDEO_RMBG_POLL_INTERVAL_MS = 1200;
 const VIDEO_RMBG_TIMEOUT_MS = 600_000;
 const VIDEO_SPLIT_POLL_INTERVAL_MS = 1200;
 const VIDEO_SPLIT_TIMEOUT_MS = 600_000;
+const STORYBOARD_POLL_INTERVAL_MS = 3000;
+const STORYBOARD_TASK_TIMEOUT_MS = 300_000;
 
 export function extractProductKeyword(text) {
   const source = String(text || "").trim();
@@ -189,6 +191,8 @@ export async function sendAgentMessage(payload, apiFetch, meta) {
     task_mode: String(payload?.taskMode || "").trim() || undefined,
     episode_count: Number.isFinite(Number(payload?.episodeCount)) ? Number(payload.episodeCount) : undefined,
     existing_script: String(payload?.existingScript || "").trim() || undefined,
+    uploaded_documents: Array.isArray(payload?.uploadedDocuments) ? payload.uploadedDocuments : [],
+    canvas_node_hints: payload?.canvasNodeHints && typeof payload.canvasNodeHints === "object" ? payload.canvasNodeHints : undefined,
   };
   const resp = await call("/api/agent/message", {
     method: "POST",
@@ -200,6 +204,22 @@ export async function sendAgentMessage(payload, apiFetch, meta) {
     throw new Error(extractApiError(data));
   }
   return data;
+}
+
+export async function pollStoryboardTask(taskId: string, apiFetch, onProgress?: (status: string) => void) {
+  const call = createCaller(apiFetch);
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < STORYBOARD_TASK_TIMEOUT_MS) {
+    const resp = await call(`/api/agent/storyboard/status/${encodeURIComponent(taskId)}`, { method: "GET" });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(extractApiError(data));
+    const status = String(data?.status || "").trim().toLowerCase();
+    onProgress?.(status);
+    if (status === "done") return data;
+    if (status === "error") throw new Error(String(data?.error_msg || "分镜生成失败"));
+    await delay(STORYBOARD_POLL_INTERVAL_MS);
+  }
+  throw new Error("分镜生成超时，请稍后重试");
 }
 
 export async function polishCanvasPrompt(payload, apiFetch, meta) {

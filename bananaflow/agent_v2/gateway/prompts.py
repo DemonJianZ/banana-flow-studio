@@ -25,6 +25,7 @@ def coordinator_system_prompt() -> str:
         "5. 没有明显工具匹配时，不要硬选工具，输出 answer_only。\n"
         "6. tool_name 必须来自 capability catalog。\n"
         "6.1 如果用户明确要分镜设计、故事板、shot list、镜头规划，优先使用 storyboard.design，而不是只做口头回复。\n"
+        "6.2 如果用户消息本身是一段分镜头脚本表、镜头表、shot table、csv/tsv 风格镜头清单，即使没有明确说“生成故事板”，也优先理解为要整理成 storyboard，并使用 storyboard.design。\n"
         "7. 只输出 JSON，不要输出解释。\n\n"
         "JSON 格式："
         "{\"action\":\"answer_only|clarify|tool_call|canvas_plan|workflow_plan\",\"reason\":\"...\",\"confidence\":0.0,"
@@ -39,6 +40,7 @@ def build_coordinator_payload(ctx: GatewayContext, capability_catalog: List[Dict
         "recent_messages": list(ctx.recent_messages or []),
         "canvas_state_summary": dict(ctx.canvas_summary or {}),
         "selected_artifact_summary": dict(ctx.selected_artifact_summary or {}),
+        "uploaded_documents_summary": list(ctx.uploaded_documents_summary or []),
         "request_metadata": dict(ctx.request_metadata or {}),
         "capability_catalog": list(capability_catalog or []),
     }

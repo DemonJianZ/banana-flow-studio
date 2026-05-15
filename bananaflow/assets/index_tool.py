@@ -7,11 +7,11 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 try:
-    from agent.idea_script.schemas import AssetRequirement
+    from assets.schemas import AssetRequirement
     from storage.migrations import ensure_asset_db
     from storage.sqlite import query_all
 except Exception:  # pragma: no cover - 兼容作为 bananaflow 包导入
-    from bananaflow.agent.idea_script.schemas import AssetRequirement
+    from bananaflow.assets.schemas import AssetRequirement
     from bananaflow.storage.migrations import ensure_asset_db
     from bananaflow.storage.sqlite import query_all
 

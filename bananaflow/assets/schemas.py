@@ -16,6 +16,14 @@ class AssetQuery(BaseModel):
     aspect: str = "9:16"
 
 
+class AssetRequirement(BaseModel):
+    type: str = ""
+    must_have: str = ""
+    avoid: str = ""
+    style: str = ""
+    aspect: str = "9:16"
+
+
 class AssetCandidate(BaseModel):
     asset_id: str
     uri: str

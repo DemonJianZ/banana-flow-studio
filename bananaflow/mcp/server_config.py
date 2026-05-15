@@ -57,12 +57,6 @@ class MCPServerConfig:
 def _default_servers() -> List[MCPServerConfig]:
     return [
         MCPServerConfig(
-            name="export_ffmpeg",
-            command=[sys.executable, "-m", "bananaflow.mcp.server_export_ffmpeg"],
-            env={},
-            enabled=True,
-        ),
-        MCPServerConfig(
             name="asset_match",
             command=[sys.executable, "-m", "bananaflow.mcp.server_asset_match"],
             env={},
@@ -84,7 +78,7 @@ def load_server_configs_from_env() -> List[MCPServerConfig]:
                 if not isinstance(item, dict):
                     continue
                 name = str(item.get("name") or f"server_{idx + 1}").strip() or f"server_{idx + 1}"
-                default_cmd = [sys.executable, "-m", "bananaflow.mcp.server_export_ffmpeg"]
+                default_cmd = [sys.executable, "-m", "bananaflow.mcp.server_asset_match"]
                 parsed.append(
                     MCPServerConfig(
                         name=name,

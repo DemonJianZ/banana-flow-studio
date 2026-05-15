@@ -76,6 +76,8 @@ from storage.ai_chat_tasks import (
     mark_stale_ai_chat_tasks,
     update_ai_chat_task,
 )
+from storage.storyboard_tasks import get_storyboard_task, update_storyboard_task
+from agent_v2.storyboard import design_storyboard, build_storyboard_canvas_patch
 
 from storage.prompt_log import PromptLogger, LogAnalyzer
 from services.genai_client import call_genai_retry
@@ -99,12 +101,9 @@ from utils.images import parse_data_url, bytes_to_data_url, get_image_from_respo
 from utils.size import calculate_target_resolution
 from prompts.business import build_business_prompt
 
-from agent.idea_script.instance import idea_script_orchestrator
-from agent.idea_script.schemas import EditPlan, IdeaScriptRequest, IdeaScriptResponse
 from agent_v2.gateway.schemas import AgentMessageRequest, AgentMessageResponse
 from agent_v2.gateway.service import handle_agent_message
 from quality.harvester import harvest_eval_case
-from quality.metrics_schema import build_quality_metrics
 from memory.service import (
     deactivate_preference as deactivate_user_preference,
     expire_preferences as expire_user_preferences,
@@ -140,8 +139,6 @@ video_rmbg_tasks: Dict[str, Dict[str, Any]] = {}
 video_rmbg_tasks_lock = threading.Lock()
 video_split_tasks: Dict[str, Dict[str, Any]] = {}
 video_split_tasks_lock = threading.Lock()
-idea_script_plan_cache: Dict[str, Dict[str, Any]] = {}
-idea_script_plan_cache_lock = threading.Lock()
 _tracer = _otel_trace.get_tracer(__name__) if _otel_trace else None
 _AI_CHAT_TASK_RETRY_BACKOFFS = (2, 5, 10)
 init_ai_chat_tasks_store(AI_CHAT_TASK_DB_PATH)
@@ -1399,89 +1396,6 @@ def _append_session_event_audit(
         return None
 
 
-def _emit_quality_metrics_event(
-    *,
-    out: IdeaScriptResponse,
-    session_id: str,
-    tenant_id: str,
-    user_id: str,
-    latency_ms: Optional[int],
-    req_id: str,
-) -> Dict[str, Any]:
-    quality_metrics = build_quality_metrics(
-        response=out,
-        session_id=session_id,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        prompt_version=out.prompt_version,
-        policy_version=out.policy_version,
-        config_hash=out.config_hash,
-        total_tool_calls=2,
-        mcp_calls_count=(1 if bool(getattr(idea_script_orchestrator.config, "asset_match_use_mcp", False)) else 0),
-        latency_ms=(int(latency_ms or 0) if latency_ms is not None else None),
-        clarification_rate=None,
-        asset_match_use_mcp=bool(getattr(idea_script_orchestrator.config, "asset_match_use_mcp", False)),
-    )
-    _append_session_event_audit(
-        tenant_id=tenant_id,
-        user_id=user_id,
-        session_id=session_id,
-        event_type="QUALITY_METRICS",
-        payload=quality_metrics.model_dump(mode="json"),
-        idempotency_key=f"quality_metrics:{req_id}:{session_id}",
-    )
-    return quality_metrics.model_dump(mode="json")
-
-
-def _emit_trajectory_event(
-    *,
-    session_id: str,
-    tenant_id: str,
-    user_id: str,
-    trajectory_payload: Optional[Dict[str, Any]],
-    req_id: str,
-) -> Optional[Dict[str, Any]]:
-    if not bool(getattr(idea_script_orchestrator.config, "trajectory_eval_enabled", False)):
-        return None
-    payload = dict(trajectory_payload or {})
-    if not payload:
-        return None
-    _append_session_event_audit(
-        tenant_id=tenant_id,
-        user_id=user_id,
-        session_id=session_id,
-        event_type="TRAJECTORY_EVAL",
-        payload=payload,
-        idempotency_key=f"trajectory_eval:{req_id}:{session_id}",
-    )
-    return payload
-
-
-def _emit_agent_trace_events(
-    *,
-    session_id: str,
-    tenant_id: str,
-    user_id: str,
-    trace_payloads: Optional[list[Dict[str, Any]]],
-    req_id: str,
-) -> list[Dict[str, Any]]:
-    if not bool(getattr(idea_script_orchestrator.config, "agent_trace_enabled", False)):
-        return []
-    payloads = [dict(item or {}) for item in list(trace_payloads or []) if isinstance(item, dict)]
-    if not payloads:
-        return []
-    for idx, payload in enumerate(payloads, start=1):
-        _append_session_event_audit(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=session_id,
-            event_type="AGENT_TRACE",
-            payload=payload,
-            idempotency_key=f"agent_trace:{req_id}:{session_id}:{idx}",
-        )
-    return payloads
-
-
 @contextmanager
 def _span(name: str, attributes: Optional[Dict[str, Any]] = None):
     if _tracer is None:
@@ -1658,24 +1572,6 @@ def _parse_local_i2v_dimensions(resolution: Optional[str], ratio: Optional[str])
         width = base
         height = max(64, int(round(base * ratio_h / ratio_w)))
     return width, height
-
-
-def _cache_edit_plans(plans: List[EditPlan]) -> None:
-    with idea_script_plan_cache_lock:
-        for plan in list(plans or []):
-            key = str(getattr(plan, "plan_id", "") or "").strip()
-            if not key:
-                continue
-            idea_script_plan_cache[key] = plan.model_dump(mode="json")
-
-
-def _get_cached_edit_plan(plan_id: str) -> Optional[Dict[str, Any]]:
-    key = str(plan_id or "").strip()
-    if not key:
-        return None
-    with idea_script_plan_cache_lock:
-        data = idea_script_plan_cache.get(key)
-        return dict(data) if isinstance(data, dict) else None
 
 
 # =========================================================
@@ -3010,14 +2906,89 @@ def get_ai_chat_image_task_status(task_id: str):
     return AIChatImageTaskStatusResponse(**public_task)
 
 
+async def _run_storyboard_async(
+    task_id: str,
+    tool_args: dict,
+    *,
+    authorization: str = "",
+    req_id: str = "",
+    thread_id: str = "",
+    tenant_id: str = "",
+    user_id: str = "",
+) -> None:
+    """Background coroutine: runs design_storyboard and writes result to storyboard_tasks store."""
+    update_storyboard_task(task_id, status="running")
+    try:
+        plan = await asyncio.to_thread(
+            design_storyboard,
+            brief=str(tool_args.get("brief") or "").strip(),
+            style=str(tool_args.get("style") or "").strip(),
+            aspect_ratio=str(tool_args.get("aspect_ratio") or "16:9").strip() or "16:9",
+            target_duration_sec=float(tool_args.get("target_duration_sec") or 30.0),
+            shot_duration_sec=float(tool_args.get("shot_duration_sec") or 4.0),
+            language=str(tool_args.get("language") or "zh-CN").strip() or "zh-CN",
+            constraints=[str(c).strip() for c in list(tool_args.get("constraints") or []) if str(c).strip()],
+            script_table=str(tool_args.get("script_table") or "").strip(),
+            script_table_name=str(tool_args.get("script_table_name") or "").strip(),
+            script_rows=[dict(r) for r in list(tool_args.get("script_rows") or []) if isinstance(r, dict)],
+            authorization=authorization,
+            req_id=req_id or task_id,
+        )
+        existing_count = int(tool_args.get("_existing_storyboard_count") or 0)
+        patch_result = build_storyboard_canvas_patch(plan.model_dump(mode="json"), existing_storyboard_count=existing_count)
+        summary = str(patch_result.get("summary") or "")
+        patch = patch_result.get("patch", [])
+        update_storyboard_task(task_id, status="done", patch=patch, summary=summary)
+        if thread_id:
+            try:
+                append_session_event(
+                    tenant_id or "",
+                    user_id or "",
+                    thread_id,
+                    type="agent_storyboard_completed",
+                    payload={"task_id": task_id, "summary": summary, "patch_count": len(patch)},
+                )
+            except Exception:
+                pass
+    except Exception as exc:
+        import logging as _logging
+        _logging.getLogger(__name__).exception("storyboard_async_failed task_id=%s", task_id)
+        update_storyboard_task(task_id, status="error", error_msg=f"{type(exc).__name__}: {exc}")
+
+
 @router.post("/api/agent/message", response_model=AgentMessageResponse)
-def agent_message(
+async def agent_message(
     req: AgentMessageRequest,
     request: Request,
     current_user=Depends(_get_current_user_optional),
 ) -> AgentMessageResponse:
     tenant_id, user_id = _resolve_agent_actor(request, current_user)
-    return handle_agent_message(req, request=request, tenant_id=tenant_id, user_id=user_id)
+    response = await asyncio.to_thread(
+        handle_agent_message, req, request=request, tenant_id=tenant_id, user_id=user_id
+    )
+    # Storyboard design runs async — launch background task and scrub internal fields from response.
+    if response.data.get("_async_storyboard") and response.data.get("task_id"):
+        task_id = str(response.data["task_id"])
+        tool_args = dict(response.data.get("tool_args") or {})
+        authorization = str(response.data.get("authorization") or "")
+        bg_req_id = str(response.data.get("req_id") or "")
+        bg_thread_id = str(response.data.get("thread_id") or req.thread_id or "")
+        asyncio.create_task(_run_storyboard_async(
+            task_id, tool_args, authorization=authorization, req_id=bg_req_id,
+            thread_id=bg_thread_id, tenant_id=tenant_id or "", user_id=user_id or "",
+        ))
+        response = response.model_copy(update={
+            "data": {"task_id": task_id, "status": "pending", "is_async": True},
+        })
+    return response
+
+
+@router.get("/api/agent/storyboard/status/{task_id}")
+def get_storyboard_status(task_id: str, current_user=Depends(_get_current_user_optional)):
+    task = get_storyboard_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"storyboard task not found: {task_id}")
+    return task
 
 
 @router.post("/api/local/text2img", response_model=Text2ImgResponse)

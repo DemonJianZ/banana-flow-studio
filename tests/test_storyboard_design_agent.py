@@ -16,11 +16,13 @@ if BANANAFLOW_DIR not in sys.path:
 
 
 from bananaflow.agent.tools import AgentToolContext, build_builtin_executor, build_builtin_registry  # noqa: E402
+from bananaflow.agent.tools.errors import AgentToolExecutionError  # noqa: E402
 from bananaflow.agent_v2.gateway.dispatcher import dispatch_agent_message  # noqa: E402
 from bananaflow.agent_v2.gateway.schemas import AgentMessageRequest, CoordinatorDecision  # noqa: E402
 from bananaflow.agent_v2.storyboard import StoryboardPlan, design_storyboard  # noqa: E402
+from bananaflow.agent_v2.storyboard.script_table import parse_storyboard_script_table  # noqa: E402
 from bananaflow.agent_v2.storyboard.designer import default_storyboard_llm_generate, parse_llm_json  # noqa: E402
-from bananaflow.agent_v2.storyboard.validator import validate_storyboard_payload  # noqa: E402
+from bananaflow.agent_v2.storyboard.validator import coerce_storyboard_plan_payload, validate_storyboard_payload  # noqa: E402
 
 
 def _sample_plan():
@@ -127,6 +129,49 @@ class StoryboardDesignAgentTests(unittest.TestCase):
         plan = StoryboardPlan.model_validate(_sample_plan())
         self.assertEqual(plan.aspect_ratio, "16:9")
         self.assertEqual(len(plan.scenes), 2)
+
+    def test_coerce_storyboard_payload_should_strip_entity_mentions_from_location_and_recompute_duration(self):
+        payload = _sample_plan()
+        payload["entities"]["characters"][0]["name"] = "阿巳"
+        payload["entities"]["characters"].append(
+            {"entity_id": "char_2", "name": "一禅", "kind": "character", "description": "配角", "visual_traits": []}
+        )
+        payload["entities"]["subjects"].append(
+            {"entity_id": "subj_2", "name": "空酒坛", "kind": "subject", "description": "散落在地上的酒坛", "visual_traits": []}
+        )
+        payload["entities"]["locations"][0]["core_description"] = "阿巳和一禅所在的海边露台，旁边还有空酒坛。"
+        payload["estimated_duration_sec"] = 999
+        coerced = coerce_storyboard_plan_payload(
+            payload,
+            style="明亮电商广告",
+            aspect_ratio="16:9",
+            target_duration_sec=20,
+            shot_duration_sec=4,
+        )
+        self.assertNotIn("阿巳", coerced["entities"]["locations"][0]["core_description"])
+        self.assertNotIn("一禅", coerced["entities"]["locations"][0]["core_description"])
+        self.assertNotIn("空酒坛", coerced["entities"]["locations"][0]["core_description"])
+        self.assertEqual(coerced["estimated_duration_sec"], 20.0)
+
+    def test_parse_storyboard_script_table_should_extract_rows(self):
+        rows = parse_storyboard_script_table(
+            "镜号\t固定/运动\t景别\t画面内容\t台词\t音效/BGM\t时长\t参考\n"
+            "1\t固定\t特写\t白天庭院里辰辰抬手\t辰辰：秋水，节奏跟上。\t鸟鸣、风声\t5s\t\n"
+            "2\t固定\t中景\t秋水被法力控制，表情僵硬\t\t\t4s\t[图片]\n"
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["shot_no"], "1")
+        self.assertEqual(rows[0]["dialogue"], "辰辰：秋水，节奏跟上。")
+        self.assertEqual(rows[1]["reference"], "[图片]")
+
+    def test_parse_storyboard_script_table_should_support_english_headers(self):
+        rows = parse_storyboard_script_table(
+            "shot_no,camera_motion,shot_size,visual_content,dialogue,sound,duration,reference\n"
+            "1,fixed,close-up,Chencheng raises a hand,Chencheng: keep up,birds,5s,\n"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["shot_no"], "1")
+        self.assertEqual(rows[0]["visual_content"], "Chencheng raises a hand")
 
     def test_parse_llm_json_should_tolerate_trailing_commas(self):
         payload = parse_llm_json(
@@ -256,6 +301,33 @@ class StoryboardDesignAgentTests(unittest.TestCase):
         encoded = json.dumps(result, ensure_ascii=False)
         self.assertIn("夏日饮品广告分镜", encoded)
         self.assertEqual(result["style"], "明亮电商广告")
+        self.assertEqual(result["script_source"], "brief")
+        self.assertEqual(result["script_row_count"], 0)
+
+    def test_storyboard_design_falls_back_to_brief_when_script_table_not_parsed(self):
+        """T1.1: empty script_rows logs warning and falls back to brief-only (no longer raises)."""
+        executor = build_builtin_executor()
+        import logging
+        with self.assertLogs("bananaflow.agent.tools.builtin", level="WARNING") as log_ctx:
+            # Will call the real LLM; only verify it does NOT raise and warning is logged.
+            try:
+                executor.execute(
+                    "storyboard.design",
+                    {
+                        "brief": "请整理成故事板",
+                        "script_table": "totally unrelated plain text",
+                        "script_table_name": "storyboard_shots.csv",
+                        "script_rows": [],
+                    },
+                    context=AgentToolContext(req_id="req-tool"),
+                )
+            except AgentToolExecutionError as exc:
+                # Only allowed error is brief-empty (not parse-failure)
+                self.assertNotIn("storyboard_script_table_parse_failed", str(exc))
+        self.assertTrue(
+            any("storyboard_script_table_parse_failed" in m for m in log_ctx.output),
+            "Expected warning log for parse failure",
+        )
 
     def test_invalid_brief_should_return_controlled_error(self):
         executor = build_builtin_executor()
@@ -427,7 +499,7 @@ class StoryboardDesignAgentTests(unittest.TestCase):
         self.assertEqual(plan.scenes[0].location, "海边露台")
         self.assertEqual(plan.scenes[1].location, "海边产品展台")
 
-    def test_validator_should_reject_action_like_scene_title(self):
+    def test_validator_should_normalize_action_like_scene_title_back_to_location(self):
         broken = _sample_plan()
         broken["scenes"][0]["title"] = "海边露台的秘密接头"
         plan, errors = validate_storyboard_payload(
@@ -437,8 +509,28 @@ class StoryboardDesignAgentTests(unittest.TestCase):
             target_duration_sec=20,
             shot_duration_sec=4,
         )
-        self.assertEqual(plan.scenes[0].title, "海边露台的秘密接头")
-        self.assertIn("scene_1:scene_title_not_spatial:海边露台的秘密接头", errors)
+        self.assertEqual(plan.scenes[0].title, "海边露台")
+        self.assertEqual(errors, [])
+
+    def test_validator_should_normalize_dict_and_alias_referenced_entities(self):
+        broken = _sample_plan()
+        broken["entities"]["characters"][0]["name"] = "年轻女性（辰辰）"
+        broken["entities"]["subjects"][0]["name"] = "饮品瓶/云影镜"
+        broken["scenes"][0]["shots"][0]["referenced_entities"] = [
+            {"entity_id": "char_1", "name": "年轻女性"},
+            {"entity_id": "subj_1", "name": "云影镜"},
+            "饮品瓶",
+        ]
+        plan, errors = validate_storyboard_payload(
+            broken,
+            style="明亮电商广告",
+            aspect_ratio="16:9",
+            target_duration_sec=20,
+            shot_duration_sec=4,
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(plan.entities.characters[0].name, "年轻女性")
+        self.assertEqual(plan.scenes[0].shots[0].referenced_entities, ["年轻女性", "饮品瓶/云影镜", "饮品瓶/云影镜"])
 
     def test_validator_should_reject_duplicate_scene_descriptions(self):
         broken = _sample_plan()
@@ -472,7 +564,7 @@ class StoryboardDesignAgentTests(unittest.TestCase):
         )
         self.assertIn("scene_2:duplicate_scene_location:海边露台:scene_1", errors)
 
-    def test_validator_should_reject_location_description_with_character_reference(self):
+    def test_validator_should_strip_location_description_with_character_reference(self):
         broken = _sample_plan()
         broken["entities"]["locations"][0]["core_description"] = "海边露台上，年轻女性站在饮品瓶旁边看向镜头。"
         _, errors = validate_storyboard_payload(
@@ -482,7 +574,7 @@ class StoryboardDesignAgentTests(unittest.TestCase):
             target_duration_sec=20,
             shot_duration_sec=4,
         )
-        self.assertIn("loc_1:location_description_should_not_reference_entity:年轻女性", errors)
+        self.assertNotIn("loc_1:location_description_should_not_reference_entity:年轻女性", errors)
 
     def test_repair_path_should_run_once_when_validation_fails(self):
         invalid_plan = _sample_plan()
@@ -563,9 +655,10 @@ class StoryboardDesignAgentTests(unittest.TestCase):
         self.assertEqual(result["title"], "夏日饮品广告分镜")
         self.assertEqual(result["style"], "明亮电商广告")
 
-    def test_dispatcher_should_wrap_storyboard_plan_into_canvas_patch(self):
-        with mock.patch("bananaflow.agent_v2.gateway.dispatcher._TOOL_EXECUTOR.execute") as execute:
-            execute.return_value = _sample_plan()
+    def test_dispatcher_should_dispatch_storyboard_asynchronously(self):
+        """Storyboard tool call now returns async task_id immediately without calling executor."""
+        with mock.patch("bananaflow.agent_v2.gateway.dispatcher.create_storyboard_task") as mock_create:
+            mock_create.return_value = "test-task-id-123"
             out = dispatch_agent_message(
                 AgentMessageRequest(message="给我一个分镜方案"),
                 CoordinatorDecision(
@@ -578,8 +671,9 @@ class StoryboardDesignAgentTests(unittest.TestCase):
                 trace_sink=[],
             )
         self.assertEqual(out["action"], "tool_call")
-        self.assertIn("canvas_patch", out["data"])
-        self.assertEqual(out["data"]["canvas_patch"]["patch"][0]["node"]["data"]["node_kind"], "storyboard_plan")
+        self.assertTrue(out["data"].get("_async_storyboard"))
+        self.assertEqual(out["data"].get("task_id"), "test-task-id-123")
+        self.assertIn("tool_args", out["data"])
 
     def test_storyboard_graph_should_emit_observability_spans_when_run_id_exists(self):
         class _FakeTracer:

@@ -1,15 +1,9 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import Any
 
 from .schemas import AssetQuery
-
-if TYPE_CHECKING:
-    try:
-        from agent.idea_script.schemas import ShotItem
-    except Exception:  # pragma: no cover
-        from bananaflow.agent.idea_script.schemas import ShotItem
 
 _TOKEN_RE = re.compile(r"[a-z0-9_]+|[\u4e00-\u9fff]+", re.IGNORECASE)
 
@@ -31,7 +25,7 @@ _SEGMENT_TYPE_HINT = {
 
 
 class ShotQueryBuilder:
-    def build(self, shot: "ShotItem") -> AssetQuery:
+    def build(self, shot: Any) -> AssetQuery:
         required_tags: list[str] = []
         preferred_tags: list[str] = []
         forbidden_tags: list[str] = []

@@ -38,12 +38,10 @@ class AgentToolRegistryTests(unittest.TestCase):
         names = registry.list_tool_names()
 
         self.assertIn("agent_prompt_polish", names)
-        self.assertIn("agent_idea_script_generate", names)
         self.assertIn("match_assets_for_shots", names)
         self.assertIn("comfyui_text2img", names)
         self.assertIn("comfyui_local_img2video", names)
         self.assertIn("comfyui_rmbg", names)
-        self.assertIn("export_ffmpeg_render_bundle", names)
         self.assertIn("harvest_eval_case", names)
         self.assertIn("prompt.polish", names)
         self.assertIn("comfyui.text2img", names)

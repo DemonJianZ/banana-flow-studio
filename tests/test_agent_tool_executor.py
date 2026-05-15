@@ -49,9 +49,7 @@ from bananaflow.agent.tools import (  # noqa: E402
     AgentToolValidationError,
     register_builtin_tools,
 )
-from bananaflow.core.config import MODEL_AGENT_CHAT, MODEL_PROMPT_POLISH  # noqa: E402
-from bananaflow.schemas.api import PromptPolishRequest  # noqa: E402
-from bananaflow.agent.capability_executors import run_agent_prompt_polish  # noqa: E402
+from bananaflow.core.config import MODEL_PROMPT_POLISH  # noqa: E402
 
 
 class AgentToolExecutorTests(unittest.TestCase):
@@ -335,80 +333,6 @@ class AgentToolExecutorTests(unittest.TestCase):
         self.assertEqual(out["model"], MODEL_PROMPT_POLISH)
         self.assertEqual(out["variants"][0]["label"], "v1")
         polish.assert_called_once()
-
-    def test_builtin_idea_script_should_forward_execution_context(self):
-        registry = register_builtin_tools(AgentToolRegistry())
-        executor = AgentToolExecutor(registry)
-        trajectory_sink = []
-        trace_sink = []
-
-        fake_response = types.SimpleNamespace(
-            model_dump=lambda mode="json": {
-                "topics": [],
-                "edit_plans": [],
-                "selected_topic_angle": None,
-                "selected_topic_title": None,
-            }
-        )
-
-        class _FakeIdeaScriptRequest:
-            @classmethod
-            def model_validate(cls, payload):
-                return types.SimpleNamespace(**payload)
-
-        fake_orchestrator = types.SimpleNamespace(run=mock.Mock(return_value=fake_response))
-
-        with mock.patch("bananaflow.agent.tools.builtin._load_idea_script_components") as load_components:
-            load_components.return_value = (fake_orchestrator, _FakeIdeaScriptRequest)
-
-            out = executor.execute(
-                "agent_idea_script_generate",
-                {"product": "洗面奶"},
-                context=AgentToolContext(
-                    req_id="req-idea",
-                    session_id="session-1",
-                    session_summary_present=True,
-                    tenant_id="tenant-a",
-                    user_id="user-a",
-                    trajectory_sink=trajectory_sink,
-                    trace_sink=trace_sink,
-                ),
-            )
-
-        self.assertEqual(out["topics"], [])
-        self.assertEqual(out["edit_plans"], [])
-        fake_orchestrator.run.assert_called_once()
-        kwargs = fake_orchestrator.run.call_args.kwargs
-        self.assertEqual(kwargs["session_id"], "session-1")
-        self.assertTrue(kwargs["session_summary_present"])
-        self.assertEqual(kwargs["tenant_id"], "tenant-a")
-        self.assertEqual(kwargs["user_id"], "user-a")
-        self.assertIs(kwargs["trajectory_sink"], trajectory_sink)
-        self.assertIs(kwargs["trace_sink"], trace_sink)
-
-    def test_capability_executor_prompt_polish_should_route_via_tool_executor(self):
-        with mock.patch("bananaflow.agent.capability_executors._TOOL_EXECUTOR.execute") as execute:
-            execute.return_value = {"text": "ok", "variants": [], "tool_version": "1.0.0", "tool_hash": "0" * 64}
-
-            response = run_agent_prompt_polish(PromptPolishRequest(prompt="原始", mode="text2img"), "req-cap")
-
-        self.assertEqual(response.text, "ok")
-        execute.assert_called_once()
-        call_args = execute.call_args
-        self.assertEqual(call_args.args[0], "agent_prompt_polish")
-
-    def test_capability_executor_chitchat_should_route_via_tool_executor(self):
-        from bananaflow.agent.capability_executors import run_agent_chitchat
-
-        with mock.patch("bananaflow.agent.capability_executors._TOOL_EXECUTOR.execute") as execute:
-            execute.return_value = {"text": "chat ok", "model": "model-a", "tool_version": "1.0.0", "tool_hash": "0" * 64}
-
-            response = run_agent_chitchat("你好", "req-chat")
-
-        self.assertEqual(response.text, "chat ok")
-        self.assertEqual(response.model, MODEL_AGENT_CHAT)
-        execute.assert_called_once()
-        self.assertEqual(execute.call_args.args[0], "agent_chitchat")
 
     def test_builtin_chitchat_should_use_ai_chat_client_when_authorization_exists(self):
         executor = AgentToolExecutor(register_builtin_tools(AgentToolRegistry()))

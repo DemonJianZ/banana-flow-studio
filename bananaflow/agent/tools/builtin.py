@@ -64,14 +64,6 @@ def _load_ollama_prompt_polish():
     return ollama_prompt_polish
 
 
-def _load_agent_drama_request():
-    try:
-        from ...schemas.api import AgentDramaRequest
-    except Exception:  # pragma: no cover
-        from schemas.api import AgentDramaRequest
-    return AgentDramaRequest
-
-
 def _load_call_genai_retry_with_proxy():
     try:
         from ...services.genai_client import call_genai_retry_with_proxy
@@ -120,38 +112,12 @@ def _load_calculate_target_resolution():
     return calculate_target_resolution
 
 
-def _load_drama_creator_client():
-    try:
-        from ..drama_creator import DramaCreatorClient
-    except Exception:  # pragma: no cover
-        from agent.drama_creator import DramaCreatorClient
-    return DramaCreatorClient
-
-
-def _load_idea_script_components():
-    try:
-        from ..idea_script.instance import idea_script_orchestrator
-        from ..idea_script.schemas import IdeaScriptRequest
-    except Exception:  # pragma: no cover
-        from agent.idea_script.instance import idea_script_orchestrator
-        from agent.idea_script.schemas import IdeaScriptRequest
-    return idea_script_orchestrator, IdeaScriptRequest
-
-
 def _load_asset_match_tool():
     try:
         from ...mcp.tool_asset_match import execute_asset_match_tool
     except Exception:  # pragma: no cover
         from mcp.tool_asset_match import execute_asset_match_tool
     return execute_asset_match_tool
-
-
-def _load_export_tool():
-    try:
-        from ...mcp.tool_export_ffmpeg import execute_export_ffmpeg_tool
-    except Exception:  # pragma: no cover
-        from mcp.tool_export_ffmpeg import execute_export_ffmpeg_tool
-    return execute_export_ffmpeg_tool
 
 
 def _load_harvest_eval_case():
@@ -238,43 +204,6 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
         ),
         (
             AgentToolSpec(
-                name="agent_drama_generate",
-                description="Generate a drama script payload for Bananaflow agent.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "prompt": {"type": "string"},
-                        "task_mode": {"type": "string"},
-                        "episode_count": {"type": "integer", "minimum": 1, "maximum": 50},
-                        "existing_script": {"type": "string"},
-                    },
-                    "required": ["prompt"],
-                    "additionalProperties": False,
-                },
-                output_schema={
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string"},
-                        "summary": {"type": "string"},
-                        "model": {"type": "string"},
-                        "mode": {"type": "string"},
-                        "tool_version": {"type": "string"},
-                        "tool_hash": {"type": "string"},
-                    },
-                    "required": ["text", "summary", "model", "mode", "tool_version", "tool_hash"],
-                    "additionalProperties": True,
-                },
-                annotations={"readOnlyHint": True, "idempotentHint": False, "destructiveHint": False},
-                category="script",
-                timeout_seconds=60.0,
-                retry={"max_attempts": 1},
-                cost_level="medium",
-                tags=["drama", "script", "agent"],
-            ),
-            _handle_drama_generate,
-        ),
-        (
-            AgentToolSpec(
                 name="agent_storyboard_design",
                 description="Design a structured storyboard plan from a creative brief.",
                 aliases=["storyboard.design"],
@@ -288,6 +217,9 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
                         "shot_duration_sec": {"type": "number", "minimum": 0.5},
                         "language": {"type": "string"},
                         "constraints": {"type": "array", "items": {"type": "string"}},
+                        "script_table": {"type": "string"},
+                        "script_table_name": {"type": "string"},
+                        "script_rows": {"type": "array", "items": {"type": "object"}},
                     },
                     "required": ["brief"],
                     "additionalProperties": False,
@@ -333,44 +265,6 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
                 tags=["storyboard", "creative", "agent"],
             ),
             _handle_storyboard_design,
-        ),
-        (
-            AgentToolSpec(
-                name="agent_idea_script_generate",
-                description="Generate idea-script outputs through the existing orchestrator.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "product": {"type": "string"},
-                        "audience": {"type": "string"},
-                        "price_band": {"type": "string"},
-                        "conversion_goal": {"type": "string"},
-                        "primary_platform": {"type": "string"},
-                        "secondary_platform": {"type": "string"},
-                        "selected_angle": {"type": "string"},
-                    },
-                    "required": ["product"],
-                    "additionalProperties": False,
-                },
-                output_schema={
-                    "type": "object",
-                    "properties": {
-                        "topics": {"type": "array", "items": {"type": "object"}},
-                        "edit_plans": {"type": "array", "items": {"type": "object"}},
-                        "tool_version": {"type": "string"},
-                        "tool_hash": {"type": "string"},
-                    },
-                    "required": ["topics", "edit_plans", "tool_version", "tool_hash"],
-                    "additionalProperties": True,
-                },
-                annotations={"readOnlyHint": True, "idempotentHint": False, "destructiveHint": False},
-                category="script",
-                timeout_seconds=120.0,
-                retry={"max_attempts": 1},
-                cost_level="medium",
-                tags=["idea_script", "agent", "workflow"],
-            ),
-            _handle_idea_script_generate,
         ),
         (
             AgentToolSpec(
@@ -639,65 +533,6 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
         ),
         (
             AgentToolSpec(
-                name="export_ffmpeg_render_bundle",
-                description="Save an edit plan as an FFmpeg render bundle.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "plan_id": {"type": "string"},
-                        "plan": {"type": "object"},
-                        "out_dir": {"type": "string"},
-                        "resolution": {
-                            "type": "object",
-                            "properties": {
-                                "w": {"type": "integer", "minimum": 64},
-                                "h": {"type": "integer", "minimum": 64},
-                            },
-                            "required": ["w", "h"],
-                            "additionalProperties": False,
-                        },
-                        "fps": {"type": "integer", "minimum": 1, "maximum": 120},
-                    },
-                    "anyOf": [{"required": ["plan_id"]}, {"required": ["plan"]}],
-                    "additionalProperties": False,
-                },
-                output_schema={
-                    "type": "object",
-                    "properties": {
-                        "bundle_dir": {"type": "string"},
-                        "files": {"type": "array", "items": {"type": "string"}},
-                        "render_script_path": {"type": "string"},
-                        "concat_list_path": {"type": "string"},
-                        "edit_plan_path": {"type": "string"},
-                        "missing_primary_asset_count": {"type": "integer"},
-                        "warnings": {"type": "array", "items": {"type": "string"}},
-                        "tool_version": {"type": "string"},
-                        "tool_hash": {"type": "string"},
-                    },
-                    "required": [
-                        "bundle_dir",
-                        "files",
-                        "render_script_path",
-                        "concat_list_path",
-                        "edit_plan_path",
-                        "missing_primary_asset_count",
-                        "warnings",
-                        "tool_version",
-                        "tool_hash",
-                    ],
-                    "additionalProperties": True,
-                },
-                annotations={"readOnlyHint": False, "idempotentHint": True, "destructiveHint": False},
-                category="artifacts",
-                timeout_seconds=15.0,
-                retry={"max_attempts": 1},
-                cost_level="low",
-                tags=["artifact", "ffmpeg", "export"],
-            ),
-            _handle_export_ffmpeg_bundle,
-        ),
-        (
-            AgentToolSpec(
                 name="harvest_eval_case",
                 description="Harvest an eval case from an existing session.",
                 input_schema={
@@ -786,40 +621,6 @@ def _handle_prompt_polish(args: Dict[str, Any], context: AgentToolContext) -> Di
     }
 
 
-def _handle_drama_generate(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
-    AgentDramaRequest = _load_agent_drama_request()
-    DramaCreatorClient = _load_drama_creator_client()
-    req = AgentDramaRequest.model_validate(args)
-    client = DramaCreatorClient()
-    payload = client.generate(
-        prompt=str(req.prompt or "").strip(),
-        task_mode=str(req.task_mode or "").strip(),
-        episode_count=req.episode_count,
-        existing_script=str(req.existing_script or "").strip(),
-    )
-    return {
-        "text": str(payload.get("text") or "").strip(),
-        "summary": str(payload.get("summary") or "").strip(),
-        "model": str(payload.get("model") or client.model).strip(),
-        "mode": str(req.task_mode or "").strip(),
-    }
-
-
-def _handle_idea_script_generate(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
-    idea_script_orchestrator, IdeaScriptRequest = _load_idea_script_components()
-    req = IdeaScriptRequest.model_validate(args)
-    response = idea_script_orchestrator.run(
-        req,
-        session_id=context.session_id,
-        session_summary_present=context.session_summary_present,
-        tenant_id=context.tenant_id,
-        user_id=context.user_id,
-        trajectory_sink=context.trajectory_sink,
-        trace_sink=context.trace_sink,
-    )
-    return response.model_dump(mode="json")
-
-
 def _handle_asset_match(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
     execute_asset_match_tool = _load_asset_match_tool()
     return execute_asset_match_tool(arguments=args)
@@ -860,6 +661,19 @@ def _handle_retrieval_search_eval_cases(args: Dict[str, Any], context: AgentTool
 
 def _handle_storyboard_design(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
     design_storyboard = _load_storyboard_components()
+    script_table = str(args.get("script_table") or "").strip()
+    script_table_name = str(args.get("script_table_name") or "").strip()
+    script_rows = [dict(item or {}) for item in list(args.get("script_rows") or []) if isinstance(item, dict)]
+    if script_table and not script_rows:
+        # Parse failed: fall back to brief-only rather than raising 500.
+        # Coordinator may have passed a malformed/unrecognised table format.
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "storyboard_script_table_parse_failed: %s — falling back to brief-only",
+            script_table_name or "uploaded_script",
+        )
+        script_table = ""
+        script_table_name = ""
     plan = design_storyboard(
         brief=str(args.get("brief") or "").strip(),
         style=str(args.get("style") or "").strip(),
@@ -868,12 +682,19 @@ def _handle_storyboard_design(args: Dict[str, Any], context: AgentToolContext) -
         shot_duration_sec=float(args.get("shot_duration_sec") or 4.0),
         language=str(args.get("language") or "zh-CN").strip() or "zh-CN",
         constraints=[str(item).strip() for item in list(args.get("constraints") or []) if str(item).strip()],
+        script_table=script_table,
+        script_table_name=script_table_name,
+        script_rows=script_rows,
         trace_sink=context.trace_sink,
         req_id=context.req_id,
         run_id=str((context.extra or {}).get("run_id") or ""),
         authorization=str((context.extra or {}).get("member_authorization") or ""),
     )
-    return plan.model_dump(mode="json")
+    payload = plan.model_dump(mode="json")
+    payload["script_source"] = "script_table" if script_rows else "brief"
+    payload["script_row_count"] = len(script_rows)
+    payload["script_table_name"] = script_table_name
+    return payload
 
 
 def _handle_comfyui_text2img(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
@@ -939,11 +760,6 @@ def _handle_comfyui_rmbg(args: Dict[str, Any], context: AgentToolContext) -> Dic
         aspect_ratio=(str(args.get("aspect_ratio") or "").strip() or None),
     )
     return {"image": bytes_to_data_url(image_bytes)}
-
-
-def _handle_export_ffmpeg_bundle(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
-    execute_export_ffmpeg_tool = _load_export_tool()
-    return execute_export_ffmpeg_tool(arguments=args, plan_lookup=context.plan_lookup)
 
 
 def _handle_harvest_eval_case(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:

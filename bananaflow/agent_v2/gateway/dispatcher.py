@@ -8,6 +8,7 @@ from agent.tools import AgentToolContext, build_builtin_executor
 
 from agent_v2.canvas import run_canvas_planner
 from agent_v2.storyboard import build_storyboard_canvas_patch
+from storage.storyboard_tasks import create_storyboard_task
 
 from .schemas import AgentMessageRequest, CoordinatorDecision, CoordinatorStep
 
@@ -60,7 +61,11 @@ def dispatch_agent_message(
 
     if decision.action == "canvas_plan":
         trace_sink.append({"type": "AGENT_PLANNER_RUN", "mode": "canvas_plan", "req_id": req_id, "ok": None})
-        result = run_canvas_planner(req, request)
+        try:
+            result = run_canvas_planner(req, request)
+        except Exception as exc:
+            trace_sink.append({"type": "AGENT_PLANNER_RUN", "mode": "canvas_plan", "req_id": req_id, "ok": False, "error": str(exc)})
+            return {"action": "canvas_plan", "ok": False, "response_text": f"画布规划失败：{exc}", "data": {}}
         trace_sink.append({"type": "AGENT_PLANNER_RUN", "mode": "canvas_plan", "req_id": req_id, "ok": True})
         return {
             "action": "canvas_plan",
@@ -81,22 +86,48 @@ def dispatch_agent_message(
             return {"action": "answer_only", "response_text": str(payload.get("text") or "").strip(), "data": dict(payload)}
         if tool_name == "prompt.polish" and "prompt" not in tool_args:
             tool_args = {"prompt": str(req.message or "").strip(), "mode": str(req.mode or "text2img").strip() or "text2img"}
-        payload = _TOOL_EXECUTOR.execute(
-            tool_name,
-            tool_args,
-            context=AgentToolContext(
-                req_id=req_id,
-                trace_sink=trace_sink,
-                tenant_id=tenant_id,
-                user_id=user_id,
-                extra={"run_id": str(req.thread_id or req_id), "member_authorization": member_authorization},
-            ),
-        )
+        # Storyboard design is expensive (30–90s): run async and return a task_id immediately.
         if tool_name in {"storyboard.design", "agent_storyboard_design"}:
-            storyboard_patch = build_storyboard_canvas_patch(payload)
-            payload = {
-                **dict(payload),
-                "canvas_patch": storyboard_patch,
+            task_id = create_storyboard_task(thread_id=str(req.thread_id or ""))
+            trace_sink.append({"type": "STORYBOARD_ASYNC_STARTED", "task_id": task_id, "req_id": req_id})
+            # Embed canvas hints so background runner can compute node position.
+            hints = dict(req.canvas_node_hints or {})
+            enriched_tool_args = {
+                **tool_args,
+                "_existing_storyboard_count": int(hints.get("storyboard_count") or 0),
+            }
+            return {
+                "action": "tool_call",
+                "response_text": "分镜方案生成中，请稍候...",
+                "data": {
+                    "_async_storyboard": True,
+                    "task_id": task_id,
+                    "tool_args": enriched_tool_args,
+                    "authorization": member_authorization,
+                    "req_id": req_id,
+                    "thread_id": str(req.thread_id or ""),
+                },
+            }
+
+        try:
+            payload = _TOOL_EXECUTOR.execute(
+                tool_name,
+                tool_args,
+                context=AgentToolContext(
+                    req_id=req_id,
+                    trace_sink=trace_sink,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    extra={"run_id": str(req.thread_id or req_id), "member_authorization": member_authorization},
+                ),
+            )
+        except Exception as exc:
+            trace_sink.append({"type": "TOOL_ERROR", "tool_name": tool_name, "error": str(exc), "req_id": req_id})
+            return {
+                "action": "tool_call",
+                "ok": False,
+                "response_text": f"操作失败（{tool_name}）：{type(exc).__name__}: {exc}",
+                "data": {"tool_name": tool_name, "error": str(exc)},
             }
         response_text = str(decision.answer or "").strip()
         if not response_text and tool_name in {"prompt.polish", "agent_chitchat"}:

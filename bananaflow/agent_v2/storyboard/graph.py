@@ -19,6 +19,9 @@ from .validator import estimate_duration, validate_storyboard_payload
 
 class StoryboardGraphState(TypedDict, total=False):
     brief: str
+    script_table: str
+    script_table_name: str
+    script_rows: List[Dict[str, str]]
     style: str
     aspect_ratio: str
     target_duration_sec: float

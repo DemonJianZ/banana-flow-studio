@@ -10,11 +10,6 @@ from .tool_asset_match import (
     MATCH_ASSETS_TOOL_NAME,
     MATCH_ASSETS_TOOL_VERSION,
 )
-from .tool_export_ffmpeg import (
-    EXPORT_FFMPEG_TOOL_HASH,
-    EXPORT_FFMPEG_TOOL_NAME,
-    EXPORT_FFMPEG_TOOL_VERSION,
-)
 
 
 @dataclass(frozen=True)
@@ -37,13 +32,6 @@ class MCPToolPinStore:
     @classmethod
     def from_env(cls) -> "MCPToolPinStore":
         default_pins = {
-            EXPORT_FFMPEG_TOOL_NAME: MCPToolPin(
-                name=EXPORT_FFMPEG_TOOL_NAME,
-                tool_version=(os.getenv("BANANAFLOW_MCP_EXPORT_FFMPEG_TOOL_VERSION") or "").strip()
-                or EXPORT_FFMPEG_TOOL_VERSION,
-                tool_hash=(os.getenv("BANANAFLOW_MCP_EXPORT_FFMPEG_TOOL_HASH") or "").strip()
-                or EXPORT_FFMPEG_TOOL_HASH,
-            ),
             MATCH_ASSETS_TOOL_NAME: MCPToolPin(
                 name=MATCH_ASSETS_TOOL_NAME,
                 tool_version=(os.getenv("BANANAFLOW_MCP_MATCH_ASSETS_TOOL_VERSION") or "").strip()

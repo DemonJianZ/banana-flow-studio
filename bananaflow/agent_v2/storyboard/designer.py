@@ -279,16 +279,27 @@ def default_storyboard_llm_generate(
         )
 
 
-def build_storyboard_canvas_patch(plan: StoryboardPlan | Dict[str, Any], *, title: Optional[str] = None) -> Dict[str, Any]:
+_STORYBOARD_NODE_X_ORIGIN = 120
+_STORYBOARD_NODE_X_STEP = 340
+
+
+def build_storyboard_canvas_patch(
+    plan: StoryboardPlan | Dict[str, Any],
+    *,
+    title: Optional[str] = None,
+    existing_storyboard_count: int = 0,
+) -> Dict[str, Any]:
     payload = plan.model_dump(mode="json") if isinstance(plan, StoryboardPlan) else dict(plan or {})
     plan_title = str(title or payload.get("title") or "Storyboard Plan").strip() or "Storyboard Plan"
     node_id = f"storyboard_plan_{uuid.uuid4().hex[:10]}"
+    scene_count = len(list(payload.get("scenes") or []))
+    shot_count = sum(len(list(s.get("shots") or [])) for s in list(payload.get("scenes") or []))
     summary_lines = [
         f"# {plan_title}",
         f"风格：{str(payload.get('style') or '-').strip() or '-'}",
         f"比例：{str(payload.get('aspect_ratio') or '16:9').strip() or '16:9'}",
-        f"目标时长：{payload.get('target_duration_sec')}",
-        f"预计时长：{payload.get('estimated_duration_sec')}",
+        f"目标时长：{payload.get('target_duration_sec')}s  预计：{payload.get('estimated_duration_sec')}s",
+        f"场景：{scene_count} 个  分镜：{shot_count} 个",
         "",
     ]
     for scene in list(payload.get("scenes") or []):
@@ -297,6 +308,8 @@ def build_storyboard_canvas_patch(plan: StoryboardPlan | Dict[str, Any], *, titl
             summary_lines.append(
                 f"- 镜头 {shot.get('shot_no')} ({shot.get('duration_sec')}s): {str(shot.get('visual_description') or '').strip()}"
             )
+    # Offset horizontally so consecutive storyboard nodes don't overlap.
+    x_pos = _STORYBOARD_NODE_X_ORIGIN + max(0, int(existing_storyboard_count)) * _STORYBOARD_NODE_X_STEP
     return {
         "patch": [
             {
@@ -304,10 +317,10 @@ def build_storyboard_canvas_patch(plan: StoryboardPlan | Dict[str, Any], *, titl
                 "node": {
                     "id": node_id,
                     "type": "storyboard_plan",
-                    "x": 120,
+                    "x": x_pos,
                     "y": 120,
                     "data": {
-                        "title": "Storyboard Plan",
+                        "title": plan_title,
                         "text": "\n".join(summary_lines).strip(),
                         "node_kind": "storyboard_plan",
                         "storyboard_plan": payload,
@@ -315,13 +328,16 @@ def build_storyboard_canvas_patch(plan: StoryboardPlan | Dict[str, Any], *, titl
                 },
             }
         ],
-        "summary": "Created storyboard_plan canvas node.",
+        "summary": f"已生成分镜方案：{plan_title}（{scene_count} 场景 {shot_count} 分镜）",
     }
 
 
 def build_stage_input(state: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "brief": state.get("brief") or "",
+        "script_table": state.get("script_table") or "",
+        "script_table_name": state.get("script_table_name") or "",
+        "script_rows": list(state.get("script_rows") or []),
         "style": state.get("style") or "",
         "aspect_ratio": state.get("aspect_ratio") or "16:9",
         "target_duration_sec": state.get("target_duration_sec") or 30.0,
@@ -361,6 +377,9 @@ def design_storyboard(
     shot_duration_sec: float = 4.0,
     language: str = "zh-CN",
     constraints: Optional[list[str]] = None,
+    script_table: str = "",
+    script_table_name: str = "",
+    script_rows: Optional[list[Dict[str, Any]]] = None,
     trace_sink: Optional[list[Dict[str, Any]]] = None,
     llm_generate: Optional[Callable[[str, str], Dict[str, Any]]] = None,
     req_id: str = "storyboard",
@@ -369,11 +388,16 @@ def design_storyboard(
 ) -> StoryboardPlan:
     if not str(brief or "").strip():
         raise ValueError("storyboard_brief_required")
+    normalized_script_table = str(script_table or "").strip()
+    normalized_script_rows = [dict(item or {}) for item in list(script_rows or []) if isinstance(item, dict)]
     from .graph import run_storyboard_graph
 
     final_state = run_storyboard_graph(
         {
             "brief": str(brief or "").strip(),
+            "script_table": normalized_script_table,
+            "script_table_name": str(script_table_name or "").strip(),
+            "script_rows": normalized_script_rows,
             "style": str(style or "").strip(),
             "aspect_ratio": str(aspect_ratio or "16:9").strip() or "16:9",
             "target_duration_sec": float(target_duration_sec or 30.0),

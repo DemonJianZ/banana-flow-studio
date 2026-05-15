@@ -55,6 +55,10 @@ class AgentMessageRequest(BaseModel):
     task_mode: Optional[str] = None
     episode_count: Optional[int] = None
     existing_script: Optional[str] = None
+    uploaded_documents: List[Dict[str, Any]] = Field(default_factory=list)
+
+    # Hints from the frontend canvas state, used to position new nodes without overlap.
+    canvas_node_hints: Optional[Dict[str, Any]] = None
 
 
 class AgentMessageResponse(BaseModel):

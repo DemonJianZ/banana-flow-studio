@@ -86,7 +86,22 @@ def _clean_entity_name(name: Any) -> str:
     text = str(name or "").strip()
     if not text:
         return ""
-    return re.sub(r"\s*\([^)]*\)\s*$", "", text).strip()
+    return re.sub(r"\s*(?:\([^)]*\)|（[^）]*）)\s*$", "", text).strip()
+
+
+def _expand_alias_texts(value: Any) -> List[str]:
+    text = _clean_entity_name(value)
+    if not text:
+        return []
+    aliases: List[str] = [text]
+    normalized_location = _normalize_location_name(text)
+    if normalized_location and normalized_location not in aliases:
+        aliases.append(normalized_location)
+    for part in re.split(r"[\/|｜、，,；;]+", text):
+        candidate = _clean_entity_name(part)
+        if candidate and candidate not in aliases:
+            aliases.append(candidate)
+    return aliases
 
 
 def _canonical_lookup_key(value: Any) -> str:
@@ -102,6 +117,51 @@ def _normalize_compare_text(value: Any) -> str:
 def _description_fingerprint(*values: Any) -> str:
     text = " ".join(str(value or "").strip() for value in values if str(value or "").strip())
     return _normalize_compare_text(text)
+
+
+def _strip_entity_mentions_from_location_text(text: Any, entity_names: set[str]) -> str:
+    source = str(text or "").strip()
+    if not source:
+        return ""
+    cleaned = source
+    for name in sorted((item for item in entity_names if str(item or "").strip()), key=len, reverse=True):
+        escaped = re.escape(str(name))
+        cleaned = re.sub(escaped, "", cleaned)
+    cleaned = re.sub(r"[，,、 ]{2,}", "，", cleaned)
+    cleaned = re.sub(r"^[，,、\s]+|[，,、\s]+$", "", cleaned)
+    cleaned = re.sub(r"。{2,}", "。", cleaned)
+    return cleaned.strip()
+
+
+def _normalize_location_name(value: Any) -> str:
+    text = _clean_entity_name(value)
+    if not text:
+        return ""
+    text = re.sub(r"[（(][^）)]*(主场景|场景|空间|区域|环境)[^）)]*[）)]", "", text).strip()
+    text = re.sub(r"\s+", "", text)
+    return text.strip("，,、 ")
+
+
+def _normalize_scene_title(value: Any, location: Any) -> str:
+    title = _clean_entity_name(value)
+    normalized_location = _normalize_location_name(location)
+    if not title:
+        return normalized_location or ""
+    if _scene_title_has_action_semantics(title, normalized_location or location) or _scene_title_location_mismatch(
+        title, normalized_location or location
+    ):
+        return normalized_location or title
+    return title
+
+
+def _normalize_entity_reference(value: Any) -> str:
+    if isinstance(value, dict):
+        return _clean_entity_name(value.get("name") or value.get("entity_id") or "")
+    text = _clean_entity_name(value)
+    if not text:
+        return ""
+    aliases = _expand_alias_texts(text)
+    return aliases[0] if aliases else text
 
 
 def _trim_scene_title_remainder(value: str) -> str:
@@ -369,8 +429,14 @@ def _normalize_shot(
     except Exception:
         duration_sec = float(shot_duration_sec or 4.0)
     referenced_entities = []
-    for ref in _string_list(data.get("referenced_entities") or []):
-        canonical_ref = entity_alias_map.get(_canonical_lookup_key(ref), ref)
+    for raw_ref in list(data.get("referenced_entities") or []):
+        ref = _normalize_entity_reference(raw_ref)
+        canonical_ref = ref
+        for alias in _expand_alias_texts(ref):
+            mapped = entity_alias_map.get(_canonical_lookup_key(alias))
+            if mapped:
+                canonical_ref = mapped
+                break
         if canonical_ref:
             referenced_entities.append(canonical_ref)
     return {
@@ -403,12 +469,14 @@ def _normalize_scene_with_locations(
     scene_id = str(data.get("scene_id") or f"scene_{scene_index}").strip() or f"scene_{scene_index}"
     raw_location = str(data.get("location") or "").strip()
     canonical_location = location_alias_map.get(_canonical_lookup_key(raw_location), raw_location)
+    normalized_location = _normalize_location_name(canonical_location) or canonical_location.strip()
+    normalized_title = _normalize_scene_title(data.get("title") or f"Scene {scene_index}", normalized_location)
     return {
         "scene_id": scene_id,
         "scene_no": int(data.get("scene_no") or scene_index),
-        "title": str(data.get("title") or f"Scene {scene_index}").strip() or f"Scene {scene_index}",
+        "title": normalized_title or f"Scene {scene_index}",
         "summary": str(data.get("summary") or "").strip(),
-        "location": canonical_location.strip(),
+        "location": normalized_location.strip(),
         "objective": str(data.get("objective") or "").strip(),
         "shots": [
             _normalize_shot(
@@ -435,14 +503,15 @@ def validate_storyboard_plan(
         errors.append("at_least_one_scene_required")
 
     entity_names = {
-        str(item.name or "").strip()
+        alias
         for group in (
             list(plan.entities.characters or []),
             list(plan.entities.subjects or []),
             list(plan.entities.locations or []),
         )
         for item in group
-        if str(item.name or "").strip()
+        for alias in _expand_alias_texts(item.name)
+        if alias
     }
     entity_ids = {
         str(item.entity_id or "").strip()
@@ -455,9 +524,10 @@ def validate_storyboard_plan(
         if str(item.entity_id or "").strip()
     }
     location_names = {
-        str(item.name or "").strip()
+        alias
         for item in list(plan.entities.locations or [])
-        if str(item.name or "").strip()
+        for alias in _expand_alias_texts(item.name)
+        if alias
     }
     location_ids = {
         str(item.entity_id or "").strip()
@@ -469,13 +539,14 @@ def validate_storyboard_plan(
     location_description_fingerprints: Dict[str, str] = {}
     scene_locations_seen: Dict[str, str] = {}
     character_subject_names = {
-        str(item.name or "").strip()
+        alias
         for group in (
             list(plan.entities.characters or []),
             list(plan.entities.subjects or []),
         )
         for item in group
-        if str(item.name or "").strip()
+        for alias in _expand_alias_texts(item.name)
+        if alias
     }
 
     for scene in list(plan.scenes or []):
@@ -570,17 +641,32 @@ def coerce_storyboard_plan_payload(
         for entity in list((data.get("entities") or {}).get(group) or []):
             entity_name = str(entity.get("name") or "").strip()
             entity_id = str(entity.get("entity_id") or "").strip()
-            if entity_name:
-                entity_alias_map[_canonical_lookup_key(entity_name)] = entity_name
+            for alias in _expand_alias_texts(entity_name):
+                entity_alias_map[_canonical_lookup_key(alias)] = entity_name
             if entity_id and entity_name:
                 entity_alias_map[_canonical_lookup_key(entity_id)] = entity_name
     for location in list((data.get("entities") or {}).get("locations") or []):
         location_name = str(location.get("name") or "").strip()
         location_id = str(location.get("entity_id") or "").strip()
-        if location_name:
-            location_alias_map[_canonical_lookup_key(location_name)] = location_name
+        for alias in _expand_alias_texts(location_name):
+            location_alias_map[_canonical_lookup_key(alias)] = location_name
         if location_id and location_name:
             location_alias_map[_canonical_lookup_key(location_id)] = location_name
+    character_subject_names = {
+        str(entity.get("name") or "").strip()
+        for group in ("characters", "subjects")
+        for entity in list((data.get("entities") or {}).get(group) or [])
+        if str(entity.get("name") or "").strip()
+    }
+    for location in list((data.get("entities") or {}).get("locations") or []):
+        location["core_description"] = _strip_entity_mentions_from_location_text(
+            location.get("core_description") or "",
+            character_subject_names,
+        )
+        location["description"] = _strip_entity_mentions_from_location_text(
+            location.get("description") or "",
+            character_subject_names,
+        )
     data["aspect_ratio"] = str(data.get("aspect_ratio") or aspect_ratio or "16:9").strip() or "16:9"
     data["style"] = str(data.get("style") or style or "").strip()
     data["target_duration_sec"] = float(data.get("target_duration_sec") or target_duration_sec or 30.0)
@@ -597,6 +683,14 @@ def coerce_storyboard_plan_payload(
         )
         for index, scene in enumerate(list(data.get("scenes") or []), start=1)
     ]
+    estimated_total = 0.0
+    for scene in list(data.get("scenes") or []):
+        for shot in list((scene or {}).get("shots") or []):
+            try:
+                estimated_total += float((shot or {}).get("duration_sec") or 0.0)
+            except Exception:
+                pass
+    data["estimated_duration_sec"] = round(estimated_total, 3) if estimated_total > 0 else float(target_duration_sec or 30.0)
     data["warnings"] = list(data.get("warnings") or []) + list(warnings or [])
     return data
 

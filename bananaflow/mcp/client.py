@@ -9,11 +9,6 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from .tool_export_ffmpeg import (
-    EXPORT_FFMPEG_TOOL_HASH,
-    EXPORT_FFMPEG_TOOL_NAME,
-    EXPORT_FFMPEG_TOOL_VERSION,
-)
 from .tool_asset_match import (
     MATCH_ASSETS_TOOL_HASH,
     MATCH_ASSETS_TOOL_NAME,
@@ -38,7 +33,7 @@ class MCPStdioClient:
     def __init__(
         self,
         server_cmd: Optional[list[str]] = None,
-        server_module: str = "bananaflow.mcp.server_export_ffmpeg",
+        server_module: str = "bananaflow.mcp.server_asset_match",
         timeout_sec: float = 30.0,
         cwd: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
@@ -52,17 +47,6 @@ class MCPStdioClient:
         self._stderr_thread: Optional[threading.Thread] = None
         self._id = 1
         self._allowlist = {
-            EXPORT_FFMPEG_TOOL_NAME: MCPToolPin(
-                name=EXPORT_FFMPEG_TOOL_NAME,
-                tool_version=self._pin_from_env(
-                    "BANANAFLOW_MCP_EXPORT_FFMPEG_TOOL_VERSION",
-                    EXPORT_FFMPEG_TOOL_VERSION,
-                ),
-                tool_hash=self._pin_from_env(
-                    "BANANAFLOW_MCP_EXPORT_FFMPEG_TOOL_HASH",
-                    EXPORT_FFMPEG_TOOL_HASH,
-                ),
-            ),
             MATCH_ASSETS_TOOL_NAME: MCPToolPin(
                 name=MATCH_ASSETS_TOOL_NAME,
                 tool_version=self._pin_from_env(
@@ -200,9 +184,6 @@ class MCPStdioClient:
 
     def call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return self.request("tools/call", {"name": name, "arguments": arguments or {}})
-
-    def call_export_ffmpeg_render_bundle(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        return self._call_tool_with_pin(EXPORT_FFMPEG_TOOL_NAME, arguments)
 
     def call_match_assets_for_shots(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return self._call_tool_with_pin(MATCH_ASSETS_TOOL_NAME, arguments)

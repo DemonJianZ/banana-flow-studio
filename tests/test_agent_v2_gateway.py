@@ -95,6 +95,29 @@ class AgentV2GatewayTests(unittest.TestCase):
         self.assertEqual(decision.tool_args["style"], "黑色电影风格")
         self.assertEqual(decision.tool_args["target_duration_sec"], 48.0)
 
+    def test_coordinator_should_promote_pasted_storyboard_script_table_to_storyboard_tool(self):
+        llm_decision = CoordinatorDecision(
+            action="answer_only",
+            reason="llm_missed_table_intent",
+            confidence=0.42,
+            answer="我可以帮你分析这份内容。",
+        )
+        with mock.patch("bananaflow.agent_v2.gateway.coordinator._coordinate_with_llm", return_value=llm_decision):
+            decision = coordinate_agent_message(
+                AgentMessageRequest(
+                    message=(
+                        "镜号,固定/运动,景别,画面内容,台词,音效/BGM,时长\n"
+                        "1,固定,特写,白天庭院樱花树下，辰辰抬手,辰辰：秋水，节奏跟上。,鸟鸣、风声,5s\n"
+                        "2,固定,中景,秋水被法力控制，表情僵硬,,,4s\n"
+                    )
+                )
+            )
+        self.assertEqual(decision.action, "tool_call")
+        self.assertEqual(decision.tool_name, "storyboard.design")
+        self.assertEqual(decision.matched_rule, "guard.storyboard_script_message")
+        self.assertEqual(decision.tool_args["script_table_name"], "pasted_storyboard_script.txt")
+        self.assertEqual(len(decision.tool_args["script_rows"]), 2)
+
     def test_coordinator_should_use_ai_chat_client_when_authorization_exists(self):
         fake_response = types.SimpleNamespace(text='{"action":"answer_only","reason":"member_ai","confidence":0.9,"answer":"你好"}')
         with mock.patch("bananaflow.agent_v2.gateway.coordinator._load_ai_chat_text_client", return_value=mock.Mock(return_value=fake_response)) as loader:
@@ -121,6 +144,60 @@ class AgentV2GatewayTests(unittest.TestCase):
         self.assertEqual(decision.action, "canvas_plan")
         self.assertEqual(decision.matched_rule, "selection.storyboard_edit")
         self.assertTrue(decision.forced)
+
+    def test_coordinator_should_route_uploaded_storyboard_script_table_to_storyboard_tool(self):
+        decision = coordinate_agent_message(
+            AgentMessageRequest(
+                message="请整理成故事板",
+                uploaded_documents=[
+                    {
+                        "name": "shots.csv",
+                        "kind": "storyboard_script_table",
+                        "text_content": "镜号,固定/运动,景别,画面内容,台词,音效/BGM,时长\n1,固定,特写,白天庭院里辰辰抬手,辰辰：秋水，节奏跟上。,鸟鸣风声,5s",
+                    }
+                ],
+            )
+        )
+        self.assertEqual(decision.action, "tool_call")
+        self.assertEqual(decision.tool_name, "storyboard.design")
+        self.assertEqual(decision.matched_rule, "attachment.storyboard_script_table")
+        self.assertTrue(decision.forced)
+        self.assertEqual(decision.tool_args["script_table_name"], "shots.csv")
+        self.assertTrue(len(decision.tool_args["script_rows"]) >= 1)
+
+    def test_coordinator_should_detect_english_csv_headers_as_storyboard_script_table(self):
+        decision = coordinate_agent_message(
+            AgentMessageRequest(
+                message="请整理成故事板",
+                uploaded_documents=[
+                    {
+                        "name": "storyboard_shots.csv",
+                        "kind": "document",
+                        "text_content": "shot_no,camera_motion,shot_size,visual_content,dialogue,sound,duration,reference\n1,fixed,close-up,Chencheng raises a hand,,birds,5s,\n",
+                    }
+                ],
+            )
+        )
+        self.assertEqual(decision.action, "tool_call")
+        self.assertEqual(decision.tool_name, "storyboard.design")
+        self.assertEqual(decision.matched_rule, "attachment.storyboard_script_table")
+
+    def test_storyboard_args_should_not_mix_old_recent_messages_when_script_table_exists(self):
+        decision = coordinate_agent_message(
+            AgentMessageRequest(
+                message="请按这份分镜头脚本整理成故事板",
+                recent_messages=[{"role": "user", "text": "帮我做一个雨夜暗巷猫薄荷接头分镜"}],
+                uploaded_documents=[
+                    {
+                        "name": "storyboard_shots.csv",
+                        "kind": "storyboard_script_table",
+                        "text_content": "镜号,固定/运动,景别,画面内容,台词,音效/BGM,时长\n1,固定,特写,白天庭院里辰辰抬手,辰辰：秋水，节奏跟上。,鸟鸣、风声,5s",
+                    }
+                ],
+            )
+        )
+        self.assertEqual(decision.tool_name, "storyboard.design")
+        self.assertEqual(decision.tool_args["brief"], "请按这份分镜头脚本整理成故事板")
 
     def test_selected_artifact_summary_should_include_storyboard_selection_meta(self):
         summary = summarize_selected_artifact(

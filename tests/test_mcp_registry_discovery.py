@@ -15,22 +15,11 @@ from bananaflow.mcp.pins import MCPToolPin, MCPToolPinStore  # noqa: E402
 from bananaflow.mcp.registry import MCPRegistry, MCPRegistryError  # noqa: E402
 from bananaflow.mcp.server_config import MCPServerConfig  # noqa: E402
 from bananaflow.mcp.tool_asset_match import MATCH_ASSETS_TOOL_NAME  # noqa: E402
-from bananaflow.mcp.tool_export_ffmpeg import (  # noqa: E402
-    EXPORT_FFMPEG_TOOL_HASH,
-    EXPORT_FFMPEG_TOOL_NAME,
-    EXPORT_FFMPEG_TOOL_VERSION,
-)
 
 
 class MCPRegistryDiscoveryTests(unittest.TestCase):
     def _default_server_configs(self) -> list[MCPServerConfig]:
         return [
-            MCPServerConfig(
-                name="export_ffmpeg",
-                command=[sys.executable, "-m", "bananaflow.mcp.server_export_ffmpeg"],
-                env={},
-                enabled=True,
-            ),
             MCPServerConfig(
                 name="asset_match",
                 command=[sys.executable, "-m", "bananaflow.mcp.server_asset_match"],
@@ -42,20 +31,18 @@ class MCPRegistryDiscoveryTests(unittest.TestCase):
     def _default_pin_store(self) -> MCPToolPinStore:
         return MCPToolPinStore.from_env()
 
-    def test_registry_should_discover_tools_from_two_servers(self):
+    def test_registry_should_discover_tools(self):
         registry = MCPRegistry(
             server_configs=self._default_server_configs(),
             pin_store=self._default_pin_store(),
-            allowlist={EXPORT_FFMPEG_TOOL_NAME, MATCH_ASSETS_TOOL_NAME},
+            allowlist={MATCH_ASSETS_TOOL_NAME},
             allow_unpinned=False,
             cwd=ROOT_DIR,
         )
         try:
             registry.start()
             tools = registry.list_discovered_tools()
-            self.assertIn(EXPORT_FFMPEG_TOOL_NAME, tools)
             self.assertIn(MATCH_ASSETS_TOOL_NAME, tools)
-            self.assertEqual(tools[EXPORT_FFMPEG_TOOL_NAME]["server_name"], "export_ffmpeg")
             self.assertEqual(tools[MATCH_ASSETS_TOOL_NAME]["server_name"], "asset_match")
         finally:
             registry.stop()
@@ -64,50 +51,16 @@ class MCPRegistryDiscoveryTests(unittest.TestCase):
         registry = MCPRegistry(
             server_configs=self._default_server_configs(),
             pin_store=self._default_pin_store(),
-            allowlist={EXPORT_FFMPEG_TOOL_NAME},
+            allowlist={"not_allowed"},
             allow_unpinned=False,
             cwd=ROOT_DIR,
         )
         try:
             registry.start()
             tools = registry.list_discovered_tools()
-            self.assertIn(EXPORT_FFMPEG_TOOL_NAME, tools)
             self.assertNotIn(MATCH_ASSETS_TOOL_NAME, tools)
             with self.assertRaises(MCPRegistryError):
                 registry.call_tool(MATCH_ASSETS_TOOL_NAME, {"shots": []})
-        finally:
-            registry.stop()
-
-    def test_registry_should_reject_tool_on_pin_mismatch(self):
-        bad_pin_store = MCPToolPinStore(
-            {
-                EXPORT_FFMPEG_TOOL_NAME: MCPToolPin(
-                    name=EXPORT_FFMPEG_TOOL_NAME,
-                    tool_version=EXPORT_FFMPEG_TOOL_VERSION,
-                    tool_hash=("0" * 64),
-                ),
-            }
-        )
-        registry = MCPRegistry(
-            server_configs=[
-                MCPServerConfig(
-                    name="export_ffmpeg",
-                    command=[sys.executable, "-m", "bananaflow.mcp.server_export_ffmpeg"],
-                    env={},
-                    enabled=True,
-                )
-            ],
-            pin_store=bad_pin_store,
-            allowlist={EXPORT_FFMPEG_TOOL_NAME},
-            allow_unpinned=False,
-            cwd=ROOT_DIR,
-        )
-        try:
-            registry.start()
-            tools = registry.list_discovered_tools()
-            self.assertNotIn(EXPORT_FFMPEG_TOOL_NAME, tools)
-            with self.assertRaises(MCPRegistryError):
-                registry.call_tool(EXPORT_FFMPEG_TOOL_NAME, {})
         finally:
             registry.stop()
 

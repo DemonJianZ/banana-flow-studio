@@ -85,6 +85,7 @@ import {
   runVideoLineartTask,
   runVideoRmbgTask,
   sendAgentMessage,
+  pollStoryboardTask,
 } from "../api/agentCanvas";
 import {
   listPreferences as listMemoryPreferences,
@@ -135,6 +136,8 @@ const MEDIA_UPLOAD_NODE_EMPTY_HEIGHT = 132;
 const CANVAS_KEY = "bananaflow_canvas_id";
 const AGENT_SESSION_STORE_KEY = "bananaflow_agent_canvas_sessions_v1";
 const ASSET_LIBRARY_STORE_KEY = "bananaflow_asset_library_v1";
+const AGENT_COMPOSER_FILE_ACCEPT = "image/*,.csv,.tsv,.txt,.md,.markdown,text/plain,text/csv,text/markdown";
+const AGENT_DOCUMENT_MAX_BYTES = 1024 * 1024;
 const AGENT_RUN_STEPS = [
   "推断受众",
   "生成脚本",
@@ -218,6 +221,80 @@ const HITL_FEEDBACK_REASON_OPTIONS = [
 ];
 const EMPTY_LIST = Object.freeze([]);
 const VIDEO_GEN_INPUT_HANDLE_MAIN = "main";
+
+const isAgentComposerDocumentFile = (file) => {
+  const name = String(file?.name || "").trim().toLowerCase();
+  const type = String(file?.type || "").trim().toLowerCase();
+  return Boolean(
+    name.endsWith(".csv") ||
+      name.endsWith(".tsv") ||
+      name.endsWith(".txt") ||
+      name.endsWith(".md") ||
+      name.endsWith(".markdown") ||
+      type.startsWith("text/") ||
+      type === "application/csv" ||
+      type === "text/csv"
+  );
+};
+
+const looksLikeStoryboardScriptTableText = (text) => {
+  const normalized = String(text || "").trim();
+  if (!normalized) return false;
+  const lowered = normalized.toLowerCase();
+  return (
+    (normalized.includes("镜号") && normalized.includes("画面内容")) ||
+    (lowered.includes("shot") && lowered.includes("visual")) ||
+    (lowered.includes("shot_no") && lowered.includes("dialogue")) ||
+    (lowered.includes("shot number") && lowered.includes("duration"))
+  );
+};
+
+const looksLikeStoryboardScriptTableFile = (fileName, text) => {
+  const name = String(fileName || "").trim().toLowerCase();
+  if (name.endsWith(".csv") || name.endsWith(".tsv")) {
+    if (name.includes("storyboard") || name.includes("shot") || name.includes("scene") || name.includes("分镜") || name.includes("镜头")) {
+      return true;
+    }
+  }
+  return looksLikeStoryboardScriptTableText(text);
+};
+
+const scoreDecodedStoryboardText = (text) => {
+  const source = String(text || "");
+  if (!source) return -1_000_000;
+  let score = 0;
+  const replacementCount = (source.match(/�/g) || []).length;
+  const cjkCount = (source.match(/[\u4e00-\u9fff]/g) || []).length;
+  score -= replacementCount * 50;
+  score += cjkCount * 2;
+  if (looksLikeStoryboardScriptTableText(source)) score += 500;
+  if (source.includes("镜号")) score += 200;
+  if (source.includes("画面内容")) score += 200;
+  if (source.includes("台词")) score += 80;
+  if (source.includes("音效")) score += 80;
+  if (source.includes("时长")) score += 80;
+  return score;
+};
+
+const decodeStoryboardDocumentBuffer = (buffer) => {
+  const bytes = buffer instanceof ArrayBuffer ? buffer : new ArrayBuffer(0);
+  const encodingCandidates = ["utf-8", "gb18030", "gbk"];
+  let bestText = "";
+  let bestScore = -Infinity;
+  for (const encoding of encodingCandidates) {
+    try {
+      const decoded = new TextDecoder(encoding, { fatal: false }).decode(bytes);
+      const score = scoreDecodedStoryboardText(decoded);
+      if (score > bestScore) {
+        bestScore = score;
+        bestText = decoded;
+      }
+    } catch (error) {
+      // ignore decoder unsupported/runtime errors
+    }
+  }
+  return String(bestText || "").trim();
+};
 const VIDEO_GEN_INPUT_HANDLE_LAST_FRAME = "last_frame";
 
 const normalizeConnectionTargetHandle = (handle) =>
@@ -984,6 +1061,68 @@ const buildStoryboardAssetGenerationPrompt = (assetType, asset, storyboardPlan =
     return `请生成一张故事板主体设定图，主体为${name}。主体描述：${detail || name}。要求：只表现该主体本身，突出材质、结构、颜色和关键细节，不加入无关角色；适合作为后续镜头统一参考，风格保持${style || "故事板原始风格"}，比例${aspectRatio}。`;
   }
   return `请生成一张故事板场景设定图，场景为${name}。场景描述：${detail || name}。要求：只表现环境本身，不加入角色动作和剧情事件；重点体现空间结构、光线、材质、空气、水迹、反射和整体氛围；适合作为后续镜头统一参考，风格保持${style || "故事板原始风格"}，比例${aspectRatio}。`;
+};
+
+const normalizeStoryboardAssetCandidates = (value) => {
+  if (!Array.isArray(value)) return EMPTY_LIST;
+  return value
+    .map((item, index) => {
+      if (typeof item === "string") {
+        const url = String(item || "").trim();
+        if (!url) return null;
+        return {
+          id: `candidate_${index}_${Math.random().toString(36).slice(2, 8)}`,
+          url,
+          createdAt: Date.now(),
+          source: "legacy",
+          prompt: "",
+          instruction: "",
+        };
+      }
+      const url = String(item?.url || item?.image || "").trim();
+      if (!url) return null;
+      return {
+        id: String(item?.id || `candidate_${index}_${Math.random().toString(36).slice(2, 8)}`).trim(),
+        url,
+        createdAt: Number(item?.createdAt || Date.now()),
+        source: String(item?.source || "generate").trim() || "generate",
+        prompt: String(item?.prompt || "").trim(),
+        instruction: String(item?.instruction || "").trim(),
+      };
+    })
+    .filter(Boolean);
+};
+
+const resolveStoryboardAssetPrimaryImage = (assetState = {}) => {
+  const lockedImageUrl = String(assetState?.lockedImageUrl || "").trim();
+  if (lockedImageUrl) return lockedImageUrl;
+  const selectedImageUrl = String(assetState?.selectedImageUrl || "").trim();
+  if (selectedImageUrl) return selectedImageUrl;
+  const candidates = normalizeStoryboardAssetCandidates(assetState?.candidates);
+  if (candidates.length) return String(candidates[0]?.url || "").trim();
+  const images = Array.isArray(assetState?.images) ? assetState.images.map((item) => String(item || "").trim()).filter(Boolean) : EMPTY_LIST;
+  return images[0] || "";
+};
+
+const buildStoryboardAssetEditPrompt = ({
+  assetType,
+  asset,
+  storyboardPlan = {},
+  instruction = "",
+  referenceImageUrl = "",
+}) => {
+  const basePrompt = buildStoryboardAssetGenerationPrompt(assetType, asset, storyboardPlan);
+  const cleanInstruction = String(instruction || "").trim();
+  if (!cleanInstruction) return basePrompt;
+  const name = stripStoryboardDisplayIds(asset?.name || "");
+  const referenceHint = referenceImageUrl ? "请基于所附参考图继续修改，保持同一主体身份与整体设计连续性。" : "请基于现有设定继续细化，不要偏离原主体。";
+  if (assetType === "characters") {
+    return `${basePrompt}\n${referenceHint}\n仅按以下要求调整该角色，不要改成其他角色，也不要引入新的无关角色或背景事件：${cleanInstruction}`;
+  }
+  if (assetType === "subjects") {
+    return `${basePrompt}\n${referenceHint}\n仅按以下要求调整主体 ${name} 的材质、结构、细节或质感，不要替换成其他物件：${cleanInstruction}`;
+  }
+  return `${basePrompt}\n${referenceHint}\n仅按以下要求调整场景 ${name} 的环境光线、材质、天气、色调或氛围，不要加入角色动作与剧情：${cleanInstruction}`;
 };
 
 const PersonaMentionTextarea = React.forwardRef(({
@@ -8651,6 +8790,8 @@ const Workbench = () => {
         x,
         y,
         sticky: false,
+        tweakText: "",
+        customPrompt: "",
       });
     },
     [resolveStoryboardAssetForMention],
@@ -10373,7 +10514,7 @@ const handleNodeMouseDown = (e, nid) => {
   }, [defaultImageModelId, defaultVideoModelId, pushHistory]);
 
   const updateStoryboardAssetStatus = useCallback((storyboardNodeId, assetType, assetId, patch) => {
-    if (!storyboardNodeId || !assetType || !assetId || !patch || typeof patch !== "object") return;
+    if (!storyboardNodeId || !assetType || !assetId || !patch || !["object", "function"].includes(typeof patch)) return;
     setNodes((prev) =>
       prev.map((node) => {
         if (node.id !== storyboardNodeId) return node;
@@ -10381,6 +10522,14 @@ const handleNodeMouseDown = (e, nid) => {
           node?.data?.storyboard_asset_state && typeof node.data.storyboard_asset_state === "object"
             ? node.data.storyboard_asset_state
             : { characters: {}, subjects: {}, locations: {} };
+        const currentAssetState = { ...(((currentState[assetType] || {})[assetId] || {})) };
+        const nextAssetState =
+          typeof patch === "function"
+            ? patch(currentAssetState)
+            : {
+                ...currentAssetState,
+                ...patch,
+              };
         return {
           ...node,
           data: {
@@ -10389,10 +10538,7 @@ const handleNodeMouseDown = (e, nid) => {
               ...currentState,
               [assetType]: {
                 ...(currentState[assetType] || {}),
-                [assetId]: {
-                  ...((currentState[assetType] || {})[assetId] || {}),
-                  ...patch,
-                },
+                [assetId]: nextAssetState,
               },
             },
           },
@@ -10402,18 +10548,40 @@ const handleNodeMouseDown = (e, nid) => {
   }, []);
 
   const runStoryboardAssetDirectGeneration = useCallback(
-    async (storyboardNode, assetType, asset) => {
+    async (storyboardNode, assetType, asset, options = {}) => {
       if (!storyboardNode || !asset || !apiFetch) return;
-      const prompt = buildStoryboardAssetGenerationPrompt(assetType, asset, storyboardNode.data?.storyboard_plan || {});
       const assetId = String(asset?.entity_id || asset?.name || "").trim();
+      const currentAssetState = storyboardNode?.data?.storyboard_asset_state?.[assetType]?.[assetId] || {};
+      const referenceImageUrl =
+        String(options?.referenceImageUrl || "").trim() ||
+        resolveStoryboardAssetPrimaryImage(currentAssetState);
+      const tweakText = String(options?.tweakText || "").trim();
+      const customPrompt = String(options?.customPrompt || "").trim();
+      const prompt = customPrompt
+        ? customPrompt
+        : tweakText
+          ? buildStoryboardAssetEditPrompt({
+              assetType,
+              asset,
+              storyboardPlan: storyboardNode.data?.storyboard_plan || {},
+              instruction: tweakText,
+              referenceImageUrl,
+            })
+          : buildStoryboardAssetGenerationPrompt(assetType, asset, storyboardNode.data?.storyboard_plan || {});
       updateStoryboardAssetStatus(storyboardNode.id, assetType, assetId, {
         prompt,
         status: "running",
         error: "",
+        lastInstruction: tweakText,
       });
       setHoveredStoryboardAssetCard((current) =>
         current && current.nodeId === storyboardNode.id && current.assetType === assetType && String(current.asset?.entity_id || current.asset?.name || "").trim() === assetId
-          ? { ...current, sticky: true }
+          ? {
+              ...current,
+              sticky: true,
+              tweakText: tweakText ? "" : current.tweakText || "",
+              customPrompt: customPrompt ? customPrompt : current.customPrompt || "",
+            }
           : current,
       );
       try {
@@ -10453,6 +10621,7 @@ const handleNodeMouseDown = (e, nid) => {
           ai_chat_session_id: aiChatSessionIdRef.current || "",
           ai_chat_model_id: targetModelId,
           message: prompt,
+          images: referenceImageUrl ? [referenceImageUrl] : undefined,
           ...resolvedParamPayload,
         };
         if (!proxyPayload.authorization) {
@@ -10475,13 +10644,39 @@ const handleNodeMouseDown = (e, nid) => {
           const summary = summarizeAIChatResponse(proxyData);
           throw new Error(`nano banana2 未返回可解析图片${summary ? ` | 响应摘要: ${summary}` : ""}`);
         }
-        const images = [resultUrl];
-        updateStoryboardAssetStatus(storyboardNode.id, assetType, assetId, {
-          prompt,
-          status: "success",
-          error: "",
-          images,
-          lastGeneratedAt: Date.now(),
+        const generatedAt = Date.now();
+        updateStoryboardAssetStatus(storyboardNode.id, assetType, assetId, (prevAssetState) => {
+          const prevCandidates = normalizeStoryboardAssetCandidates(prevAssetState?.candidates);
+          const nextCandidate = {
+            id: `candidate_${generatedAt}_${Math.random().toString(36).slice(2, 8)}`,
+            url: resultUrl,
+            createdAt: generatedAt,
+            source: tweakText ? "tweak" : "generate",
+            prompt,
+            instruction: tweakText,
+          };
+          const nextCandidates = [nextCandidate, ...prevCandidates.filter((item) => String(item?.url || "").trim() !== resultUrl)].slice(0, 8);
+          const wasLocked = !!prevAssetState?.locked;
+          return {
+            ...prevAssetState,
+            prompt,
+            status: "success",
+            error: "",
+            images: [resultUrl],
+            candidates: nextCandidates,
+            selectedCandidateId: nextCandidate.id,
+            selectedImageUrl: resultUrl,
+            lastGeneratedAt: generatedAt,
+            lastInstruction: tweakText,
+            lastCustomPrompt: customPrompt,
+            ...(wasLocked
+              ? {
+                  locked: true,
+                  lockedAt: prevAssetState?.lockedAt || generatedAt,
+                  lockedImageUrl: resultUrl,
+                }
+              : {}),
+          };
         });
       } catch (error) {
         updateStoryboardAssetStatus(storyboardNode.id, assetType, assetId, {
@@ -11016,6 +11211,7 @@ const handleNodeMouseDown = (e, nid) => {
       intent: turnInput?.intent || "",
       intentReason: turnInput?.intentReason || "",
       exports: turnInput?.exports || {},
+      uploadedDocuments: Array.isArray(turnInput?.uploadedDocuments) ? turnInput.uploadedDocuments : [],
       stepIndex: Number(turnInput?.stepIndex || 0),
       error: String(turnInput?.error || ""),
       createdAt: Number(turnInput?.createdAt || Date.now()) || Date.now(),
@@ -11530,20 +11726,44 @@ const handleNodeMouseDown = (e, nid) => {
     return recent;
   }, [activeAgentSession?.turns]);
 
+  const getRecentAgentUploadedDocuments = useCallback(() => {
+    const turns = activeAgentSession?.turns || [];
+    for (const turn of [...turns].reverse()) {
+      const docs = Array.isArray(turn?.uploadedDocuments) ? turn.uploadedDocuments : [];
+      if (docs.length) return docs;
+    }
+    return [];
+  }, [activeAgentSession?.turns]);
+
+  const shouldReuseRecentUploadedDocuments = useCallback((message) => {
+    const text = String(message || "").trim();
+    if (!text) return false;
+    return /(这份|这个|上面|刚才|上传|脚本|表格|csv|整理成故事板|导入故事板|按这份)/i.test(text);
+  }, []);
+
   const runAgentConversation = useCallback(
     async (userText, route = null, extraPayload = null) => {
       const message = String(userText || "").trim();
       if (!message) return null;
+      const explicitUploadedDocuments = Array.isArray(extraPayload?.uploadedDocuments) ? extraPayload.uploadedDocuments : [];
+      const uploadedDocuments =
+        explicitUploadedDocuments.length > 0
+          ? explicitUploadedDocuments
+          : shouldReuseRecentUploadedDocuments(message)
+          ? getRecentAgentUploadedDocuments()
+          : [];
       const meta = {
         intent: route?.intent || "",
         product: route?.product || "",
         sessionId: activeAgentSession?.id || "",
       };
+      const currentNodes = nodesRef.current || [];
+      const storyboardCount = currentNodes.filter((n) => n?.type === "storyboard_plan").length;
       const response = await sendAgentMessage(
         {
           message,
           recentMessages: buildAgentRecentMessages(),
-          currentNodes: cloneDeep(nodesRef.current || []),
+          currentNodes: cloneDeep(currentNodes),
           currentConnections: cloneDeep(connectionsRef.current || []),
           selectedArtifact: activeArtifact
             ? {
@@ -11556,6 +11776,8 @@ const handleNodeMouseDown = (e, nid) => {
             : null,
           canvasId,
           threadId: canvasId,
+          uploadedDocuments,
+          canvasNodeHints: { storyboard_count: storyboardCount },
           ...(extraPayload && typeof extraPayload === "object" ? extraPayload : {}),
         },
         apiFetch,
@@ -11563,7 +11785,7 @@ const handleNodeMouseDown = (e, nid) => {
       );
       return response;
     },
-    [activeAgentSession?.id, activeArtifact, apiFetch, buildAgentRecentMessages, canvasId],
+    [activeAgentSession?.id, activeArtifact, apiFetch, buildAgentRecentMessages, canvasId, getRecentAgentUploadedDocuments, shouldReuseRecentUploadedDocuments],
   );
 
   const runMissionOnTurn = useCallback(
@@ -12027,6 +12249,7 @@ const handleNodeMouseDown = (e, nid) => {
   const sendAgentMissionFromText = useCallback(
     async (text, options = {}) => {
       const missionText = String(text || "").trim();
+      const uploadedDocuments = Array.isArray(options?.uploadedDocuments) ? options.uploadedDocuments : [];
       if (!missionText) return;
       const sessionId = activeAgentSession?.id || "";
       const pendingTask = activeAgentSession?.pendingTask || null;
@@ -12166,6 +12389,7 @@ const handleNodeMouseDown = (e, nid) => {
         status: "running",
         assistantText: "",
         routeDebug: buildRouteDebug(route, true),
+        uploadedDocuments,
       });
       try {
         const response = await runAgentConversation(
@@ -12173,6 +12397,7 @@ const handleNodeMouseDown = (e, nid) => {
           route,
           {
             supplementalPrompt: extractedSupplementalPrompt || "",
+            uploadedDocuments,
           },
         );
         const responseText = String(response?.response_text || "").trim();
@@ -12225,6 +12450,56 @@ const handleNodeMouseDown = (e, nid) => {
             setRunToast({
               message: String(plannerResult?.summary || plannerResult?.response_text || plannerResult?.thought || responseText).trim(),
               type: "info",
+            });
+          }
+          return;
+        }
+
+        if (response?.action === "tool_call" && response?.data?.is_async && response?.data?.task_id) {
+          const storyboardTaskId = String(response.data.task_id);
+          updateAgentTurn(pendingTurnId, {
+            status: "running",
+            assistantText: responseText || "分镜方案生成中，请稍候...",
+            routeDebug,
+            intent: "STORYBOARD",
+            intentReason: routeDebug.reason,
+          });
+          try {
+            const taskResult = await pollStoryboardTask(storyboardTaskId, apiFetch, (s) => {
+              if (s === "running") {
+                updateAgentTurn(pendingTurnId, { assistantText: "分镜方案生成中（AI 正在思考）..." });
+              }
+            });
+            const patch = Array.isArray(taskResult?.patch) ? taskResult.patch : [];
+            const storyboardNodeIds = patch
+              .filter((op) => op?.op === "add_node" && op?.node?.type === "storyboard_plan")
+              .map((op) => String(op?.node?.id || "").trim())
+              .filter(Boolean);
+            if (patch.length) {
+              pushHistory();
+              const patchResult = _applyPatch(patch);
+              if (patchResult?.nodes && patchResult?.connections) {
+                upsertCanvasDraftSnapshot({
+                  nodes: patchResult.nodes,
+                  connections: patchResult.connections,
+                  viewport: patchResult.viewport || viewportRef.current,
+                });
+              }
+            }
+            updateAgentTurn(pendingTurnId, {
+              status: "done",
+              assistantText: String(taskResult?.summary || "已生成可编辑分镜方案。").trim(),
+              routeDebug,
+              response: { storyboardNodeIds, summary: String(taskResult?.summary || "").trim() },
+              intent: "STORYBOARD",
+              intentReason: routeDebug.reason,
+              stepIndex: AGENT_RUN_STEPS.length - 1,
+            });
+          } catch (storyboardErr) {
+            updateAgentTurn(pendingTurnId, {
+              status: "error",
+              error: storyboardErr?.message || "分镜生成失败，请稍后重试。",
+              routeDebug,
             });
           }
           return;
@@ -12360,14 +12635,34 @@ const handleNodeMouseDown = (e, nid) => {
 
   const sendAgentMission = () => {
     const text = String(agentInput || "").trim();
-    if (!text) {
+    const documentAttachments = agentComposerFiles
+      .filter((item) => item.kind === "document")
+      .map((item) => ({
+        name: item.name,
+        mime_type: item.mimeType || "",
+        kind: item.documentKind || "document",
+        text_content: item.textContent || "",
+      }))
+      .filter((item) => String(item.text_content || "").trim());
+    const imageAttachments = agentComposerFiles.filter((item) => item.kind === "image");
+    const fallbackText = documentAttachments.some(
+      (item) =>
+        item.kind === "storyboard_script_table" ||
+        /\.(csv|tsv)$/i.test(String(item.name || "")),
+    )
+      ? "请将这份分镜头脚本整理成故事板"
+      : documentAttachments.length
+      ? "请处理我上传的文件"
+      : "";
+    const effectiveText = text || fallbackText;
+    if (!effectiveText) {
       if (agentComposerFiles.length > 0) {
-        setRunToast({ message: "请补充一句需求描述，再连同图片一起发送", type: "info" });
+        setRunToast({ message: "请补充一句需求描述，或上传可解析的脚本表文件", type: "info" });
       }
       return;
     }
-    const attachmentNote = agentComposerFiles.length
-      ? `\n\n[已附参考图片: ${agentComposerFiles.map((item) => item.name).join("，")}]`
+    const attachmentNote = imageAttachments.length
+      ? `\n\n[已附参考图片: ${imageAttachments.map((item) => item.name).join("，")}]`
       : "";
     setAgentInput("");
     setActiveComposerActionId("");
@@ -12382,7 +12677,9 @@ const handleNodeMouseDown = (e, nid) => {
     if (agentUploadInputRef.current) {
       agentUploadInputRef.current.value = "";
     }
-    void sendAgentMissionFromText(`${text}${attachmentNote}`);
+    void sendAgentMissionFromText(`${effectiveText}${attachmentNote}`, {
+      uploadedDocuments: documentAttachments,
+    });
   };
 
   const polishAgentPromptInput = async () => {
@@ -12418,36 +12715,61 @@ const handleNodeMouseDown = (e, nid) => {
     }
   };
 
-  const handleAgentComposerUpload = useCallback((event) => {
+  const handleAgentComposerUpload = useCallback(async (event) => {
     const files = Array.from(event.target?.files || []);
     if (!files.length) return;
-    const accepted = files.filter((file) => String(file.type || "").startsWith("image/"));
-    if (!accepted.length) {
-      setRunToast({ message: "目前仅支持上传图片", type: "error" });
-      event.target.value = "";
-      return;
-    }
-    setAgentComposerFiles((prev) => {
-      const next = [...prev];
-      accepted.forEach((file) => {
-        const duplicate = next.some(
-          (item) => item.name === file.name && item.size === file.size && item.lastModified === file.lastModified,
-        );
-        if (duplicate) return;
-        next.push({
+    const preparedItems = [];
+    for (const file of files) {
+      const duplicate = agentComposerFiles.some(
+        (item) => item.name === file.name && item.size === file.size && item.lastModified === file.lastModified,
+      );
+      if (duplicate) continue;
+      if (String(file.type || "").startsWith("image/")) {
+        preparedItems.push({
           id: `agent_file_${makeAgentId()}`,
+          kind: "image",
           name: file.name,
           size: file.size,
           lastModified: file.lastModified,
           previewUrl: URL.createObjectURL(file),
         });
-      });
-      return next.slice(0, 4);
-    });
-    setAgentInputFocused(true);
-    agentInputRef.current?.focus();
+        continue;
+      }
+      if (!isAgentComposerDocumentFile(file)) {
+        setRunToast({ message: `暂不支持上传 ${file.name}，请使用 csv/tsv/txt/md 或图片`, type: "error" });
+        continue;
+      }
+      if (Number(file.size || 0) > AGENT_DOCUMENT_MAX_BYTES) {
+        setRunToast({ message: `${file.name} 超过 1MB，先精简脚本表再上传`, type: "error" });
+        continue;
+      }
+      try {
+        const textContent = decodeStoryboardDocumentBuffer(await file.arrayBuffer());
+        if (!textContent) {
+          setRunToast({ message: `${file.name} 内容为空`, type: "error" });
+          continue;
+        }
+        preparedItems.push({
+          id: `agent_file_${makeAgentId()}`,
+          kind: "document",
+          documentKind: looksLikeStoryboardScriptTableFile(file.name, textContent) ? "storyboard_script_table" : "document",
+          name: file.name,
+          size: file.size,
+          lastModified: file.lastModified,
+          mimeType: String(file.type || "").trim() || "text/plain",
+          textContent,
+        });
+      } catch (error) {
+        setRunToast({ message: `${file.name} 读取失败`, type: "error" });
+      }
+    }
+    if (preparedItems.length) {
+      setAgentComposerFiles((prev) => [...prev, ...preparedItems].slice(0, 4));
+      setAgentInputFocused(true);
+      agentInputRef.current?.focus();
+    }
     event.target.value = "";
-  }, []);
+  }, [agentComposerFiles, setRunToast]);
 
   const removeAgentComposerFile = useCallback((fileId) => {
     setAgentComposerFiles((prev) => {
@@ -16842,7 +17164,7 @@ const handleNodeMouseDown = (e, nid) => {
               <input
                 ref={agentUploadInputRef}
                 type="file"
-                accept="image/*"
+                accept={AGENT_COMPOSER_FILE_ACCEPT}
                 multiple
                 className="hidden"
                 onChange={handleAgentComposerUpload}
@@ -16895,7 +17217,7 @@ const handleNodeMouseDown = (e, nid) => {
               <div className="relative flex gap-4">
                 <button
                   type="button"
-                  title="上传参考图片"
+                  title="上传参考图片或分镜脚本表"
                   onClick={() => agentUploadInputRef.current?.click()}
                   className={`mt-1 flex shrink-0 items-center justify-center rounded-[20px] border border-slate-200 bg-slate-50 text-slate-700 transition-all disabled:cursor-not-allowed disabled:opacity-90 ${
                     agentInputFocused || agentInput.trim() ? "h-[84px] w-[68px] -rotate-6" : "h-8 w-8 -rotate-[8deg] rounded-[12px]"
@@ -16989,17 +17311,23 @@ const handleNodeMouseDown = (e, nid) => {
                     key={file.id}
                     className="group flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-2 py-1.5"
                   >
-                    <img
-                      src={file.previewUrl}
-                      alt={file.name}
-                      className="h-10 w-10 rounded-xl object-cover"
-                    />
+                    {file.kind === "image" ? (
+                      <img
+                        src={file.previewUrl}
+                        alt={file.name}
+                        className="h-10 w-10 rounded-xl object-cover"
+                      />
+                    ) : (
+                      <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-100 text-slate-500">
+                        <FolderOpen className="h-4 w-4" />
+                      </div>
+                    )}
                     <div className="max-w-32 truncate text-[11px] text-slate-600">{file.name}</div>
                     <button
                       type="button"
                       onClick={() => removeAgentComposerFile(file.id)}
                       className="rounded-full p-1 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900"
-                      title="移除图片"
+                      title={file.kind === "image" ? "移除图片" : "移除文件"}
                     >
                       <X className="h-3.5 w-3.5" />
                     </button>
@@ -17477,7 +17805,21 @@ const handleNodeMouseDown = (e, nid) => {
               const generatedAt = assetState?.lastGeneratedAt ? new Date(assetState.lastGeneratedAt).toLocaleString() : "";
               const tabLabel = assetType === "characters" ? "角色" : assetType === "subjects" ? "主体" : "场景";
               const generatedImages = Array.isArray(assetState?.images) ? assetState.images.filter(Boolean) : [];
+              const candidateItems = normalizeStoryboardAssetCandidates(assetState?.candidates);
+              const selectedImageUrl =
+                String(assetState?.selectedImageUrl || "").trim() ||
+                String(candidateItems[0]?.url || "").trim() ||
+                String(generatedImages[0] || "").trim();
+              const selectedCandidateId =
+                String(assetState?.selectedCandidateId || "").trim() ||
+                String(candidateItems.find((item) => String(item?.url || "").trim() === selectedImageUrl)?.id || "").trim();
+              const lockedImageUrl = String(assetState?.lockedImageUrl || "").trim();
               const generationStatus = String(assetState?.status || "").trim();
+              const tweakText = String(hoveredStoryboardAssetCard?.tweakText || "").trim();
+              const effectivePrompt =
+                String(hoveredStoryboardAssetCard?.customPrompt || "").trim() ||
+                String(assetState?.prompt || "").trim() ||
+                buildStoryboardAssetGenerationPrompt(assetType, asset, storyboardNode?.data?.storyboard_plan || {});
               return (
                 <div
                   className="fixed z-[190] w-[360px] pointer-events-auto"
@@ -17527,38 +17869,171 @@ const handleNodeMouseDown = (e, nid) => {
                           {String(assetState.error).trim()}
                         </div>
                       ) : null}
-                      {generatedImages.length ? (
-                        <div className="grid grid-cols-2 gap-2">
-                          {generatedImages.slice(0, 4).map((image, imageIndex) => (
-                            <button
-                              key={`${assetId}-img-${imageIndex}`}
-                              type="button"
-                              onClick={() => setPreviewImage(image)}
-                              className="overflow-hidden rounded-[12px] border border-slate-200 bg-slate-50"
-                            >
-                              <img src={image} alt={`${asset?.name || tabLabel}-${imageIndex + 1}`} className="h-28 w-full object-cover" />
-                            </button>
-                          ))}
+                      {selectedImageUrl ? (
+                        <button
+                          type="button"
+                          onClick={() => setPreviewImage(selectedImageUrl)}
+                          className="block overflow-hidden rounded-[14px] border border-slate-200 bg-slate-50"
+                        >
+                          <img src={selectedImageUrl} alt={`${asset?.name || tabLabel}-selected`} className="h-40 w-full object-cover" />
+                        </button>
+                      ) : null}
+                      {candidateItems.length ? (
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="text-[11px] font-medium text-slate-600">候选版本</div>
+                            <div className="text-[10px] text-slate-400">{candidateItems.length} 张</div>
+                          </div>
+                          <div className="grid grid-cols-4 gap-2">
+                            {candidateItems.map((item, imageIndex) => {
+                              const image = String(item?.url || "").trim();
+                              if (!image) return null;
+                              const isCurrent = image === selectedImageUrl || String(item?.id || "").trim() === selectedCandidateId;
+                              const isLockedImage = !!lockedImageUrl && image === lockedImageUrl;
+                              return (
+                                <button
+                                  key={String(item?.id || `${assetId}-img-${imageIndex}`)}
+                                  type="button"
+                                  onClick={() => {
+                                    updateStoryboardAssetStatus(storyboardNode?.id, assetType, assetId, {
+                                      selectedCandidateId: String(item?.id || "").trim(),
+                                      selectedImageUrl: image,
+                                    });
+                                    setPreviewImage(image);
+                                  }}
+                                  className={`relative overflow-hidden rounded-[12px] border bg-slate-50 ${
+                                    isCurrent ? "border-cyan-300 ring-2 ring-cyan-200/80" : "border-slate-200"
+                                  }`}
+                                >
+                                  <img src={image} alt={`${asset?.name || tabLabel}-${imageIndex + 1}`} className="h-20 w-full object-cover" />
+                                  {isLockedImage ? (
+                                    <span className="absolute left-1 top-1 rounded-full bg-emerald-500 px-1.5 py-0.5 text-[9px] text-white">定稿</span>
+                                  ) : isCurrent ? (
+                                    <span className="absolute left-1 top-1 rounded-full bg-cyan-500 px-1.5 py-0.5 text-[9px] text-white">当前</span>
+                                  ) : null}
+                                </button>
+                              );
+                            })}
+                          </div>
                         </div>
                       ) : null}
+                      <div className="space-y-2">
+                        <div className="text-[11px] font-medium text-slate-600">一句话微调</div>
+                        <textarea
+                          value={hoveredStoryboardAssetCard?.tweakText || ""}
+                          onChange={(event) => {
+                            const nextValue = String(event?.target?.value || "");
+                            setHoveredStoryboardAssetCard((current) =>
+                              current && current.nodeId === storyboardNode?.id && current.assetType === assetType && String(current.asset?.entity_id || current.asset?.name || "").trim() === assetId
+                                ? { ...current, tweakText: nextValue, sticky: true }
+                                : current,
+                            );
+                          }}
+                          onFocus={() => {
+                            setHoveredStoryboardAssetCard((current) =>
+                              current && current.nodeId === storyboardNode?.id && current.assetType === assetType && String(current.asset?.entity_id || current.asset?.name || "").trim() === assetId
+                                ? { ...current, sticky: true }
+                                : current,
+                            );
+                          }}
+                          onBlur={() => {
+                            setHoveredStoryboardAssetCard((current) =>
+                              current && current.nodeId === storyboardNode?.id && current.assetType === assetType && String(current.asset?.entity_id || current.asset?.name || "").trim() === assetId
+                                ? { ...current, sticky: false }
+                                : current,
+                            );
+                          }}
+                          rows={3}
+                          placeholder={
+                            assetType === "locations"
+                              ? "例如：霓虹减少一些，整体更冷、更潮湿。"
+                              : assetType === "subjects"
+                              ? "例如：金属质感更强，锁扣细节更复杂。"
+                              : "例如：毛色偏灰蓝，眼神更冷酷，更有压迫感。"
+                          }
+                          className="w-full resize-none rounded-[12px] border border-slate-200 bg-white px-3 py-2 text-[11px] leading-5 text-slate-700 outline-none transition focus:border-cyan-300 focus:ring-2 focus:ring-cyan-100"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <div className="text-[11px] font-medium text-slate-600">完整提示词</div>
+                        <textarea
+                          value={effectivePrompt}
+                          onChange={(event) => {
+                            const nextValue = String(event?.target?.value || "");
+                            setHoveredStoryboardAssetCard((current) =>
+                              current && current.nodeId === storyboardNode?.id && current.assetType === assetType && String(current.asset?.entity_id || current.asset?.name || "").trim() === assetId
+                                ? { ...current, customPrompt: nextValue, sticky: true }
+                                : current,
+                            );
+                          }}
+                          onFocus={() => {
+                            setHoveredStoryboardAssetCard((current) =>
+                              current && current.nodeId === storyboardNode?.id && current.assetType === assetType && String(current.asset?.entity_id || current.asset?.name || "").trim() === assetId
+                                ? { ...current, sticky: true }
+                                : current,
+                            );
+                          }}
+                          onBlur={() => {
+                            setHoveredStoryboardAssetCard((current) =>
+                              current && current.nodeId === storyboardNode?.id && current.assetType === assetType && String(current.asset?.entity_id || current.asset?.name || "").trim() === assetId
+                                ? { ...current, sticky: false }
+                                : current,
+                            );
+                          }}
+                          rows={5}
+                          placeholder="直接编辑完整提示词，然后按这个提示词重生成。"
+                          className="w-full resize-y rounded-[12px] border border-slate-200 bg-white px-3 py-2 text-[11px] leading-5 text-slate-700 outline-none transition focus:border-cyan-300 focus:ring-2 focus:ring-cyan-100"
+                        />
+                      </div>
                       <div className="flex flex-wrap gap-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              runStoryboardAssetDirectGeneration(storyboardNode, assetType, asset);
-                            }}
-                            disabled={generationStatus === "running"}
-                            className="inline-flex items-center gap-1.5 rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-[11px] text-cyan-700 transition-colors hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            <Sparkles className="h-3.5 w-3.5" />
-                            {assetState?.lastGeneratedAt ? "重生成" : "生成"}
-                          </button>
                         <button
                           type="button"
                           onClick={() => {
+                            runStoryboardAssetDirectGeneration(storyboardNode, assetType, asset);
+                          }}
+                          disabled={generationStatus === "running"}
+                          className="inline-flex items-center gap-1.5 rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-[11px] text-cyan-700 transition-colors hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          <Sparkles className="h-3.5 w-3.5" />
+                          {assetState?.lastGeneratedAt ? "重生成" : "生成"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            runStoryboardAssetDirectGeneration(storyboardNode, assetType, asset, {
+                              tweakText,
+                              referenceImageUrl: selectedImageUrl,
+                            });
+                          }}
+                          disabled={generationStatus === "running" || !tweakText}
+                          className="inline-flex items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50 px-3 py-1.5 text-[11px] text-violet-700 transition-colors hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          <Wand2 className="h-3.5 w-3.5" />
+                          按要求微调
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            runStoryboardAssetDirectGeneration(storyboardNode, assetType, asset, {
+                              customPrompt: effectivePrompt,
+                              referenceImageUrl: selectedImageUrl,
+                            });
+                          }}
+                          disabled={generationStatus === "running" || !String(effectivePrompt || "").trim()}
+                          className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] text-amber-700 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          <RefreshCw className="h-3.5 w-3.5" />
+                          按完整提示词重生成
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nextLocked = !isLocked;
+                            const nextLockedImageUrl = nextLocked ? selectedImageUrl : "";
                             updateStoryboardAssetStatus(storyboardNode?.id, assetType, assetId, {
-                              locked: !isLocked,
-                              lockedAt: !isLocked ? Date.now() : null,
+                              locked: nextLocked,
+                              lockedAt: nextLocked ? Date.now() : null,
+                              lockedImageUrl: nextLockedImageUrl,
                             });
                           }}
                           className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] transition-colors ${
