@@ -11057,16 +11057,24 @@ const handleNodeMouseDown = (e, nid) => {
         const sceneBindings = Array.isArray(lab.scene_bindings) ? lab.scene_bindings : [];
         const referenceImages = [];
 
+        // Helper: resolve relative asset URLs to absolute so the backend can fetch them
+        const apiRoot = (API_BASE || "").replace(/\/+$/, "");
+        const resolveAssetUrl = (url) => {
+          const u = String(url || "").trim();
+          if (!u) return "";
+          return u.startsWith("http") ? u : `${apiRoot}${u}`;
+        };
+
         // Character three-view and generated asset images
         for (const cb of charBindings) {
           const threeViewUrl = String(cb?.three_view_url || "").trim();
           if (threeViewUrl) {
-            referenceImages.push({ type: "character", name: stripStoryboardDisplayIds(String(cb?.character_name || cb?.entity_name || "")), url: threeViewUrl });
+            referenceImages.push({ type: "character", name: stripStoryboardDisplayIds(String(cb?.character_name || cb?.entity_name || "")), url: resolveAssetUrl(threeViewUrl) });
           }
           const entityId = String(cb?.entity_id || "").trim();
           const charAssetUrl = String(assetState?.characters?.[entityId]?.selectedImageUrl || "").trim();
           if (charAssetUrl) {
-            referenceImages.push({ type: "asset", name: stripStoryboardDisplayIds(String(cb?.entity_name || "")), url: charAssetUrl });
+            referenceImages.push({ type: "asset", name: stripStoryboardDisplayIds(String(cb?.entity_name || "")), url: resolveAssetUrl(charAssetUrl) });
           }
         }
         // Subject generated asset images
@@ -11074,21 +11082,21 @@ const handleNodeMouseDown = (e, nid) => {
           const entityId = String(ent?.entity_id || "").trim();
           const subjAssetUrl = String(assetState?.subjects?.[entityId]?.selectedImageUrl || "").trim();
           if (subjAssetUrl) {
-            referenceImages.push({ type: "asset", name: stripStoryboardDisplayIds(String(ent?.name || "")), url: subjAssetUrl });
+            referenceImages.push({ type: "asset", name: stripStoryboardDisplayIds(String(ent?.name || "")), url: resolveAssetUrl(subjAssetUrl) });
           }
         }
         // Scene preview + generated asset images
         for (const sb of sceneBindings) {
           const previewUrl = String((Array.isArray(sb?.preview_urls) ? sb.preview_urls : [])[0] || "").trim();
           if (previewUrl) {
-            referenceImages.push({ type: "scene", name: String(sb?.folder_name || sb?.matched_from || "").trim(), url: previewUrl });
+            referenceImages.push({ type: "scene", name: String(sb?.folder_name || sb?.matched_from || "").trim(), url: resolveAssetUrl(previewUrl) });
           }
         }
         for (const locEnt of (Array.isArray(plan.entities?.locations) ? plan.entities.locations : [])) {
           const entityId = String(locEnt?.entity_id || "").trim();
           const locAssetUrl = String(assetState?.locations?.[entityId]?.selectedImageUrl || "").trim();
           if (locAssetUrl) {
-            referenceImages.push({ type: "asset", name: stripStoryboardDisplayIds(String(locEnt?.name || "")), url: locAssetUrl });
+            referenceImages.push({ type: "asset", name: stripStoryboardDisplayIds(String(locEnt?.name || "")), url: resolveAssetUrl(locAssetUrl) });
           }
         }
 
