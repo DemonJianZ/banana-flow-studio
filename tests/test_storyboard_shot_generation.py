@@ -73,7 +73,7 @@ class TestStoryboardShotGenerationEndpoint(unittest.TestCase):
         fake_task = {"task_id": "ai_chat_task_fallback", "status": "PENDING"}
 
         with patch("api.routes.call_genai_retry", return_value=mock_llm_response), \
-             patch("api.routes.create_ai_chat_task", return_value=fake_task), \
+             patch("api.routes.create_ai_chat_task", return_value=fake_task) as mock_create, \
              patch("api.routes.asyncio.create_task"), \
              patch("api.routes.MODEL_AGENT_CHAT", "gemini-2.5-flash-lite"):
             from app_factory import create_app
@@ -84,6 +84,10 @@ class TestStoryboardShotGenerationEndpoint(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertIn("task_id", data)
+        mock_create.assert_called_once()
+        form = mock_create.call_args.kwargs.get("request_form") or {}
+        self.assertTrue(form.get("message"), "fallback prompt must not be empty")
+        self.assertIn("龙女站在庭院中", str(form.get("message", "")))
 
     def test_missing_authorization_returns_400(self):
         """Empty authorization should return 400."""

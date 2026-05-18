@@ -3027,13 +3027,15 @@ def _write_shot_generation_prompt(
             model=MODEL_AGENT_CHAT,
         )
         raw_text = str(getattr(response, "text", "") or "").strip()
-        import re as _re
-        json_match = _re.search(r"\{[\s\S]*\}", raw_text)
+        json_match = re.search(r"\{[\s\S]*\}", raw_text)
         if json_match:
             parsed = json.loads(json_match.group())
         else:
             parsed = json.loads(raw_text)
-        selected_names = [str(n).strip() for n in list(parsed.get("selected_image_names") or []) if str(n or "").strip()]
+        raw_names = parsed.get("selected_image_names") or []
+        if not isinstance(raw_names, list):
+            raw_names = []
+        selected_names = [str(n).strip() for n in raw_names if str(n or "").strip()]
         prompt_text = str(parsed.get("prompt") or "").strip()
         if not prompt_text:
             raise ValueError("empty prompt from LLM")
@@ -3044,7 +3046,8 @@ def _write_shot_generation_prompt(
         plan = req.storyboard_plan or {}
         style = str(plan.get("style") or "").strip()
         vis = str(shot.get("visual_description") or "").strip()
-        fallback_prompt = f"{style + ', ' if style else ''}{vis}" or "storyboard shot illustration"
+        parts = [p for p in [style, vis] if p]
+        fallback_prompt = ", ".join(parts) or "storyboard shot illustration"
         fallback_urls = [str(img.url or "").strip() for img in req.reference_images if str(img.url or "").strip()][:4]
         return fallback_prompt, fallback_urls
 
@@ -3061,7 +3064,9 @@ async def storyboard_generate_shot(body: _StoryboardShotGenerateRequest, request
 
     task_id = f"ai_chat_task_{uuid.uuid4().hex}"
 
-    prompt_text, resolved_image_urls = _write_shot_generation_prompt(body, req_id)
+    prompt_text, resolved_image_urls = await asyncio.to_thread(
+        _write_shot_generation_prompt, body, req_id
+    )
 
     request_form: Dict[str, Any] = {
         "endpoint": AI_CHAT_DOWNSTREAM_URL,
@@ -3222,8 +3227,10 @@ def get_storyboard_status(task_id: str, current_user=Depends(_get_current_user_o
 
 
 @router.get("/main_assets/{file_path:path}")
-def serve_main_asset(file_path: str):
+def serve_main_asset(file_path: str, current_user=Depends(_get_current_user_optional)):
     """Serve files from the storyboard main_assets directory with path-traversal protection."""
+    if not current_user:
+        raise HTTPException(status_code=401, detail="未授权")
     asset_root = Path(_get_storyboard_asset_root()).resolve()
     # FastAPI already URL-decodes path params; resolve prevents traversal
     safe_path = (asset_root / file_path).resolve()
