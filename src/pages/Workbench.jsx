@@ -8905,6 +8905,14 @@ const Workbench = () => {
       storyboardAssetHoverCloseTimerRef.current = null;
     }
   }, []);
+  useEffect(() => {
+    return () => {
+      if (storyboardShotHoverCloseTimerRef.current) {
+        window.clearTimeout(storyboardShotHoverCloseTimerRef.current);
+        storyboardShotHoverCloseTimerRef.current = null;
+      }
+    };
+  }, []);
   const [activeArtifact, setActiveArtifact] = useState(null);
   const [hoveredStoryboardAssetCard, setHoveredStoryboardAssetCard] = useState(null);
   const storyboardAssetHoverCloseTimerRef = useRef(null);
@@ -18728,12 +18736,13 @@ const handleNodeMouseDown = (e, nid) => {
                                 <button
                                   key={c.id}
                                   type="button"
-                                  onClick={() =>
-                                    updateStoryboardAssetStatus(storyboardNode.id, "shots", shotId, {
+                                  onClick={() => {
+                                    if (!shotId) return;
+                                    updateStoryboardAssetStatus(storyboardNode?.id, "shots", shotId, {
                                       selectedImageUrl: c.url,
                                       selectedCandidateId: c.id,
                                     })
-                                  }
+                                  }}
                                   className={`h-14 w-14 shrink-0 overflow-hidden rounded-[8px] border-2 transition-colors ${
                                     c.url === selectedImageUrl ? "border-orange-400" : "border-slate-200 hover:border-slate-400"
                                   }`}
