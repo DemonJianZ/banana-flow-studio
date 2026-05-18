@@ -4798,6 +4798,7 @@ const NodeComponent = ({
   onNodeElementChange,
   onStoryboardMentionHover,
   onStoryboardMentionLeave,
+  onShotChipClick,
 }) => {
   const [showCopied, setShowCopied] = useState(false);
   const [compactActiveIndex, setCompactActiveIndex] = useState(0);
@@ -7506,8 +7507,29 @@ const NodeComponent = ({
                             }`}
                           >
                             <div className="flex items-center justify-between gap-2">
-                              <div className="text-[11px] font-medium text-slate-800">
-                                镜头 {shot?.shot_no || shotIndex + 1}
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (onShotChipClick) onShotChipClick(node, scene, shot, e.currentTarget);
+                                  }}
+                                  className="inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11px] font-semibold ring-1 transition-colors bg-orange-50 text-orange-700 ring-orange-200 hover:bg-orange-100"
+                                >
+                                  @镜头{shot?.shot_no || shotIndex + 1}
+                                  {(() => {
+                                    const shotId = String(shot?.shot_id || `${scene?.scene_id || sceneIndex}-shot-${shotIndex}`).trim();
+                                    const shotAssetState = node?.data?.storyboard_asset_state?.shots?.[shotId] || {};
+                                    const shotStatus = String(shotAssetState?.status || "").trim();
+                                    if (shotStatus === "running") {
+                                      return <Loader2 className="ml-0.5 h-2.5 w-2.5 animate-spin text-orange-500" />;
+                                    }
+                                    if (shotStatus === "success" && String(shotAssetState?.selectedImageUrl || "").trim()) {
+                                      return <span className="ml-0.5 inline-block h-1.5 w-1.5 rounded-full bg-green-500" />;
+                                    }
+                                    return null;
+                                  })()}
+                                </button>
                               </div>
                               <div className="flex items-center gap-1.5 text-[10px] text-slate-500">
                                 {String(shot?.camera || "").trim() ? <span>{String(shot.camera).trim()}</span> : null}
@@ -17530,6 +17552,7 @@ const handleNodeMouseDown = (e, nid) => {
                 onNodeElementChange={handleNodeElementChange}
                 onStoryboardMentionHover={openStoryboardAssetHoverCard}
                 onStoryboardMentionLeave={scheduleCloseStoryboardAssetHoverCard}
+                onShotChipClick={openStoryboardShotHoverCard}
               />
             ))}
 
