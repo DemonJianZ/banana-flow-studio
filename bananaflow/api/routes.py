@@ -4,6 +4,7 @@ import time
 import json
 import os
 import re
+from pathlib import Path
 import uuid
 import hashlib
 import threading
@@ -19,7 +20,7 @@ from urllib.parse import unquote
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Depends, Query, Response, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from google.genai import types
 
@@ -42,6 +43,7 @@ from core.config import (
     AI_CHAT_TASK_TEMP_DIR,
     AI_CHAT_TASK_TIMEOUT_SEC,
     AI_CHAT_TASK_MAX_RETRIES,
+    MODEL_AGENT_CHAT,
 )
 from core.logging import sys_logger
 from auth_routes import get_current_user
@@ -77,7 +79,13 @@ from storage.ai_chat_tasks import (
     update_ai_chat_task,
 )
 from storage.storyboard_tasks import get_storyboard_task, update_storyboard_task
-from agent_v2.storyboard import design_storyboard, build_storyboard_canvas_patch
+from agent_v2.storyboard import (
+    build_character_asset_nodes,
+    build_storyboard_canvas_patch,
+    bind_local_assets_to_plan,
+    design_storyboard,
+    StoryboardLocalAssetBindings,
+)
 
 from storage.prompt_log import PromptLogger, LogAnalyzer
 from services.genai_client import call_genai_retry
@@ -389,6 +397,27 @@ class _AIChatNonRetryableError(RuntimeError):
         self.raw_text = raw_text
         self.response_json = response_json
         self.error_type = error_type
+
+
+class _StoryboardShotReferenceImage(BaseModel):
+    type: str = ""
+    name: str = ""
+    url: str = ""
+
+
+class _StoryboardShotGenerateRequest(BaseModel):
+    shot: Dict[str, Any]
+    storyboard_plan: Dict[str, Any]
+    entities: Dict[str, Any] = Field(default_factory=dict)
+    reference_images: List[_StoryboardShotReferenceImage] = Field(default_factory=list)
+    ai_chat_model_id: str = ""
+    authorization: str = ""
+    module_enum: str = "1"
+    part_enum: str = "2"
+    ai_chat_session_id: str = ""
+    history_ai_chat_record_id: str = ""
+    ai_image_param_size_id: str = ""
+    ai_image_param_ratio_id: str = ""
 
 
 def _now_iso() -> str:
@@ -2906,6 +2935,197 @@ def get_ai_chat_image_task_status(task_id: str):
     return AIChatImageTaskStatusResponse(**public_task)
 
 
+def _build_shot_prompt_context(req: _StoryboardShotGenerateRequest) -> str:
+    """Build the text context sent to the LLM for prompt writing."""
+    shot = req.shot or {}
+    plan = req.storyboard_plan or {}
+    entities = req.entities or {}
+
+    ref_names = [str(n or "").strip() for n in list(shot.get("referenced_entities") or []) if str(n or "").strip()]
+    all_entities: list = (
+        list(entities.get("characters") or [])
+        + list(entities.get("subjects") or [])
+        + list(entities.get("locations") or [])
+    )
+    entity_details: list[str] = []
+    for ent in all_entities:
+        name = str(ent.get("name") or "").strip()
+        if not name or not any(name in ref or ref in name for ref in ref_names):
+            continue
+        desc = str(ent.get("core_description") or ent.get("description") or "").strip()
+        traits = ", ".join(str(t) for t in list(ent.get("visual_traits") or []) if str(t or "").strip())
+        line = f"- {name}"
+        if desc:
+            line += f": {desc}"
+        if traits:
+            line += f" | 外观: {traits}"
+        entity_details.append(line)
+
+    ref_image_names = [str(img.name or "").strip() for img in req.reference_images if str(img.name or "").strip()]
+
+    global_notes = [str(n) for n in list(plan.get("global_notes") or []) if str(n or "").strip()]
+    lines = [
+        "# 任务",
+        "你是分镜图导演，请根据以下镜头信息为 gptimage2 多图合成生成最优提示词。",
+        "",
+        "# 镜头信息",
+        f"视觉描述: {str(shot.get('visual_description') or '').strip()}",
+        f"运镜: {str(shot.get('camera') or '').strip()}",
+        f"时长: {shot.get('duration_sec', '')}s",
+        f"生成备注: {str(shot.get('generation_notes') or '').strip()}",
+        "",
+        "# 全局风格",
+        f"风格: {str(plan.get('style') or '').strip()}",
+        f"画幅: {str(plan.get('aspect_ratio') or '16:9').strip()}",
+        f"全局说明: {'; '.join(global_notes)}",
+        f"设计理念: {str(plan.get('design_rationale') or '').strip()}",
+        "",
+        "# 相关角色/主体视觉特征",
+    ]
+    lines.extend(entity_details or ["(无)"])
+    lines += [
+        "",
+        "# 可用参考图（按名称选取，最多4张）",
+    ]
+    if ref_image_names:
+        lines.extend(f"- {n}" for n in ref_image_names)
+    else:
+        lines.append("(无)")
+    lines += [
+        "",
+        "# 输出格式（严格 JSON，不要解释）",
+        '{"selected_image_names": ["图名1", "图名2"], "prompt": "英文提示词"}',
+        "",
+        "要求：",
+        "1. selected_image_names 从上面可用参考图中按名称选，最多4张，没有合适的返回空数组。",
+        "2. prompt 用英文，描述画面构图、人物动作、环境、光影、风格，针对 gptimage2 多图合成优化。",
+        "3. 只输出 JSON，不要 markdown 代码块，不要多余文字。",
+    ]
+    return "\n".join(lines)
+
+
+def _write_shot_generation_prompt(
+    req: _StoryboardShotGenerateRequest,
+    req_id: str,
+) -> tuple[str, list[str]]:
+    """
+    Call Gemini flash to write the gptimage2 prompt.
+    Returns (prompt_text, resolved_image_urls).
+    Falls back to a template prompt if LLM output is unparseable.
+    """
+    context = _build_shot_prompt_context(req)
+    url_by_name: dict[str, str] = {
+        str(img.name or "").strip(): str(img.url or "").strip()
+        for img in req.reference_images
+        if str(img.name or "").strip() and str(img.url or "").strip()
+    }
+    try:
+        response = call_genai_retry(
+            contents=[types.Part(text=context)],
+            config=types.GenerateContentConfig(temperature=0.3),
+            req_id=f"{req_id}:shot_prompt",
+            model=MODEL_AGENT_CHAT,
+        )
+        raw_text = str(getattr(response, "text", "") or "").strip()
+        import re as _re
+        json_match = _re.search(r"\{[\s\S]*\}", raw_text)
+        if json_match:
+            parsed = json.loads(json_match.group())
+        else:
+            parsed = json.loads(raw_text)
+        selected_names = [str(n).strip() for n in list(parsed.get("selected_image_names") or []) if str(n or "").strip()]
+        prompt_text = str(parsed.get("prompt") or "").strip()
+        if not prompt_text:
+            raise ValueError("empty prompt from LLM")
+        resolved_urls = [url_by_name[n] for n in selected_names[:4] if n in url_by_name]
+        return prompt_text, resolved_urls
+    except Exception:
+        shot = req.shot or {}
+        plan = req.storyboard_plan or {}
+        style = str(plan.get("style") or "").strip()
+        vis = str(shot.get("visual_description") or "").strip()
+        fallback_prompt = f"{style + ', ' if style else ''}{vis}" or "storyboard shot illustration"
+        fallback_urls = [str(img.url or "").strip() for img in req.reference_images if str(img.url or "").strip()][:4]
+        return fallback_prompt, fallback_urls
+
+
+@router.post("/api/storyboard/generate_shot", response_model=AIChatImageTaskSubmitResponse)
+async def storyboard_generate_shot(body: _StoryboardShotGenerateRequest, request: Request):
+    req_id = getattr(request.state, "req_id", uuid.uuid4().hex[:8])
+    authorization = str(body.authorization or "").strip()
+    if not authorization:
+        raise HTTPException(status_code=400, detail="authorization 不能为空")
+    ai_chat_model_id = str(body.ai_chat_model_id or "").strip()
+    if not ai_chat_model_id:
+        raise HTTPException(status_code=400, detail="ai_chat_model_id 不能为空")
+
+    task_id = f"ai_chat_task_{uuid.uuid4().hex}"
+
+    prompt_text, resolved_image_urls = _write_shot_generation_prompt(body, req_id)
+
+    request_form: Dict[str, Any] = {
+        "endpoint": AI_CHAT_DOWNSTREAM_URL,
+        "authorization": authorization,
+        "history_ai_chat_record_id": str(body.history_ai_chat_record_id or "").strip(),
+        "module_enum": str(body.module_enum or "1").strip(),
+        "part_enum": str(body.part_enum or "2").strip(),
+        "message": prompt_text,
+        "ai_chat_session_id": str(body.ai_chat_session_id or "").strip(),
+        "ai_chat_model_id": ai_chat_model_id,
+        "ai_image_param_size_id": str(body.ai_image_param_size_id or "").strip(),
+        "ai_image_param_ratio_id": str(body.ai_image_param_ratio_id or "").strip(),
+        "images": resolved_image_urls,
+        "files": [],
+        "tusd_file_remote_ids": [],
+    }
+
+    task = create_ai_chat_task(
+        AI_CHAT_TASK_DB_PATH,
+        task_id=task_id,
+        req_id=req_id,
+        status="PENDING",
+        progress_message="分镜图任务已提交",
+        endpoint=AI_CHAT_DOWNSTREAM_URL,
+        ai_chat_model_id=ai_chat_model_id,
+        image_count=len(resolved_image_urls),
+        request_form=request_form,
+        request_files=[],
+    )
+    asyncio.create_task(_run_ai_chat_image_task(task_id))
+    return AIChatImageTaskSubmitResponse(
+        ok=True,
+        task_id=task_id,
+        status=str(task.get("status") or "PENDING"),
+        message="分镜图任务已提交",
+    )
+
+
+def _get_storyboard_asset_root() -> str:
+    """Return the main_assets directory path from env or package-relative default."""
+    env = os.getenv("STORYBOARD_ASSET_ROOT", "").strip()
+    if env:
+        return env
+    # Default: bananaflow/main_assets (sibling of the api package)
+    return str(Path(__file__).parent.parent / "main_assets")
+
+
+def _bind_local_assets_safely(plan, asset_root: str, user_brief: str = ""):
+    """Synchronous wrapper around bind_local_assets_to_plan; never raises."""
+    import logging as _log
+    try:
+        return bind_local_assets_to_plan(plan, asset_root=asset_root, user_brief=user_brief)
+    except Exception as exc:
+        _log.getLogger(__name__).warning("bind_local_assets_safely failed: %s", exc)
+        try:
+            return plan.model_copy(update={
+                "local_asset_bindings": StoryboardLocalAssetBindings(
+                    warnings=[f"资产绑定意外失败: {type(exc).__name__}: {exc}"]
+                )
+            })
+        except Exception:
+            return plan
+
+
 async def _run_storyboard_async(
     task_id: str,
     tool_args: dict,
@@ -2934,10 +3154,20 @@ async def _run_storyboard_async(
             authorization=authorization,
             req_id=req_id or task_id,
         )
+        # LAB-4: bind local assets (characters, voices, scenes) — never raises
+        user_brief = str(tool_args.get("brief") or "").strip()
+        plan = await asyncio.to_thread(
+            _bind_local_assets_safely, plan, _get_storyboard_asset_root(), user_brief
+        )
         existing_count = int(tool_args.get("_existing_storyboard_count") or 0)
-        patch_result = build_storyboard_canvas_patch(plan.model_dump(mode="json"), existing_storyboard_count=existing_count)
+        plan_dict = plan.model_dump(mode="json")
+        patch_result = build_storyboard_canvas_patch(plan_dict, existing_storyboard_count=existing_count)
         summary = str(patch_result.get("summary") or "")
-        patch = patch_result.get("patch", [])
+        patch = list(patch_result.get("patch", []))
+        # Asset injection: append local_asset_image nodes for each bound three-view
+        storyboard_x = (patch[0].get("node") or {}).get("x", 120) if patch else 120
+        if os.environ.get("STORYBOARD_INJECT_CHARACTER_ASSET_NODES", "0").strip().lower() in ("1", "true", "yes"):
+            patch += build_character_asset_nodes(plan_dict, storyboard_x=storyboard_x)
         update_storyboard_task(task_id, status="done", patch=patch, summary=summary)
         if thread_id:
             try:
@@ -2989,6 +3219,22 @@ def get_storyboard_status(task_id: str, current_user=Depends(_get_current_user_o
     if task is None:
         raise HTTPException(status_code=404, detail=f"storyboard task not found: {task_id}")
     return task
+
+
+@router.get("/main_assets/{file_path:path}")
+def serve_main_asset(file_path: str):
+    """Serve files from the storyboard main_assets directory with path-traversal protection."""
+    asset_root = Path(_get_storyboard_asset_root()).resolve()
+    # FastAPI already URL-decodes path params; resolve prevents traversal
+    safe_path = (asset_root / file_path).resolve()
+    root_str = str(asset_root)
+    safe_str = str(safe_path)
+    # Path must stay within the asset root
+    if safe_str != root_str and not safe_str.startswith(root_str + os.sep):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if not safe_path.is_file():
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return FileResponse(str(safe_path))
 
 
 @router.post("/api/local/text2img", response_model=Text2ImgResponse)
