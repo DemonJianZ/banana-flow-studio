@@ -10799,7 +10799,7 @@ const handleNodeMouseDown = (e, nid) => {
         const currentState =
           node?.data?.storyboard_asset_state && typeof node.data.storyboard_asset_state === "object"
             ? node.data.storyboard_asset_state
-            : { characters: {}, subjects: {}, locations: {} };
+            : { characters: {}, subjects: {}, locations: {}, shots: {} };
         const currentAssetState = { ...(((currentState[assetType] || {})[assetId] || {})) };
         const nextAssetState =
           typeof patch === "function"
@@ -10974,7 +10974,7 @@ const handleNodeMouseDown = (e, nid) => {
   );
 
   const runStoryboardShotGeneration = useCallback(
-    async (storyboardNode, scene, shot) => {
+    async (storyboardNode, _scene, shot) => {
       if (!storyboardNode || !shot || !apiFetch) return;
       const shotId = String(shot?.shot_id || "").trim();
       if (!shotId) return;
@@ -11106,9 +11106,9 @@ const handleNodeMouseDown = (e, nid) => {
         let proxyData = null;
         while (true) {
           if (Date.now() - startedAt > timeoutMs) throw new Error("分镜图生成超时");
-          await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
           const statusResp = await apiFetch(`/api/ai_chat_image_via_curl/${encodeURIComponent(taskId)}`);
           const statusData = await statusResp.json().catch(() => ({}));
+          if (!statusResp.ok) throw new Error(String(statusData?.detail || statusData?.error || `轮询失败 HTTP ${statusResp.status}`));
           const status = String(statusData?.status || "").toUpperCase();
           if (status === "SUCCESS") {
             proxyData = statusData?.result && typeof statusData.result === "object" ? statusData.result : {};
@@ -11121,6 +11121,7 @@ const handleNodeMouseDown = (e, nid) => {
             const errMsg = String(result?.done_error || statusData?.error || `分镜图生成${status === "TIMEOUT" ? "超时" : "失败"}`);
             throw new Error(errMsg);
           }
+          await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
         }
 
         const resultUrl =
