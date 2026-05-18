@@ -7508,13 +7508,20 @@ const NodeComponent = ({
                           >
                             <div className="flex items-center justify-between gap-2">
                               <div className="flex items-center gap-1.5">
-                                <button
-                                  type="button"
+                                <span
+                                  role="button"
+                                  tabIndex={0}
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     if (onShotChipClick) onShotChipClick(node, scene, shot, e.currentTarget);
                                   }}
-                                  className="inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11px] font-semibold ring-1 transition-colors bg-orange-50 text-orange-700 ring-orange-200 hover:bg-orange-100"
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter" || e.key === " ") {
+                                      e.stopPropagation();
+                                      if (onShotChipClick) onShotChipClick(node, scene, shot, e.currentTarget);
+                                    }
+                                  }}
+                                  className="inline-flex cursor-pointer items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11px] font-semibold ring-1 transition-colors bg-orange-50 text-orange-700 ring-orange-200 hover:bg-orange-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-400"
                                 >
                                   @镜头{shot?.shot_no || shotIndex + 1}
                                   {(() => {
@@ -7529,7 +7536,7 @@ const NodeComponent = ({
                                     }
                                     return null;
                                   })()}
-                                </button>
+                                </span>
                               </div>
                               <div className="flex items-center gap-1.5 text-[10px] text-slate-500">
                                 {String(shot?.camera || "").trim() ? <span>{String(shot.camera).trim()}</span> : null}
