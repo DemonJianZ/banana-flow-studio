@@ -114,7 +114,7 @@ import { viewMemberInfo } from "../api/memberInfo";
 import { viewUserAuths } from "../api/userAuths";
 import { detectPreferenceSuggestions } from "../agent/preferenceSuggestion";
 import { buildHitlFeedbackRows } from "../agent/hitlFeedbackHistory";
-import { AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2 } from "../config";
+import { AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2, API_BASE } from "../config";
 import Html360Viewer from "./Html360Viewer";
 import { findAIChatModelIdByKeywords } from "../lib/aiChatModelResolver";
 import { downloadMedia } from "../lib/downloadMedia";
@@ -354,6 +354,25 @@ const isPreviewableArtifact = (artifact) => {
   return !!url && (kind === "image" || kind === "video");
 };
 
+const normalizeLocationName = (text) =>
+  String(text || "").replace(/(?<=[一-鿿㐀-䶿])的(?=[一-鿿㐀-䶿])/g, "");
+
+const matchesSceneBinding = (sb, needle) => {
+  const fName = String(sb?.folder_name || "").trim();
+  const mFrom = String(sb?.matched_from || "").trim();
+  const n = String(needle || "").trim();
+  if (!n || n.length < 2) return false;
+  const nNorm = normalizeLocationName(n);
+  const fNorm = normalizeLocationName(fName);
+  const mNorm = normalizeLocationName(mFrom);
+  return (
+    fName === n || mFrom === n ||
+    fNorm === nNorm ||
+    fName.includes(n) || mFrom.includes(n) || n.includes(fName) ||
+    (nNorm.length >= 2 && (fNorm.includes(nNorm) || mNorm.includes(nNorm) || nNorm.includes(fNorm)))
+  );
+};
+
 const stripStoryboardDisplayIds = (value) =>
   String(value || "")
     .replace(/[（(]\s*(?:[A-Za-z]{1,16}_\d{1,6}|[A-Z]\d{2,6}|char[_-]?\d{1,6}|scene[_-]?\d{1,6}|shot[_-]?\d{1,6}|loc[_-]?\d{1,6}|subj[_-]?\d{1,6}|entity[_-]?\d{1,6})\s*[)）]/g, "")
@@ -366,6 +385,16 @@ const collectStoryboardMentionTerms = (storyboardPlan = {}) => {
   const entities = storyboardPlan?.entities || {};
   const scenes = Array.isArray(storyboardPlan?.scenes) ? storyboardPlan.scenes : [];
   const locations = Array.isArray(entities?.locations) ? entities.locations : [];
+  const charBindings = Array.isArray(storyboardPlan?.local_asset_bindings?.character_bindings)
+    ? storyboardPlan.local_asset_bindings.character_bindings : [];
+  const sceneBindings = Array.isArray(storyboardPlan?.local_asset_bindings?.scene_bindings)
+    ? storyboardPlan.local_asset_bindings.scene_bindings : [];
+  const boundEntityIds = new Set(
+    charBindings
+      .filter((cb) => String(cb?.three_view_url || cb?.voice_url || "").trim())
+      .map((cb) => String(cb?.entity_id || "").trim())
+      .filter(Boolean),
+  );
   const locationEntityByName = new Map(
     locations
       .map((item) => [stripStoryboardDisplayIds(item?.name || ""), item])
@@ -399,32 +428,36 @@ const collectStoryboardMentionTerms = (storyboardPlan = {}) => {
     if (!seen.has(term)) seen.set(term, { term, type, ...(selection || {}) });
   };
   (Array.isArray(entities?.characters) ? entities.characters : []).forEach((item) => {
+    const entityId = String(item?.entity_id || "").trim();
     pushEntry(item?.name, "character", {
       assetType: "characters",
-      assetId: String(item?.entity_id || "").trim(),
+      assetId: entityId,
       assetName: stripStoryboardDisplayIds(item?.name || ""),
+      hasBinding: boundEntityIds.has(entityId),
       selectionType: "entity",
-      selectionId: String(item?.entity_id || "").trim(),
+      selectionId: entityId,
       selectionLabel: `角色 · ${String(item?.name || "").trim()}`,
       selectionSummary: String(item?.core_description || item?.description || "").trim(),
       payload: {
-        entityId: String(item?.entity_id || "").trim(),
+        entityId,
         entityName: String(item?.name || "").trim(),
         entityType: "角色",
       },
     });
   });
   (Array.isArray(entities?.subjects) ? entities.subjects : []).forEach((item) => {
+    const entityId = String(item?.entity_id || "").trim();
     pushEntry(item?.name, "subject", {
       assetType: "subjects",
-      assetId: String(item?.entity_id || "").trim(),
+      assetId: entityId,
       assetName: stripStoryboardDisplayIds(item?.name || ""),
+      hasBinding: boundEntityIds.has(entityId),
       selectionType: "entity",
-      selectionId: String(item?.entity_id || "").trim(),
+      selectionId: entityId,
       selectionLabel: `主体 · ${String(item?.name || "").trim()}`,
       selectionSummary: String(item?.core_description || item?.description || "").trim(),
       payload: {
-        entityId: String(item?.entity_id || "").trim(),
+        entityId,
         entityName: String(item?.name || "").trim(),
         entityType: "主体",
       },
@@ -432,21 +465,25 @@ const collectStoryboardMentionTerms = (storyboardPlan = {}) => {
   });
   locations.forEach((item) => {
     const locationName = stripStoryboardDisplayIds(item?.name || "");
-    pushEntry(item?.name, "scene", sceneByLocation.get(locationName) || {
-      assetType: "locations",
-      assetId: String(item?.entity_id || "").trim(),
-      assetName: locationName,
-      selectionType: "scene",
-      selectionId: String(item?.entity_id || locationName).trim(),
-      selectionLabel: `场景 · ${String(item?.name || "").trim()}`,
-      selectionSummary: String(item?.core_description || item?.description || "").trim(),
-      payload: {
-        sceneId: "",
-        sceneNo: null,
-        sceneTitle: String(item?.name || "").trim(),
-        sceneLocation: String(item?.name || "").trim(),
-        locationId: String(item?.entity_id || "").trim(),
-      },
+    const hasSceneBinding = sceneBindings.some((sb) => matchesSceneBinding(sb, locationName));
+    pushEntry(item?.name, "scene", {
+      ...(sceneByLocation.get(locationName) || {
+        assetType: "locations",
+        assetId: String(item?.entity_id || "").trim(),
+        assetName: locationName,
+        selectionType: "scene",
+        selectionId: String(item?.entity_id || locationName).trim(),
+        selectionLabel: `场景 · ${String(item?.name || "").trim()}`,
+        selectionSummary: String(item?.core_description || item?.description || "").trim(),
+        payload: {
+          sceneId: "",
+          sceneNo: null,
+          sceneTitle: String(item?.name || "").trim(),
+          sceneLocation: String(item?.name || "").trim(),
+          locationId: String(item?.entity_id || "").trim(),
+        },
+      }),
+      hasBinding: hasSceneBinding,
     });
   });
   scenes.forEach((item, index) => {
@@ -565,7 +602,7 @@ const renderStoryboardMentionText = (
             : undefined
         }
       >
-        @{part}
+        {mentionEntry?.hasBinding ? "@" : ""}{part}
       </span>
     );
   });
@@ -1046,6 +1083,21 @@ const renderPersonaMentionText = (text, personaNames = EMPTY_LIST) => {
   return parts;
 };
 
+const buildStoryboardStylePrefix = (storyboardPlan = {}) => {
+  const parts = [];
+  const style = String(storyboardPlan?.style || "").trim();
+  if (style) parts.push(style);
+  const globalNotes = Array.isArray(storyboardPlan?.global_notes)
+    ? storyboardPlan.global_notes.map((n) => String(n || "").trim()).filter(Boolean)
+    : [];
+  parts.push(...globalNotes.slice(0, 2));
+  if (!globalNotes.length) {
+    const rationale = String(storyboardPlan?.design_rationale || "").trim();
+    if (rationale) parts.push(rationale.slice(0, 60));
+  }
+  return parts.join("，");
+};
+
 const buildStoryboardAssetGenerationPrompt = (assetType, asset, storyboardPlan = {}) => {
   const style = String(storyboardPlan?.style || "").trim();
   const aspectRatio = String(storyboardPlan?.aspect_ratio || "16:9").trim() || "16:9";
@@ -1053,14 +1105,16 @@ const buildStoryboardAssetGenerationPrompt = (assetType, asset, storyboardPlan =
   const coreDescription = String(asset?.core_description || asset?.description || "").trim();
   const visualTraits = Array.isArray(asset?.visual_traits) ? asset.visual_traits.filter(Boolean).join("，") : "";
   const detail = [coreDescription, visualTraits].filter(Boolean).join("，");
+  const stylePrefix = buildStoryboardStylePrefix(storyboardPlan);
+  const prefixStr = stylePrefix ? `${stylePrefix}。\n` : "";
 
   if (assetType === "characters") {
-    return `请生成一张故事板角色设定图，主体为${name}。角色描述：${detail || name}。要求：只表现该角色本人，不加入其他角色和无关主体；保持故事板既定服装、配饰、毛发/体态与气质；画面适合作为后续镜头统一参考，风格保持${style || "故事板原始风格"}，比例${aspectRatio}。`;
+    return `${prefixStr}请生成一张故事板角色设定图，主体为${name}。角色描述：${detail || name}。要求：只表现该角色本人，不加入其他角色和无关主体；保持故事板既定服装、配饰、毛发/体态与气质；画面适合作为后续镜头统一参考，风格保持${style || "故事板原始风格"}，比例${aspectRatio}。`;
   }
   if (assetType === "subjects") {
-    return `请生成一张故事板主体设定图，主体为${name}。主体描述：${detail || name}。要求：只表现该主体本身，突出材质、结构、颜色和关键细节，不加入无关角色；适合作为后续镜头统一参考，风格保持${style || "故事板原始风格"}，比例${aspectRatio}。`;
+    return `${prefixStr}请生成一张故事板主体设定图，主体为${name}。主体描述：${detail || name}。要求：只表现该主体本身，突出材质、结构、颜色和关键细节，不加入无关角色；适合作为后续镜头统一参考，风格保持${style || "故事板原始风格"}，比例${aspectRatio}。`;
   }
-  return `请生成一张故事板场景设定图，场景为${name}。场景描述：${detail || name}。要求：只表现环境本身，不加入角色动作和剧情事件；重点体现空间结构、光线、材质、空气、水迹、反射和整体氛围；适合作为后续镜头统一参考，风格保持${style || "故事板原始风格"}，比例${aspectRatio}。`;
+  return `${prefixStr}请生成一张故事板场景设定图，场景为${name}。场景描述：${detail || name}。要求：只表现环境本身，不加入角色动作和剧情事件；重点体现空间结构、光线、材质、空气、水迹、反射和整体氛围；适合作为后续镜头统一参考，风格保持${style || "故事板原始风格"}，比例${aspectRatio}。`;
 };
 
 const normalizeStoryboardAssetCandidates = (value) => {
@@ -2155,6 +2209,7 @@ const NODE_TYPES = {
   INPUT: "input",
   TEXT_INPUT: "text_input",
   STORYBOARD_PLAN: "storyboard_plan",
+  LOCAL_ASSET_IMAGE: "local_asset_image",
   ROLE_INPUT: "role_input",
   ROLE_STRUCTURER: "role_structurer",
   PROCESSOR: "processor",
@@ -4896,6 +4951,7 @@ const NodeComponent = ({
   const isOutput = node.type === NODE_TYPES.OUTPUT;
   const isTextInputNode = node.type === NODE_TYPES.TEXT_INPUT;
   const isStoryboardPlanNode = node.type === NODE_TYPES.STORYBOARD_PLAN;
+  const isLocalAssetImageNode = node.type === NODE_TYPES.LOCAL_ASSET_IMAGE;
   const isRoleInputNode = node.type === NODE_TYPES.ROLE_INPUT;
   const isRoleStructurerNode = node.type === NODE_TYPES.ROLE_STRUCTURER;
   const isPanoramaViewerNode = node.type === NODE_TYPES.PANORAMA_VIEWER;
@@ -5461,6 +5517,7 @@ const NodeComponent = ({
   if (isPanoramaViewerNode) title = node.data.title || "全景图浏览器";
   if (isTextInputNode) title = "提示词";
   if (isRoleStructurerNode) title = "角色结构化";
+  if (isLocalAssetImageNode) title = String(node.data?.title || node.data?.character_name || "本地素材").trim();
 
   const safeProgressWidth = (() => {
     const total = node.data.total || 0;
@@ -5627,7 +5684,7 @@ const NodeComponent = ({
     left: node.x,
     top: node.y,
     zIndex: nodeZIndex,
-    ...(isStoryboardPlanNode ? { width: 1280, maxWidth: 1280 } : {}),
+    ...(isStoryboardPlanNode ? { width: 1280, maxWidth: 1280 } : isLocalAssetImageNode ? { width: 200, maxWidth: 200 } : {}),
   };
   const handleStoryboardWheelCapture = isStoryboardPlanNode
     ? (event) => {
@@ -5657,6 +5714,10 @@ const NodeComponent = ({
     : isStoryboardPlanNode
     ? `absolute w-[1280px] max-w-[1280px] overflow-visible rounded-[18px] border bg-white shadow-[0_24px_56px_rgba(15,23,42,0.10)] flex flex-col transition-colors duration-200 ${
         node.data.status === "error" ? "border-rose-300" : selected ? "border-cyan-300" : "border-slate-200"
+      } ${selectedNodeShellClass}`
+    : isLocalAssetImageNode
+    ? `absolute w-[200px] overflow-visible rounded-[14px] border bg-white shadow-[0_8px_24px_rgba(15,23,42,0.08)] flex flex-col transition-colors duration-200 ${
+        selected ? "border-cyan-300" : "border-slate-200"
       } ${selectedNodeShellClass}`
     : isInlineImageGenNode
     ? `absolute w-[280px] overflow-visible rounded-[16px] border bg-white shadow-[0_14px_30px_rgba(15,23,42,0.06)] flex flex-col transition-colors duration-200 ${
@@ -7104,6 +7165,49 @@ const NodeComponent = ({
                     mentionEntry.payload || {},
                   );
                 };
+                const removeStoryboardEntity = (assetType, entityId) => {
+                  const plan = node.data?.storyboard_plan || {};
+                  const key = assetType === "characters" ? "characters" : "subjects";
+                  updateData(node.id, {
+                    storyboard_plan: {
+                      ...plan,
+                      entities: {
+                        ...(plan.entities || {}),
+                        [key]: ((plan.entities?.[key]) || []).filter((e) => String(e?.entity_id || "") !== entityId),
+                      },
+                    },
+                  });
+                };
+                const removeStoryboardScene = (sceneId) => {
+                  const plan = node.data?.storyboard_plan || {};
+                  const sceneToRemove = (Array.isArray(plan.scenes) ? plan.scenes : []).find((s) => String(s?.scene_id || "") === sceneId);
+                  const removedLocationName = stripStoryboardDisplayIds(String(sceneToRemove?.location || "").trim());
+                  updateData(node.id, {
+                    storyboard_plan: {
+                      ...plan,
+                      scenes: (Array.isArray(plan.scenes) ? plan.scenes : []).filter((s) => String(s?.scene_id || "") !== sceneId),
+                      entities: {
+                        ...(plan.entities || {}),
+                        locations: ((plan.entities?.locations) || []).filter(
+                          (loc) => !removedLocationName || stripStoryboardDisplayIds(String(loc?.name || "")) !== removedLocationName,
+                        ),
+                      },
+                    },
+                  });
+                };
+                const removeStoryboardShot = (sceneId, shotId) => {
+                  const plan = node.data?.storyboard_plan || {};
+                  updateData(node.id, {
+                    storyboard_plan: {
+                      ...plan,
+                      scenes: (Array.isArray(plan.scenes) ? plan.scenes : []).map((s) =>
+                        String(s?.scene_id || "") !== sceneId
+                          ? s
+                          : { ...s, shots: (Array.isArray(s.shots) ? s.shots : []).filter((sh) => String(sh?.shot_id || "") !== shotId) },
+                      ),
+                    },
+                  });
+                };
                 const isStoryboardTargetActive = (selectionType, selectionId) =>
                   isSameArtifactSelection(activeArtifact, {
                     kind: "storyboard_selection",
@@ -7155,6 +7259,12 @@ const NodeComponent = ({
                         ...characters.map((item) => ({ ...item, _sectionLabel: "角色" })),
                         ...subjects.map((item) => ({ ...item, _sectionLabel: "主体" })),
                       ];
+                      const charBindings = Array.isArray(node.data?.storyboard_plan?.local_asset_bindings?.character_bindings)
+                        ? node.data.storyboard_plan.local_asset_bindings.character_bindings
+                        : [];
+                      const bindingByEntityId = Object.fromEntries(
+                        charBindings.map((cb) => [String(cb?.entity_id || ""), cb]).filter(([k]) => k),
+                      );
                       if (!items.length) {
                         return (
                           <div className="rounded-[10px] border border-dashed border-slate-200 bg-slate-50 px-3 py-4 text-[11px] text-slate-500">
@@ -7165,36 +7275,53 @@ const NodeComponent = ({
                       return items.map((item, index) => {
                         const selectionId = String(item?.entity_id || `${item?._sectionLabel || "entity"}-${index}`).trim();
                         const isActive = isStoryboardTargetActive("entity", selectionId);
+                        const binding = bindingByEntityId[selectionId] || null;
+                        const threeViewUrl = String(binding?.three_view_url || "").trim();
+                        const assetTypeKey = item?._sectionLabel === "角色" ? "characters" : "subjects";
                         return (
-                          <button
-                            type="button"
-                            key={selectionId}
-                            onClick={() =>
-                              selectStoryboardTarget(
-                                "entity",
-                                selectionId,
-                                `${item?._sectionLabel || "设定"} · ${String(item?.name || "").trim() || `项目 ${index + 1}`}`,
-                                String(item?.core_description || item?.description || item?.story_function || "").trim(),
-                                {
-                                  entityId: selectionId,
-                                  entityName: String(item?.name || "").trim(),
-                                  entityType: item?._sectionLabel || "设定",
-                                  coreDescription: String(item?.core_description || item?.description || "").trim(),
-                                  storyFunction: String(item?.story_function || "").trim(),
-                                },
-                              )
-                            }
-                            className={`w-full rounded-[10px] border px-2.5 py-2 text-left transition-colors ${
-                              isActive
-                                ? "border-cyan-300 bg-cyan-50 shadow-[0_0_0_1px_rgba(34,211,238,0.18)]"
-                                : "border-slate-100 bg-slate-50 hover:border-slate-200 hover:bg-white"
-                            }`}
-                          >
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="min-w-0">
-                                <div className="text-[12px] font-semibold text-slate-800 break-words">
+                          <div key={selectionId} className="group relative">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                selectStoryboardTarget(
+                                  "entity",
+                                  selectionId,
+                                  `${item?._sectionLabel || "设定"} · ${String(item?.name || "").trim() || `项目 ${index + 1}`}`,
+                                  String(item?.core_description || item?.description || item?.story_function || "").trim(),
+                                  {
+                                    entityId: selectionId,
+                                    entityName: String(item?.name || "").trim(),
+                                    entityType: item?._sectionLabel || "设定",
+                                    coreDescription: String(item?.core_description || item?.description || "").trim(),
+                                    storyFunction: String(item?.story_function || "").trim(),
+                                  },
+                                )
+                              }
+                              className={`w-full rounded-[10px] border px-2.5 py-2 pr-7 text-left transition-colors ${
+                                isActive
+                                  ? "border-cyan-300 bg-cyan-50 shadow-[0_0_0_1px_rgba(34,211,238,0.18)]"
+                                  : "border-slate-100 bg-slate-50 hover:border-slate-200 hover:bg-white"
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="min-w-0">
+                                  <div className="text-[12px] font-semibold text-slate-800 break-words">
+                                    {renderStoryboardMentionText(
+                                      String(item?.name || "").trim() || `${item?._sectionLabel || "设定"} ${index + 1}`,
+                                      storyboardMentionTerms,
+                                      selectStoryboardMention,
+                                      onStoryboardMentionHover,
+                                      onStoryboardMentionLeave,
+                                      node,
+                                    )}
+                                  </div>
+                                </div>
+                                {isActive ? <span className="shrink-0 text-[10px] text-cyan-700">已选中</span> : null}
+                              </div>
+                              {!threeViewUrl && String(item?.core_description || item?.description || "").trim() ? (
+                                <div className="mt-1 text-[11px] leading-5 text-slate-700 break-words">
                                   {renderStoryboardMentionText(
-                                    String(item?.name || "").trim() || `${item?._sectionLabel || "设定"} ${index + 1}`,
+                                    String(item.core_description || item.description).trim(),
                                     storyboardMentionTerms,
                                     selectStoryboardMention,
                                     onStoryboardMentionHover,
@@ -7202,27 +7329,21 @@ const NodeComponent = ({
                                     node,
                                   )}
                                 </div>
-                              </div>
-                              {isActive ? <span className="shrink-0 text-[10px] text-cyan-700">已选中</span> : null}
-                            </div>
-                            {String(item?.core_description || item?.description || "").trim() ? (
-                              <div className="mt-1 text-[11px] leading-5 text-slate-700 break-words">
-                                {renderStoryboardMentionText(
-                                  String(item.core_description || item.description).trim(),
-                                  storyboardMentionTerms,
-                                  selectStoryboardMention,
-                                  onStoryboardMentionHover,
-                                  onStoryboardMentionLeave,
-                                  node,
-                                )}
-                              </div>
-                            ) : null}
-                            {String(item?.story_function || "").trim() ? (
-                              <div className="mt-1 text-[10px] leading-5 text-slate-500 break-words">
-                                作用: {String(item.story_function).trim()}
-                              </div>
-                            ) : null}
-                          </button>
+                              ) : null}
+                              {String(item?.story_function || "").trim() ? (
+                                <div className="mt-1 text-[10px] leading-5 text-slate-500 break-words">
+                                  作用: {String(item.story_function).trim()}
+                                </div>
+                              ) : null}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); removeStoryboardEntity(assetTypeKey, selectionId); }}
+                              className="absolute right-1.5 top-1.5 hidden h-5 w-5 items-center justify-center rounded-full bg-white text-slate-400 shadow-sm ring-1 ring-slate-200 hover:bg-rose-50 hover:text-rose-500 group-hover:flex"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </div>
                         );
                       });
                     })()}
@@ -7246,64 +7367,77 @@ const NodeComponent = ({
                           </div>
                         );
                       }
+                      const sceneBindings = Array.isArray(node.data?.storyboard_plan?.local_asset_bindings?.scene_bindings)
+                        ? node.data.storyboard_plan.local_asset_bindings.scene_bindings : [];
                       return scenes.map((scene, index) => {
                         const selectionId = String(scene?.scene_id || `scene-setting-${index}`).trim();
                         const isActive = isStoryboardTargetActive("scene", selectionId);
                         const sceneDisplayName = stripStoryboardDisplayIds(scene?.location || scene?.title || "") || `场景 ${index + 1}`;
                         const matchedLocation = locationByName.get(String(scene?.location || "").trim());
+                        const locationName = String(scene?.location || "").trim();
+                        const sceneBinding = sceneBindings.find((sb) => matchesSceneBinding(sb, locationName)) || null;
+                        const hasScenePreview = !!(sceneBinding && Array.isArray(sceneBinding.preview_urls) && sceneBinding.preview_urls.some(Boolean));
                         return (
-                          <button
-                            type="button"
-                            key={selectionId}
-                            onClick={() =>
-                              selectStoryboardTarget(
-                                "scene",
-                                selectionId,
-                                `场景 ${scene?.scene_no || index + 1} · ${sceneDisplayName}`,
-                                String(scene?.scene_notes || scene?.summary || matchedLocation?.core_description || matchedLocation?.description || "").trim(),
-                                {
-                                  sceneId: selectionId,
-                                  sceneNo: scene?.scene_no || index + 1,
-                                  sceneTitle: String(scene?.title || "").trim(),
-                                  sceneLocation: String(scene?.location || "").trim(),
-                                  sceneSummary: String(scene?.summary || "").trim(),
-                                  sceneNotes: String(scene?.scene_notes || "").trim(),
-                                  locationDescription: String(matchedLocation?.core_description || matchedLocation?.description || "").trim(),
-                                },
-                              )
-                            }
-                            className={`w-full rounded-[10px] border px-2.5 py-2 text-left transition-colors ${
-                              isActive
-                                ? "border-cyan-300 bg-cyan-50 shadow-[0_0_0_1px_rgba(34,211,238,0.18)]"
-                                : "border-slate-100 bg-slate-50 hover:border-slate-200 hover:bg-white"
-                            }`}
-                          >
-                            <div className="min-w-0">
-                              <div className="text-[12px] font-semibold text-slate-800 break-words">
-                                <span>场景 {scene?.scene_no || index + 1} </span>
-                                {renderStoryboardMentionText(
-                                  sceneDisplayName,
-                                  storyboardMentionTerms,
-                                  selectStoryboardMention,
-                                  onStoryboardMentionHover,
-                                  onStoryboardMentionLeave,
-                                  node,
-                                )}
+                          <div key={selectionId} className="group relative">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                selectStoryboardTarget(
+                                  "scene",
+                                  selectionId,
+                                  `场景 ${scene?.scene_no || index + 1} · ${sceneDisplayName}`,
+                                  String(scene?.scene_notes || scene?.summary || matchedLocation?.core_description || matchedLocation?.description || "").trim(),
+                                  {
+                                    sceneId: selectionId,
+                                    sceneNo: scene?.scene_no || index + 1,
+                                    sceneTitle: String(scene?.title || "").trim(),
+                                    sceneLocation: String(scene?.location || "").trim(),
+                                    sceneSummary: String(scene?.summary || "").trim(),
+                                    sceneNotes: String(scene?.scene_notes || "").trim(),
+                                    locationDescription: String(matchedLocation?.core_description || matchedLocation?.description || "").trim(),
+                                  },
+                                )
+                              }
+                              className={`w-full rounded-[10px] border px-2.5 py-2 pr-7 text-left transition-colors ${
+                                isActive
+                                  ? "border-cyan-300 bg-cyan-50 shadow-[0_0_0_1px_rgba(34,211,238,0.18)]"
+                                  : "border-slate-100 bg-slate-50 hover:border-slate-200 hover:bg-white"
+                              }`}
+                            >
+                              <div className="min-w-0">
+                                <div className="text-[12px] font-semibold text-slate-800 break-words">
+                                  <span>场景 {scene?.scene_no || index + 1} </span>
+                                  {renderStoryboardMentionText(
+                                    sceneDisplayName,
+                                    storyboardMentionTerms,
+                                    selectStoryboardMention,
+                                    onStoryboardMentionHover,
+                                    onStoryboardMentionLeave,
+                                    node,
+                                  )}
+                                </div>
                               </div>
-                            </div>
-                            {String(matchedLocation?.core_description || matchedLocation?.description || scene?.scene_notes || scene?.summary || "").trim() ? (
-                              <div className="mt-2 rounded-[10px] border border-violet-100 bg-violet-50/70 px-2.5 py-2 text-[11px] leading-5 text-slate-700 break-words">
-                                {renderStoryboardMentionText(
-                                  String(matchedLocation?.core_description || matchedLocation?.description || scene?.scene_notes || scene?.summary).trim(),
-                                  storyboardMentionTerms,
-                                  selectStoryboardMention,
-                                  onStoryboardMentionHover,
-                                  onStoryboardMentionLeave,
-                                  node,
-                                )}
-                              </div>
-                            ) : null}
-                          </button>
+                              {!hasScenePreview && String(matchedLocation?.core_description || matchedLocation?.description || scene?.scene_notes || scene?.summary || "").trim() ? (
+                                <div className="mt-2 rounded-[10px] border border-violet-100 bg-violet-50/70 px-2.5 py-2 text-[11px] leading-5 text-slate-700 break-words">
+                                  {renderStoryboardMentionText(
+                                    String(matchedLocation?.core_description || matchedLocation?.description || scene?.scene_notes || scene?.summary).trim(),
+                                    storyboardMentionTerms,
+                                    selectStoryboardMention,
+                                    onStoryboardMentionHover,
+                                    onStoryboardMentionLeave,
+                                    node,
+                                  )}
+                                </div>
+                              ) : null}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); removeStoryboardScene(selectionId); }}
+                              className="absolute right-1.5 top-1.5 hidden h-5 w-5 items-center justify-center rounded-full bg-white text-slate-400 shadow-sm ring-1 ring-slate-200 hover:bg-rose-50 hover:text-rose-500 group-hover:flex"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </div>
                         );
                       });
                     })()}
@@ -7342,9 +7476,9 @@ const NodeComponent = ({
                           const selectionId = String(shot?.shot_id || `${scene?.scene_id || sceneIndex}-shot-${shotIndex}`).trim();
                           const isActive = isStoryboardTargetActive("shot", selectionId);
                           return (
+                          <div key={selectionId} className="group relative">
                           <button
                             type="button"
-                            key={selectionId}
                             onClick={() =>
                               selectStoryboardTarget(
                                 "shot",
@@ -7360,11 +7494,12 @@ const NodeComponent = ({
                                   camera: String(shot?.camera || "").trim(),
                                   durationSec: shot?.duration_sec ?? null,
                                   visualDescription: String(shot?.visual_description || "").trim(),
+                                  dialogues: Array.isArray(shot?.dialogues) ? shot.dialogues : [],
                                   voiceover: String(shot?.voiceover || "").trim(),
                                 },
                               )
                             }
-                            className={`w-full rounded-[10px] border px-2.5 py-2 text-left transition-colors ${
+                            className={`w-full rounded-[10px] border px-2.5 py-2 pr-7 text-left transition-colors ${
                               isActive
                                 ? "border-cyan-300 bg-cyan-50 shadow-[0_0_0_1px_rgba(34,211,238,0.18)]"
                                 : "border-slate-100 bg-slate-50 hover:border-slate-200 hover:bg-white"
@@ -7390,6 +7525,27 @@ const NodeComponent = ({
                                 node,
                               )}
                             </div>
+                            {Array.isArray(shot?.dialogues) && shot.dialogues.length > 0 ? (
+                              <div className="mt-1.5 space-y-0.5">
+                                {shot.dialogues.map((d, di) => {
+                                  const speaker = String(d?.speaker || "").trim();
+                                  const line = String(d?.text || "").trim();
+                                  if (!line) return null;
+                                  return (
+                                    <div key={di} className="text-[10px] leading-5 break-words">
+                                      {speaker ? (
+                                        <>
+                                          <span className="font-medium text-slate-700">{speaker}：</span>
+                                          <span className="text-slate-500">{line}</span>
+                                        </>
+                                      ) : (
+                                        <span className="text-slate-500">"{line}"</span>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            ) : null}
                             {String(shot?.voiceover || "").trim() ? (
                               <div className="mt-1 text-[10px] leading-5 text-slate-500 break-words">
                                 <span>旁白: </span>
@@ -7404,6 +7560,14 @@ const NodeComponent = ({
                               </div>
                             ) : null}
                           </button>
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); removeStoryboardShot(String(scene?.scene_id || ""), selectionId); }}
+                              className="absolute right-1.5 top-1.5 hidden h-5 w-5 items-center justify-center rounded-full bg-white text-slate-400 shadow-sm ring-1 ring-slate-200 hover:bg-rose-50 hover:text-rose-500 group-hover:flex"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </div>
                         )})}
                       </div>
                     </div>
@@ -7416,17 +7580,99 @@ const NodeComponent = ({
                 </div>
               </div>
               </div>
+
+              {(() => {
+                const lab = node.data?.storyboard_plan?.local_asset_bindings;
+                if (!lab) return null;
+                const chars = Array.isArray(lab.character_bindings) ? lab.character_bindings : [];
+                const scenes = Array.isArray(lab.scene_bindings) ? lab.scene_bindings : [];
+                const missingChars = Array.isArray(lab.missing_characters) ? lab.missing_characters : [];
+                const missingScenes = Array.isArray(lab.missing_scenes) ? lab.missing_scenes : [];
+                const warnings = Array.isArray(lab.warnings) ? lab.warnings : [];
+                if (!chars.length && !scenes.length && !missingChars.length && !missingScenes.length && !warnings.length) return null;
+                return (
+                  <div className="mt-3 rounded-[10px] border border-emerald-200 bg-emerald-50/60 px-2.5 py-2">
+                    <div className="mb-1.5 text-[10px] font-semibold text-emerald-800">素材绑定</div>
+                    {chars.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5">
+                        {chars.map((cb, i) => (
+                          <span key={cb?.entity_id || i} className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-white px-2 py-0.5 text-[10px] text-slate-700">
+                            <span className="font-medium">{String(cb?.character_name || "").trim()}</span>
+                            <span title={cb?.three_view_url || undefined} className={cb?.three_view_url ? "text-emerald-600" : "text-slate-400"}>
+                              三视图{cb?.three_view_url ? "✓" : "✗"}
+                            </span>
+                            <span title={cb?.voice_url || undefined} className={cb?.voice_url ? "text-emerald-600" : "text-slate-400"}>
+                              音色{cb?.voice_url ? "✓" : "✗"}
+                            </span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {scenes.length > 0 && (
+                      <div className="mt-1.5 flex flex-wrap gap-1.5">
+                        {scenes.map((sb, i) => (
+                          <span key={sb?.folder_name || i} title={sb?.folder_path || undefined} className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-white px-2 py-0.5 text-[10px] text-slate-700">
+                            <span>{String(sb?.folder_name || "").trim()}</span>
+                            <span className="text-blue-500">✓</span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {(missingChars.length > 0 || missingScenes.length > 0) && (
+                      <div className="mt-1.5 text-[10px] text-slate-500">
+                        {missingChars.length > 0 && (
+                          <span className="mr-2">角色缺失: {missingChars.join("、")}</span>
+                        )}
+                        {missingScenes.length > 0 && (
+                          <span>场景缺失: {missingScenes.length} 项</span>
+                        )}
+                      </div>
+                    )}
+                    {warnings.length > 0 && (
+                      <div className="mt-1.5 text-[10px] text-amber-700">⚠ {warnings.length} 项警告</div>
+                    )}
+                  </div>
+                );
+              })()}
                   </>
                 );
               })()}
             </div>
           </div>
         )}
+
+        {isLocalAssetImageNode && (() => {
+          const assetUrl = String(node.data?.url || "").trim();
+          const fullUrl = assetUrl ? `${(API_BASE || "").replace(/\/+$/, "")}${assetUrl}` : "";
+          const charName = String(node.data?.character_name || "").trim();
+          const assetName = String(node.data?.asset_name || "").trim();
+          return (
+            <div className="nodrag p-2">
+              <div className="overflow-hidden rounded-[10px] border border-slate-100 bg-slate-50">
+                {fullUrl ? (
+                  <img
+                    src={fullUrl}
+                    alt={charName || assetName || "三视图"}
+                    title={assetName || fullUrl}
+                    className="w-full object-contain"
+                    style={{ maxHeight: 240 }}
+                    onError={(e) => { e.currentTarget.style.display = "none"; }}
+                  />
+                ) : (
+                  <div className="flex h-32 items-center justify-center text-[11px] text-slate-400">无图片</div>
+                )}
+              </div>
+              {charName && (
+                <div className="mt-1.5 text-center text-[11px] text-slate-600">{charName}</div>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       {/* Ports */}
       <div className="pointer-events-none absolute top-1/2 w-full -translate-y-1/2 flex justify-between px-0">
-        {node.type !== NODE_TYPES.INPUT && !isTextInputNode && !isStoryboardPlanNode && !isRoleInputNode && (
+        {node.type !== NODE_TYPES.INPUT && !isTextInputNode && !isStoryboardPlanNode && !isRoleInputNode && !isLocalAssetImageNode && (
           <div className="pointer-events-auto relative -translate-x-1/2">
             <div
               onMouseEnter={() => onConnectTargetHover?.(VIDEO_GEN_INPUT_HANDLE_MAIN)}
@@ -7444,7 +7690,7 @@ const NodeComponent = ({
             ) : null}
           </div>
         )}
-        {!isStoryboardPlanNode ? (
+        {!isStoryboardPlanNode && !isLocalAssetImageNode ? (
           <div
             onMouseDown={onConnectStart}
             className="pointer-events-auto ml-auto translate-x-1/2 h-3 w-3 cursor-crosshair rounded-full border border-slate-300 bg-white shadow-[0_0_0_2px_rgba(255,255,255,0.9)] transition-transform duration-150 hover:scale-[1.55] hover:border-cyan-400 hover:bg-cyan-50 z-20"
@@ -8633,6 +8879,8 @@ const Workbench = () => {
   const [activeArtifact, setActiveArtifact] = useState(null);
   const [hoveredStoryboardAssetCard, setHoveredStoryboardAssetCard] = useState(null);
   const storyboardAssetHoverCloseTimerRef = useRef(null);
+  const [hoveredStoryboardShotCard, setHoveredStoryboardShotCard] = useState(null);
+  const storyboardShotHoverCloseTimerRef = useRef(null);
   const selectedStoryboardTarget = useMemo(() => {
     if (String(activeArtifact?.kind || "").trim() !== "storyboard_selection") return null;
     const meta = activeArtifact?.meta && typeof activeArtifact.meta === "object" ? activeArtifact.meta : {};
@@ -8770,6 +9018,36 @@ const Workbench = () => {
       setHoveredStoryboardAssetCard((current) => (current?.sticky ? current : null));
       storyboardAssetHoverCloseTimerRef.current = null;
     }, 120);
+  }, []);
+
+  const closeStoryboardShotHoverCard = useCallback(() => {
+    if (storyboardShotHoverCloseTimerRef.current) {
+      window.clearTimeout(storyboardShotHoverCloseTimerRef.current);
+      storyboardShotHoverCloseTimerRef.current = null;
+    }
+    setHoveredStoryboardShotCard(null);
+  }, []);
+
+  const scheduleCloseStoryboardShotHoverCard = useCallback(() => {
+    if (storyboardShotHoverCloseTimerRef.current) {
+      window.clearTimeout(storyboardShotHoverCloseTimerRef.current);
+    }
+    storyboardShotHoverCloseTimerRef.current = window.setTimeout(() => {
+      setHoveredStoryboardShotCard((current) => (current?.sticky ? current : null));
+      storyboardShotHoverCloseTimerRef.current = null;
+    }, 300);
+  }, []);
+
+  const openStoryboardShotHoverCard = useCallback((storyboardNode, scene, shot, chipElement) => {
+    if (!storyboardNode || !shot) return;
+    if (storyboardShotHoverCloseTimerRef.current) {
+      window.clearTimeout(storyboardShotHoverCloseTimerRef.current);
+      storyboardShotHoverCloseTimerRef.current = null;
+    }
+    const rect = chipElement?.getBoundingClientRect?.() || { left: 0, bottom: 0 };
+    const x = Math.min(rect.left, Math.max(window.innerWidth - 380, 24));
+    const y = Math.min(rect.bottom + 6, Math.max(window.innerHeight - 480, 24));
+    setHoveredStoryboardShotCard({ nodeId: storyboardNode.id, scene, shot, x, y, sticky: false });
   }, []);
 
   const openStoryboardAssetHoverCard = useCallback(
@@ -10695,6 +10973,201 @@ const handleNodeMouseDown = (e, nid) => {
     [apiFetch, imageModelRecords, resolveModelParamsForId, updateStoryboardAssetStatus],
   );
 
+  const runStoryboardShotGeneration = useCallback(
+    async (storyboardNode, scene, shot) => {
+      if (!storyboardNode || !shot || !apiFetch) return;
+      const shotId = String(shot?.shot_id || "").trim();
+      if (!shotId) return;
+
+      updateStoryboardAssetStatus(storyboardNode.id, "shots", shotId, {
+        status: "running",
+        error: "",
+      });
+      setHoveredStoryboardShotCard((current) =>
+        current && current.nodeId === storyboardNode.id && String(current.shot?.shot_id || "") === shotId
+          ? { ...current, sticky: true }
+          : current,
+      );
+
+      try {
+        // --- Resolve model ID (same pattern as runStoryboardAssetDirectGeneration) ---
+        const preferredNanoModelId = String(AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2 || "").trim();
+        const loadedModelIdSet = new Set(
+          (Array.isArray(imageModelRecords) ? imageModelRecords : [])
+            .map((item) => String(item?.id || item?.value || "").trim())
+            .filter(Boolean),
+        );
+        const targetModelId =
+          (preferredNanoModelId && loadedModelIdSet.has(preferredNanoModelId) ? preferredNanoModelId : "") ||
+          findAIChatModelIdByKeywords(imageModelRecords) ||
+          "";
+        if (!targetModelId) throw new Error("未找到 gptimage2 对应的图像模型ID");
+
+        // --- Resolve params (size + ratio) ---
+        const paramList = await resolveModelParamsForId(targetModelId);
+        const resolvedParamPayload = buildAIChatParamPayload(paramList);
+        const selectedRatio = String(storyboardNode.data?.storyboard_plan?.aspect_ratio || "16:9").trim() || "16:9";
+        const matchedSizeId = findAIChatParamValueId(paramList, ["size", "尺寸"], "1k");
+        const matchedRatioId = findAIChatParamValueId(paramList, ["ratio", "比例", "宽高比", "画幅", "aspect"], selectedRatio);
+        if (matchedSizeId) resolvedParamPayload.ai_image_param_size_id = matchedSizeId;
+        if (matchedRatioId) resolvedParamPayload.ai_image_param_ratio_id = matchedRatioId;
+
+        // --- Collect reference images from local_asset_bindings and storyboard_asset_state ---
+        const plan = storyboardNode.data?.storyboard_plan || {};
+        const assetState = storyboardNode.data?.storyboard_asset_state || {};
+        const lab = plan.local_asset_bindings || {};
+        const charBindings = Array.isArray(lab.character_bindings) ? lab.character_bindings : [];
+        const sceneBindings = Array.isArray(lab.scene_bindings) ? lab.scene_bindings : [];
+        const referenceImages = [];
+
+        // Character three-view and generated asset images
+        for (const cb of charBindings) {
+          const threeViewUrl = String(cb?.three_view_url || "").trim();
+          if (threeViewUrl) {
+            referenceImages.push({ type: "character", name: stripStoryboardDisplayIds(String(cb?.character_name || cb?.entity_name || "")), url: threeViewUrl });
+          }
+          const entityId = String(cb?.entity_id || "").trim();
+          const charAssetUrl = String(assetState?.characters?.[entityId]?.selectedImageUrl || "").trim();
+          if (charAssetUrl) {
+            referenceImages.push({ type: "asset", name: stripStoryboardDisplayIds(String(cb?.entity_name || "")), url: charAssetUrl });
+          }
+        }
+        // Subject generated asset images
+        for (const ent of (Array.isArray(plan.entities?.subjects) ? plan.entities.subjects : [])) {
+          const entityId = String(ent?.entity_id || "").trim();
+          const subjAssetUrl = String(assetState?.subjects?.[entityId]?.selectedImageUrl || "").trim();
+          if (subjAssetUrl) {
+            referenceImages.push({ type: "asset", name: stripStoryboardDisplayIds(String(ent?.name || "")), url: subjAssetUrl });
+          }
+        }
+        // Scene preview + generated asset images
+        for (const sb of sceneBindings) {
+          const previewUrl = String((Array.isArray(sb?.preview_urls) ? sb.preview_urls : [])[0] || "").trim();
+          if (previewUrl) {
+            referenceImages.push({ type: "scene", name: String(sb?.folder_name || sb?.matched_from || "").trim(), url: previewUrl });
+          }
+        }
+        for (const locEnt of (Array.isArray(plan.entities?.locations) ? plan.entities.locations : [])) {
+          const entityId = String(locEnt?.entity_id || "").trim();
+          const locAssetUrl = String(assetState?.locations?.[entityId]?.selectedImageUrl || "").trim();
+          if (locAssetUrl) {
+            referenceImages.push({ type: "asset", name: stripStoryboardDisplayIds(String(locEnt?.name || "")), url: locAssetUrl });
+          }
+        }
+
+        // --- Build and POST request ---
+        const authorizationInfo = resolveMemberAuthorizationInfo();
+        if (!authorizationInfo?.value) throw new Error("缺少 member authorization");
+
+        const submitResp = await apiFetch("/api/storyboard/generate_shot", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            shot: {
+              shot_id: shot.shot_id,
+              shot_no: shot.shot_no,
+              visual_description: String(shot.visual_description || "").trim(),
+              camera: String(shot.camera || "").trim(),
+              duration_sec: shot.duration_sec ?? 4.0,
+              referenced_entities: Array.isArray(shot.referenced_entities) ? shot.referenced_entities : [],
+              generation_notes: String(shot.generation_notes || "").trim(),
+            },
+            storyboard_plan: {
+              title: String(plan.title || "").trim(),
+              style: String(plan.style || "").trim(),
+              aspect_ratio: String(plan.aspect_ratio || "16:9").trim(),
+              global_notes: Array.isArray(plan.global_notes) ? plan.global_notes : [],
+              design_rationale: String(plan.design_rationale || "").trim(),
+            },
+            entities: {
+              characters: Array.isArray(plan.entities?.characters) ? plan.entities.characters : [],
+              subjects: Array.isArray(plan.entities?.subjects) ? plan.entities.subjects : [],
+              locations: Array.isArray(plan.entities?.locations) ? plan.entities.locations : [],
+            },
+            reference_images: referenceImages,
+            ai_chat_model_id: targetModelId,
+            authorization: authorizationInfo.value,
+            history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
+            module_enum: WORKBENCH_AI_CHAT_MODULE_ENUM,
+            part_enum: String(resolveWorkbenchAIChatPartEnum({ mode: "text2img" })),
+            ai_chat_session_id: aiChatSessionIdRef.current || "",
+            ...resolvedParamPayload,
+          }),
+        });
+        const submitData = await submitResp.json().catch(() => ({}));
+        if (!submitResp.ok) throw new Error(String(submitData?.detail || "分镜图任务提交失败"));
+        const taskId = String(submitData?.task_id || "").trim();
+        if (!taskId) throw new Error("未返回 task_id");
+
+        // --- Poll for result ---
+        const pollIntervalMs = 1200;
+        const timeoutMs = 600000;
+        const startedAt = Date.now();
+        let proxyData = null;
+        while (true) {
+          if (Date.now() - startedAt > timeoutMs) throw new Error("分镜图生成超时");
+          await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+          const statusResp = await apiFetch(`/api/ai_chat_image_via_curl/${encodeURIComponent(taskId)}`);
+          const statusData = await statusResp.json().catch(() => ({}));
+          const status = String(statusData?.status || "").toUpperCase();
+          if (status === "SUCCESS") {
+            proxyData = statusData?.result && typeof statusData.result === "object" ? statusData.result : {};
+            if (proxyData?.source_session_id) aiChatSessionIdRef.current = String(proxyData.source_session_id);
+            if (proxyData?.source_history_record_id) aiChatHistoryRecordIdRef.current = String(proxyData.source_history_record_id);
+            break;
+          }
+          if (status === "FAILED" || status === "TIMEOUT") {
+            const result = statusData?.result && typeof statusData.result === "object" ? statusData.result : {};
+            const errMsg = String(result?.done_error || statusData?.error || `分镜图生成${status === "TIMEOUT" ? "超时" : "失败"}`);
+            throw new Error(errMsg);
+          }
+        }
+
+        const resultUrl =
+          pickFirstImageUrl(proxyData?.image_url) ||
+          pickFirstImageUrl(proxyData?.events) ||
+          pickFirstImageUrl(proxyData?.text) ||
+          pickFirstImageUrl(proxyData) ||
+          "";
+        if (!resultUrl) throw new Error("分镜图生成未返回图片");
+
+        const generatedAt = Date.now();
+        updateStoryboardAssetStatus(storyboardNode.id, "shots", shotId, (prev) => {
+          const prevCandidates = normalizeStoryboardAssetCandidates(prev?.candidates);
+          const nextCandidate = {
+            id: `candidate_${generatedAt}_${Math.random().toString(36).slice(2, 8)}`,
+            url: resultUrl,
+            createdAt: generatedAt,
+            source: "generate",
+          };
+          const nextCandidates = [nextCandidate, ...prevCandidates.filter((c) => String(c?.url || "") !== resultUrl)].slice(0, 8);
+          return {
+            ...prev,
+            status: "success",
+            error: "",
+            images: [resultUrl],
+            candidates: nextCandidates,
+            selectedCandidateId: nextCandidate.id,
+            selectedImageUrl: resultUrl,
+            lastGeneratedAt: generatedAt,
+          };
+        });
+      } catch (error) {
+        updateStoryboardAssetStatus(storyboardNode.id, "shots", shotId, {
+          status: "error",
+          error: String(error?.message || error || "分镜图生成失败"),
+        });
+      } finally {
+        setHoveredStoryboardShotCard((current) =>
+          current && current.nodeId === storyboardNode.id && String(current.shot?.shot_id || "") === shotId
+            ? { ...current, sticky: false }
+            : current,
+        );
+      }
+    },
+    [apiFetch, imageModelRecords, resolveModelParamsForId, updateStoryboardAssetStatus, resolveMemberAuthorizationInfo],
+  );
+
   const createImageOperationResultNode = useCallback((sourceNodeId, resultImages, title) => {
     const safeImages = (Array.isArray(resultImages) ? resultImages : [])
       .map((item) => String(item || "").trim())
@@ -11807,6 +12280,61 @@ const handleNodeMouseDown = (e, nid) => {
             selectedAngle: normalizedBrief.selectedAngle || "",
           },
         );
+        // Backend may route to storyboard.design even when called from the script flow.
+        if (agentResponse?.action === "tool_call" && agentResponse?.data?.is_async && agentResponse?.data?.task_id) {
+          const storyboardTaskId = String(agentResponse.data.task_id);
+          updateActiveAgentSession((session) => ({
+            ...session,
+            turns: (session.turns || []).map((turn) =>
+              turn.id === turnId
+                ? { ...turn, status: "running", assistantText: "分镜方案生成中...", intent: "STORYBOARD" }
+                : turn,
+            ),
+          }));
+          const taskResult = await pollStoryboardTask(storyboardTaskId, apiFetch, (s) => {
+            if (s === "running") {
+              updateActiveAgentSession((session) => ({
+                ...session,
+                turns: (session.turns || []).map((turn) =>
+                  turn.id === turnId
+                    ? { ...turn, assistantText: "分镜方案生成中（AI 正在思考）..." }
+                    : turn,
+                ),
+              }));
+            }
+          });
+          const sbPatch = Array.isArray(taskResult?.patch) ? taskResult.patch : [];
+          const sbNodeIds = sbPatch
+            .filter((op) => op?.op === "add_node" && op?.node?.type === "storyboard_plan")
+            .map((op) => String(op?.node?.id || "").trim())
+            .filter(Boolean);
+          if (sbPatch.length) {
+            pushHistory();
+            const pr = _applyPatch(sbPatch);
+            if (pr?.nodes && pr?.connections) {
+              upsertCanvasDraftSnapshot({ nodes: pr.nodes, connections: pr.connections, viewport: pr.viewport || viewportRef.current });
+            }
+          }
+          updateActiveAgentSession((session) => ({
+            ...session,
+            turns: (session.turns || []).map((turn) =>
+              turn.id === turnId
+                ? {
+                    ...turn,
+                    status: "done",
+                    stepIndex: AGENT_RUN_STEPS.length - 1,
+                    assistantText: String(taskResult?.summary || "已生成可编辑分镜方案。").trim(),
+                    response: { storyboardNodeIds: sbNodeIds, summary: String(taskResult?.summary || "").trim() },
+                    intent: "STORYBOARD",
+                    intentReason: "storyboard_from_script_flow",
+                  }
+                : turn,
+            ),
+          }));
+          ensureAgentResultCard(turnId);
+          return;
+        }
+
         if (!(agentResponse?.action === "tool_call" && Array.isArray(agentResponse?.data?.topics))) {
           throw new Error("Agent 未返回脚本结果");
         }
@@ -11845,7 +12373,7 @@ const handleNodeMouseDown = (e, nid) => {
         setRunToast({ message: error?.message || "Idea Script 生成失败", type: "error" });
       }
     },
-    [ensureAgentResultCard, runAgentConversation, updateActiveAgentSession],
+    [ensureAgentResultCard, runAgentConversation, updateActiveAgentSession, apiFetch, pushHistory, _applyPatch, upsertCanvasDraftSnapshot, viewportRef],
   );
 
   const runDramaMissionOnTurn = useCallback(
@@ -13103,6 +13631,18 @@ const handleNodeMouseDown = (e, nid) => {
         product: "",
         sessionId: activeAgentSession?.id || "",
       });
+      return;
+    }
+    if (turn?.intent === "STORYBOARD") {
+      updateActiveAgentSession((session) => ({
+        ...session,
+        turns: (session.turns || []).map((item) =>
+          item.id === turnId
+            ? { ...item, status: "running", error: "", stepIndex: 0 }
+            : item,
+        ),
+      }));
+      void sendAgentMissionFromText(turn.userText || "", {});
       return;
     }
     const brief = normalizeScriptBrief(turn.scriptBrief || turn.scriptBriefDraft || {});
@@ -17843,21 +18383,116 @@ const handleNodeMouseDown = (e, nid) => {
                             {String(asset?.name || "").trim() || tabLabel}
                           </div>
                         </div>
-                        {isLocked ? (
-                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] text-emerald-700">
-                            <CheckCircle2 className="h-3 w-3" />
-                            定稿
-                          </span>
-                        ) : (
-                          <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] text-slate-500">待确认</span>
-                        )}
                       </div>
                       {generatedAt ? <div className="mt-2 text-[10px] text-slate-400">最近生成：{generatedAt}</div> : null}
                     </div>
                     <div className="space-y-3 p-4">
-                      <div className="text-[11px] leading-5 text-slate-600 break-words">
-                        {String(asset?.core_description || asset?.description || "暂无描述").trim()}
-                      </div>
+                      {(() => {
+                        // Pre-compute whether a local asset image is available so we can suppress the text description.
+                        const lab = storyboardNode?.data?.storyboard_plan?.local_asset_bindings || {};
+                        let hasLocalImage = false;
+                        if (assetType === "characters" || assetType === "subjects") {
+                          const cb = (Array.isArray(lab.character_bindings) ? lab.character_bindings : [])
+                            .find((b) => String(b?.entity_id || "").trim() === assetId);
+                          hasLocalImage = !!String(cb?.three_view_url || "").trim();
+                        } else if (assetType === "locations") {
+                          const assetName = String(asset?.name || "").trim();
+                          const sb = (Array.isArray(lab.scene_bindings) ? lab.scene_bindings : [])
+                            .find((b) => matchesSceneBinding(b, assetId) || matchesSceneBinding(b, assetName));
+                          hasLocalImage = !!(sb && Array.isArray(sb.preview_urls) && sb.preview_urls.some(Boolean));
+                        }
+                        if (hasLocalImage) return null;
+                        return (
+                          <div className="text-[11px] leading-5 text-slate-600 break-words">
+                            {String(asset?.core_description || asset?.description || "暂无描述").trim()}
+                          </div>
+                        );
+                      })()}
+                      {(assetType === "characters" || assetType === "subjects") && (() => {
+                        const charBindings = Array.isArray(storyboardNode?.data?.storyboard_plan?.local_asset_bindings?.character_bindings)
+                          ? storyboardNode.data.storyboard_plan.local_asset_bindings.character_bindings
+                          : [];
+                        const binding = charBindings.find((cb) => String(cb?.entity_id || "").trim() === assetId) || null;
+                        const rawUrl = String(binding?.three_view_url || "").trim();
+                        if (!rawUrl) return null;
+                        const fullUrl = `${(API_BASE || "").replace(/\/+$/, "")}${rawUrl}`;
+                        return (
+                          <div>
+                            <div className="mb-1.5 text-[11px] font-medium text-slate-500">三视图参考</div>
+                            <button
+                              type="button"
+                              onClick={() => setPreviewImage(fullUrl)}
+                              className="block w-full overflow-hidden rounded-[14px] border border-slate-200 bg-slate-50"
+                            >
+                              <img src={fullUrl} alt={`${String(asset?.name || "").trim()} 三视图`} className="w-full object-contain" style={{ maxHeight: 160 }} />
+                            </button>
+                            {binding?.alias_used && (
+                              <div className="mt-1 text-[10px] text-slate-400">
+                                别名匹配: <span className="text-slate-600">{binding.alias_used}</span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
+                      {(assetType === "characters" || assetType === "subjects") && (() => {
+                        const charBindings = Array.isArray(storyboardNode?.data?.storyboard_plan?.local_asset_bindings?.character_bindings)
+                          ? storyboardNode.data.storyboard_plan.local_asset_bindings.character_bindings
+                          : [];
+                        const binding = charBindings.find((cb) => String(cb?.entity_id || "").trim() === assetId) || null;
+                        const rawVoiceUrl = String(binding?.voice_url || "").trim();
+                        if (!rawVoiceUrl) return null;
+                        const fullVoiceUrl = `${(API_BASE || "").replace(/\/+$/, "")}${rawVoiceUrl}`;
+                        const voiceFileName = String(binding?.voice_path || "").split("/").pop() || "音色预览";
+                        return (
+                          <div>
+                            <div className="mb-1.5 text-[11px] font-medium text-slate-500">匹配音色</div>
+                            <div className="rounded-[14px] border border-slate-200 bg-slate-50 px-3 py-2.5">
+                              <div className="mb-2 text-[10px] text-slate-500 truncate">{voiceFileName}</div>
+                              <audio
+                                controls
+                                src={fullVoiceUrl}
+                                className="w-full h-8"
+                                style={{ minWidth: 0 }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })()}
+                      {assetType === "locations" && (() => {
+                        const sceneBindings = Array.isArray(storyboardNode?.data?.storyboard_plan?.local_asset_bindings?.scene_bindings)
+                          ? storyboardNode.data.storyboard_plan.local_asset_bindings.scene_bindings
+                          : [];
+                        const assetName = String(asset?.name || "").trim();
+                        const binding = sceneBindings.find((sb) => matchesSceneBinding(sb, assetId) || matchesSceneBinding(sb, assetName)) || null;
+                        const previewUrls = Array.isArray(binding?.preview_urls) ? binding.preview_urls.filter(Boolean) : [];
+                        if (!previewUrls.length) return null;
+                        const apiRoot = (API_BASE || "").replace(/\/+$/, "");
+                        return (
+                          <div>
+                            <div className="mb-1.5 text-[11px] font-medium text-slate-500">场景参考</div>
+                            <div className={`grid gap-2 ${previewUrls.length === 1 ? "grid-cols-1" : "grid-cols-2"}`}>
+                              {previewUrls.map((rawUrl, idx) => {
+                                const fullUrl = `${apiRoot}${rawUrl}`;
+                                return (
+                                  <button
+                                    key={idx}
+                                    type="button"
+                                    onClick={() => setPreviewImage(fullUrl)}
+                                    className="overflow-hidden rounded-[14px] border border-slate-200 bg-slate-50"
+                                  >
+                                    <img src={fullUrl} alt={`${assetName} 场景参考 ${idx + 1}`} className="w-full object-cover" style={{ maxHeight: 120 }} />
+                                  </button>
+                                );
+                              })}
+                            </div>
+                            {binding?.matched_from && binding.matched_from !== binding.folder_name && (
+                              <div className="mt-1 text-[10px] text-slate-400">
+                                匹配来源: <span className="text-slate-600">{binding.matched_from}</span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
                       {generationStatus === "running" ? (
                         <div className="flex items-center gap-2 rounded-[12px] border border-cyan-200 bg-cyan-50 px-3 py-2 text-[11px] text-cyan-700">
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -17954,37 +18589,6 @@ const handleNodeMouseDown = (e, nid) => {
                           className="w-full resize-none rounded-[12px] border border-slate-200 bg-white px-3 py-2 text-[11px] leading-5 text-slate-700 outline-none transition focus:border-cyan-300 focus:ring-2 focus:ring-cyan-100"
                         />
                       </div>
-                      <div className="space-y-2">
-                        <div className="text-[11px] font-medium text-slate-600">完整提示词</div>
-                        <textarea
-                          value={effectivePrompt}
-                          onChange={(event) => {
-                            const nextValue = String(event?.target?.value || "");
-                            setHoveredStoryboardAssetCard((current) =>
-                              current && current.nodeId === storyboardNode?.id && current.assetType === assetType && String(current.asset?.entity_id || current.asset?.name || "").trim() === assetId
-                                ? { ...current, customPrompt: nextValue, sticky: true }
-                                : current,
-                            );
-                          }}
-                          onFocus={() => {
-                            setHoveredStoryboardAssetCard((current) =>
-                              current && current.nodeId === storyboardNode?.id && current.assetType === assetType && String(current.asset?.entity_id || current.asset?.name || "").trim() === assetId
-                                ? { ...current, sticky: true }
-                                : current,
-                            );
-                          }}
-                          onBlur={() => {
-                            setHoveredStoryboardAssetCard((current) =>
-                              current && current.nodeId === storyboardNode?.id && current.assetType === assetType && String(current.asset?.entity_id || current.asset?.name || "").trim() === assetId
-                                ? { ...current, sticky: false }
-                                : current,
-                            );
-                          }}
-                          rows={5}
-                          placeholder="直接编辑完整提示词，然后按这个提示词重生成。"
-                          className="w-full resize-y rounded-[12px] border border-slate-200 bg-white px-3 py-2 text-[11px] leading-5 text-slate-700 outline-none transition focus:border-cyan-300 focus:ring-2 focus:ring-cyan-100"
-                        />
-                      </div>
                       <div className="flex flex-wrap gap-2">
                         <button
                           type="button"
@@ -18010,62 +18614,6 @@ const handleNodeMouseDown = (e, nid) => {
                         >
                           <Wand2 className="h-3.5 w-3.5" />
                           按要求微调
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            runStoryboardAssetDirectGeneration(storyboardNode, assetType, asset, {
-                              customPrompt: effectivePrompt,
-                              referenceImageUrl: selectedImageUrl,
-                            });
-                          }}
-                          disabled={generationStatus === "running" || !String(effectivePrompt || "").trim()}
-                          className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] text-amber-700 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          <RefreshCw className="h-3.5 w-3.5" />
-                          按完整提示词重生成
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const nextLocked = !isLocked;
-                            const nextLockedImageUrl = nextLocked ? selectedImageUrl : "";
-                            updateStoryboardAssetStatus(storyboardNode?.id, assetType, assetId, {
-                              locked: nextLocked,
-                              lockedAt: nextLocked ? Date.now() : null,
-                              lockedImageUrl: nextLockedImageUrl,
-                            });
-                          }}
-                          className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] transition-colors ${
-                            isLocked
-                              ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                              : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50"
-                          }`}
-                        >
-                          <CheckCircle2 className="h-3.5 w-3.5" />
-                          {isLocked ? "取消定稿" : "设为定稿"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            focusRelatedStoryboardShot(assetType, asset, storyboardNode);
-                            closeStoryboardAssetHoverCard();
-                          }}
-                          className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] text-slate-700 transition-colors hover:border-slate-300 hover:bg-slate-50"
-                        >
-                          <LinkIcon className="h-3.5 w-3.5" />
-                          查看关联镜头
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            selectStoryboardAssetFromPanel(assetType, asset, storyboardNode);
-                            closeStoryboardAssetHoverCard();
-                          }}
-                          className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] text-slate-700 transition-colors hover:border-slate-300 hover:bg-slate-50"
-                        >
-                          <Wand2 className="h-3.5 w-3.5" />
-                          对话微调
                         </button>
                       </div>
                     </div>
