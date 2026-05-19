@@ -79,6 +79,9 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router)
 
+    from api.health_routes import health_router
+    app.include_router(health_router)
+
     init_auth_db()
     init_usage_db()
     init_asset_library_store()
