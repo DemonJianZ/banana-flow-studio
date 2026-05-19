@@ -5,9 +5,11 @@ export const USER_AUTHS_ENUM_1 = 1;
 const API_ROOT = (MEMBER_API_BASE || "").replace(/\/+$/, "");
 
 const buildUrl = (path) => {
-  if (!path) return API_ROOT || "";
+  if (!API_ROOT) {
+    throw new Error("会员服务未配置（VITE_MEMBER_API_BASE 未设置）");
+  }
+  if (!path) return API_ROOT;
   if (path.startsWith("http")) return path;
-  if (!API_ROOT) return path.startsWith("/") ? path : `/${path}`;
   return path.startsWith("/") ? `${API_ROOT}${path}` : `${API_ROOT}/${path}`;
 };
 
