@@ -41,7 +41,6 @@ import {
   Clapperboard,
   Film,
   WifiOff,
-  FileWarning,
   ArrowRight,
   Cpu,
   MoreHorizontal,
