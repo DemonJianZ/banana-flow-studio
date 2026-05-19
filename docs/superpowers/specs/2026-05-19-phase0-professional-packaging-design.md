@@ -250,9 +250,11 @@ if (!MEMBER_API_BASE) {
 ## 9. 成功标准
 
 - [ ] `git ls-files '*.db'` 输出为空
-- [ ] `.env` 中无内网 IP（192.168.x.x 只在 `.env.example` 注释中出现，不作为默认值）
+- [ ] 已追踪的源码、脚本、文档示例中无内网 IP（192.168.x.x）作为硬编码默认值或凭据（开发者本地 `.env` 可填内网地址，不作为验收对象）
 - [ ] `GET /healthz` 返回 200
-- [ ] `GET /readyz` 在未配外部服务时返回 200（degraded），不返回 503
+- [ ] `GET /readyz` 在未配外部服务时返回 HTTP 200，`status=degraded`，不返回 503
+- [ ] `GET /readyz` 在 SQLite 数据目录不可写时返回 HTTP 503，`status=not_ready`
 - [ ] `AI_CHAT_DOWNSTREAM_URL=""` 时调用 AI Chat 路由返回 503 with 明确错误信息，不生成 `/ai/aiChat`
+- [ ] `MEMBER_API_BASE=""` 时，会员相关 API wrapper 不发出格式错误请求，并返回/显示明确的"会员服务未配置"
 - [ ] `npm run build` 通过，`pytest tests/` 通过（记录 baseline，允许既有 skip）
 - [ ] README.md 不再包含 "React + Vite" 模板文本
