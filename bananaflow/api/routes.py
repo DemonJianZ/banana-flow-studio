@@ -270,7 +270,7 @@ _PREFERENCE_COMMAND_PATTERNS = [
     (re.compile(r"^\s*风控偏好\s*[:=：]\s*(.+?)\s*$"), "risk_posture"),
 ]
 
-_MEMBER_API_BASE = os.getenv("MEMBER_API_BASE", "http://192.168.20.12:16313").rstrip("/")
+_MEMBER_API_BASE = os.getenv("MEMBER_API_BASE", "").rstrip("/")
 _MEMBER_API_AUTHORIZATION = str(os.getenv("MEMBER_API_AUTHORIZATION") or "").strip()
 _IDEA_SCRIPT_HTTP_PROXY = str(os.getenv("IDEA_SCRIPT_HTTP_PROXY") or "").strip()
 _IDEA_SCRIPT_HTTPS_PROXY = str(os.getenv("IDEA_SCRIPT_HTTPS_PROXY") or "").strip()
@@ -774,7 +774,12 @@ def _map_param_id(id_map: Dict[str, str], raw_value: Any) -> str:
 def _build_ai_chat_curl_command(req_id: str, req: AIChatCurlProxyRequest) -> tuple[List[str], Dict[str, str], List[str], str, int, Dict[str, Any]]:
     req = _sanitize_ai_chat_proxy_request(req)
     build_started_at = time.perf_counter()
-    endpoint = str(req.endpoint or "").strip() or AI_CHAT_DOWNSTREAM_URL or f"{_MEMBER_API_BASE}/ai/aiChat"
+    endpoint = str(req.endpoint or "").strip() or AI_CHAT_DOWNSTREAM_URL
+    if not endpoint:
+        raise HTTPException(
+            status_code=503,
+            detail="配置缺失：AI_CHAT_DOWNSTREAM_URL 未设置，请在 .env 中配置",
+        )
     authorization = clean_form_value(req.authorization)
     timeout_seconds = max(10, min(int(req.timeout_seconds or AI_CHAT_TASK_TIMEOUT_SEC), 600))
     if not authorization:

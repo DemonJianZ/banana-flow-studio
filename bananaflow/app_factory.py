@@ -42,8 +42,6 @@ def _resolve_cors_origins() -> list[str]:
         "http://127.0.0.1:5173",
         "http://localhost:5174",
         "http://127.0.0.1:5174",
-        "http://192.168.20.30:5173",
-        "http://192.168.20.30:5174",
     ]
     from_env = _split_csv(os.getenv("BANANAFLOW_CORS_ALLOW_ORIGINS"))
     if not from_env:
