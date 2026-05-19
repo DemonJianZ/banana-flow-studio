@@ -120,6 +120,7 @@ import {
   viewAIChatModels,
 } from "../api/aiChat";
 import { useMemberInfo, formatMemberPoints } from "../hooks/useMemberInfo";
+import { useSidebar } from "../hooks/useSidebar";
 import { detectPreferenceSuggestions } from "../agent/preferenceSuggestion";
 import { buildHitlFeedbackRows } from "../agent/hitlFeedbackHistory";
 import { AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2, API_BASE } from "../config";
@@ -1890,6 +1891,24 @@ const newCanvasId = () => "canvas_" + Math.random().toString(36).slice(2, 12);
 const Workbench = () => {
   const { user, logout, apiFetch } = useAuth();
   const navigate = useNavigate();
+  const {
+    hoveredSidebarItemKey, setHoveredSidebarItemKey,
+    hoveredSidebarPreview, setHoveredSidebarPreview,
+    sidebarNodeInputMenu, setSidebarNodeInputMenu,
+    sidebarWorkflowMenu, setSidebarWorkflowMenu,
+    sidebarImageCreateMenu, setSidebarImageCreateMenu,
+    activeSidebarItemKey, setActiveSidebarItemKey,
+    showSidebarUploadMenu, setShowSidebarUploadMenu,
+    sidebarVideoCreateMenu, setSidebarVideoCreateMenu,
+    sidebarUploadMenuRef,
+    sidebarImageUploadInputRef,
+    sidebarVideoUploadInputRef,
+    sidebarUploadMenuCloseTimerRef,
+    sidebarNodeInputMenuCloseTimerRef,
+    sidebarImageCreateMenuCloseTimerRef,
+    sidebarVideoCreateMenuCloseTimerRef,
+    sidebarWorkflowMenuCloseTimerRef,
+  } = useSidebar();
   const [nodes, setNodes] = useState([]);
   const [connections, setConnections] = useState([]);
   const [history, setHistory] = useState([]);
@@ -1926,13 +1945,7 @@ const Workbench = () => {
   const [expandedHistoryIds, setExpandedHistoryIds] = useState(new Set());
   const [apiStats, setApiStats] = useState(null);
   const [runToast, setRunToast] = useState(null);
-  const [hoveredSidebarItemKey, setHoveredSidebarItemKey] = useState("");
-  const [hoveredSidebarPreview, setHoveredSidebarPreview] = useState(null);
-  const [sidebarNodeInputMenu, setSidebarNodeInputMenu] = useState(null);
-  const [sidebarWorkflowMenu, setSidebarWorkflowMenu] = useState(null);
   const nodeElementMapRef = useRef(new Map());
-  const [sidebarImageCreateMenu, setSidebarImageCreateMenu] = useState(null);
-  const [activeSidebarItemKey, setActiveSidebarItemKey] = useState("");
   const [assetLibraryStore, setAssetLibraryStore] = useState(() => loadAssetLibraryStore());
   const [showAssetLibrary, setShowAssetLibrary] = useState(false);
   const [assetLibraryTab, setAssetLibraryTab] = useState("works");
@@ -1943,8 +1956,6 @@ const Workbench = () => {
   const [editingAssetWorkTitleId, setEditingAssetWorkTitleId] = useState("");
   const [editingAssetWorkTitleDraft, setEditingAssetWorkTitleDraft] = useState("");
   const [pendingUploadNodeId, setPendingUploadNodeId] = useState("");
-  const [showSidebarUploadMenu, setShowSidebarUploadMenu] = useState(false);
-  const [sidebarVideoCreateMenu, setSidebarVideoCreateMenu] = useState(null);
   const [assetLibraryPickerMode, setAssetLibraryPickerMode] = useState(false);
   const [canvasId] = useState(() => {
     const saved = localStorage.getItem(CANVAS_KEY);
@@ -2004,15 +2015,7 @@ const Workbench = () => {
   const agentUploadInputRef = useRef(null);
   const agentComposerRef = useRef(null);
   const workspaceShellRef = useRef(null);
-  const sidebarUploadMenuRef = useRef(null);
-  const sidebarImageUploadInputRef = useRef(null);
-  const sidebarVideoUploadInputRef = useRef(null);
   const assetLibraryPersonaImageInputRef = useRef(null);
-  const sidebarUploadMenuCloseTimerRef = useRef(null);
-  const sidebarNodeInputMenuCloseTimerRef = useRef(null);
-  const sidebarImageCreateMenuCloseTimerRef = useRef(null);
-  const sidebarVideoCreateMenuCloseTimerRef = useRef(null);
-  const sidebarWorkflowMenuCloseTimerRef = useRef(null);
   const assetLibraryRestoredRef = useRef(false);
   const viewportRef = useRef(viewport);
   const promptPolishApplyRef = useRef(null);
