@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
+import * as THREE from "three";
 import {
   Upload,
   Image as ImageIcon,
@@ -57,6 +58,7 @@ import {
   VolumeX,
   FolderOpen,
   Save,
+  Camera,
 } from "lucide-react";
 import { useAuth } from "../auth/AuthProvider";
 import { useNavigate } from "../router";
@@ -113,6 +115,7 @@ import { viewUserAuths } from "../api/userAuths";
 import { detectPreferenceSuggestions } from "../agent/preferenceSuggestion";
 import { buildHitlFeedbackRows } from "../agent/hitlFeedbackHistory";
 import { AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2, API_BASE } from "../config";
+import Html360Viewer from "./Html360Viewer";
 import { findAIChatModelIdByKeywords } from "../lib/aiChatModelResolver";
 import { downloadMedia } from "../lib/downloadMedia";
 import { isVideoContent } from "../lib/mediaType.js";
@@ -1888,6 +1891,7 @@ const NODE_TYPES = {
   PROCESSOR: "processor",
   POST_PROCESSOR: "post_processor",
   VIDEO_GEN: "video_gen",
+  PANORAMA_VIEWER: "panorama_viewer",
   OUTPUT: "output",
 };
 
@@ -2607,6 +2611,12 @@ const checkNodeReady = (node, nodes, connections) => {
         String(node.data.worldviewBackground || "").trim()
     );
   }
+  if (node.type === NODE_TYPES.PANORAMA_VIEWER) {
+    if (node.data.image) return true;
+    const inputConns = connections.filter((c) => c.to === node.id);
+    const sourceNodes = inputConns.map((c) => nodes.find((n) => n.id === c.from)).filter(Boolean);
+    return sourceNodes.some((n) => (n.data.images?.length || 0) > 0 || (n.data.uploadedImages?.length || 0) > 0);
+  }
   if (node.type === NODE_TYPES.OUTPUT) return true;
 
   const inputConns = connections.filter((c) => c.to === node.id);
@@ -2654,6 +2664,269 @@ const VideoPlayer = ({ src, className, controls = false, autoPlay = true, ...pro
       onError={() => setError(true)}
       {...props}
     />
+  );
+};
+
+const clampPanoramaZoom = (value) => Math.min(2.4, Math.max(0.75, Number(value) || 1));
+const normalizePanoramaYaw = (value) => {
+  const next = Number(value) || 0;
+  return ((next % 360) + 360) % 360;
+};
+
+const PanoramaViewerSurface = ({
+  image,
+  yaw = 0,
+  zoom = 1,
+  onYawChange,
+  onZoomChange,
+  onReset,
+  onOpenFullscreen,
+  onSnapshot,
+  className = "",
+  compact = false,
+}) => {
+  const mountRef = useRef(null);
+  const dragRef = useRef({ active: false, startX: 0, startYaw: 0 });
+  const threeRef = useRef(null);
+  const hasImage = Boolean(image);
+  const safeYaw = normalizePanoramaYaw(yaw);
+  const safeZoom = clampPanoramaZoom(zoom);
+  const cameraFov = Math.max(32, Math.min(92, 76 / safeZoom));
+
+  useEffect(() => {
+    const mount = mountRef.current;
+    if (!mount) return undefined;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(cameraFov, 1, 0.1, 1100);
+    camera.position.set(0, 0, 0.01);
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: false,
+      powerPreference: "high-performance",
+      preserveDrawingBuffer: true,
+    });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 3));
+    renderer.setClearColor(0x0f172a, 1);
+    renderer.domElement.className = "h-full w-full";
+    renderer.domElement.dataset.panoramaCanvas = "true";
+    mount.appendChild(renderer.domElement);
+
+    const geometry = new THREE.SphereGeometry(500, 64, 40);
+    geometry.scale(-1, 1, 1);
+    const material = new THREE.MeshBasicMaterial({ color: 0x182033 });
+    const mesh = new THREE.Mesh(geometry, material);
+    scene.add(mesh);
+
+    let frameId = 0;
+    let disposed = false;
+    const resize = () => {
+      if (disposed || !mount) return;
+      const rect = mount.getBoundingClientRect();
+      const width = Math.max(1, Math.floor(rect.width));
+      const height = Math.max(1, Math.floor(rect.height));
+      renderer.setSize(width, height, false);
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+    };
+    const render = () => {
+      if (disposed) return;
+      renderer.render(scene, camera);
+      frameId = window.requestAnimationFrame(render);
+    };
+
+    resize();
+    window.addEventListener("resize", resize);
+    frameId = window.requestAnimationFrame(render);
+    threeRef.current = { camera, renderer, scene, geometry, material, mesh, resize };
+
+    return () => {
+      disposed = true;
+      window.cancelAnimationFrame(frameId);
+      window.removeEventListener("resize", resize);
+      threeRef.current = null;
+      geometry.dispose();
+      material.map?.dispose?.();
+      material.dispose();
+      renderer.dispose();
+      renderer.domElement.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    const state = threeRef.current;
+    if (!state) return;
+    state.camera.fov = cameraFov;
+    state.camera.updateProjectionMatrix();
+    state.mesh.geometry = state.geometry;
+    state.mesh.position.set(0, 0, 0);
+    state.mesh.rotation.set(0, 0, 0);
+    const phi = THREE.MathUtils.degToRad(90);
+    const theta = THREE.MathUtils.degToRad(safeYaw);
+    state.camera.lookAt(
+      500 * Math.sin(phi) * Math.cos(theta),
+      0,
+      500 * Math.sin(phi) * Math.sin(theta),
+    );
+  }, [cameraFov, safeYaw]);
+
+  useEffect(() => {
+    const state = threeRef.current;
+    if (!state) return undefined;
+    if (!image) {
+      state.material.map?.dispose?.();
+      state.material.map = null;
+      state.material.color.set(0x182033);
+      state.material.needsUpdate = true;
+      return undefined;
+    }
+    let cancelled = false;
+    const loader = new THREE.TextureLoader();
+    loader.setCrossOrigin("anonymous");
+    loader.load(
+      image,
+      (texture) => {
+        if (cancelled || !threeRef.current) {
+          texture.dispose();
+          return;
+        }
+        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.wrapS = THREE.RepeatWrapping;
+        texture.wrapT = THREE.ClampToEdgeWrapping;
+        texture.minFilter = THREE.LinearFilter;
+        texture.magFilter = THREE.LinearFilter;
+        const current = threeRef.current.material;
+        current.map?.dispose?.();
+        current.map = texture;
+        current.color.set(0xffffff);
+        current.needsUpdate = true;
+      },
+      undefined,
+      () => {
+        if (!threeRef.current) return;
+        threeRef.current.material.color.set(0x182033);
+        threeRef.current.material.needsUpdate = true;
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [image]);
+
+  const handlePointerDown = (event) => {
+    if (!hasImage) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragRef.current = { active: true, startX: event.clientX, startYaw: safeYaw };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+
+  const handlePointerMove = (event) => {
+    if (!dragRef.current.active) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const delta = event.clientX - dragRef.current.startX;
+    onYawChange?.(normalizePanoramaYaw(dragRef.current.startYaw - delta / safeZoom));
+  };
+
+  const handlePointerUp = (event) => {
+    if (!dragRef.current.active) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragRef.current.active = false;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+  };
+
+  const captureSnapshot = () => {
+    const state = threeRef.current;
+    if (!state || !hasImage) return;
+    state.renderer.render(state.scene, state.camera);
+    const dataUrl = state.renderer.domElement.toDataURL("image/png");
+    if (dataUrl) onSnapshot?.(dataUrl);
+  };
+
+  return (
+    <div
+      className={`nodrag relative overflow-hidden rounded-[16px] border border-slate-200 bg-slate-950 ${className}`}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      onWheel={(event) => {
+        if (!hasImage) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onZoomChange?.(clampPanoramaZoom(safeZoom + (event.deltaY > 0 ? -0.08 : 0.08)));
+      }}
+    >
+      <div ref={mountRef} className="absolute inset-0 cursor-grab active:cursor-grabbing" />
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-14 bg-gradient-to-b from-black/42 to-transparent" />
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-black/50 to-transparent" />
+      <div className="pointer-events-none absolute left-1/2 top-1/2 h-10 w-10 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/20" />
+      <div className="pointer-events-none absolute left-1/2 top-1/2 h-px w-8 -translate-x-1/2 bg-white/25" />
+      <div className="pointer-events-none absolute left-1/2 top-1/2 h-8 w-px -translate-y-1/2 bg-white/25" />
+
+      {hasImage ? (
+        <div className="absolute bottom-3 left-3 flex items-center gap-2 rounded-full border border-white/15 bg-black/42 px-3 py-1.5 text-[11px] font-medium text-white/85 backdrop-blur-md">
+          <Scan className="h-3.5 w-3.5" />
+          <span>{Math.round(safeYaw)} deg</span>
+          <span className="text-white/45">/</span>
+          <span>{Math.round(safeZoom * 100)}%</span>
+        </div>
+      ) : (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center text-white/72">
+          <Scan className="h-7 w-7 text-white/55" />
+          <div className="text-[13px] font-medium text-white">等待全景图</div>
+          <div className="text-[11px] leading-5 text-white/55">上传或连接一张 2:1 全景图后浏览</div>
+        </div>
+      )}
+
+      {hasImage ? (
+        <div className="absolute right-3 top-3 flex items-center gap-1.5">
+          <button
+            type="button"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-black/42 text-white/82 backdrop-blur-md transition hover:bg-white/14 hover:text-white"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              onReset?.();
+            }}
+            title="重置视角"
+            aria-label="重置视角"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+          </button>
+          {!compact ? (
+            <button
+              type="button"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-black/42 text-white/82 backdrop-blur-md transition hover:bg-white/14 hover:text-white"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpenFullscreen?.();
+              }}
+              title="全屏浏览"
+              aria-label="全屏浏览"
+            >
+              <Maximize className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-black/42 text-white/82 backdrop-blur-md transition hover:bg-white/14 hover:text-white"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              captureSnapshot();
+            }}
+            title="截图当前视角"
+            aria-label="截图当前视角"
+          >
+            <Camera className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      ) : null}
+    </div>
   );
 };
 
