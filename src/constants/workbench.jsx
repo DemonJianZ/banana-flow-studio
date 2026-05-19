@@ -14,6 +14,7 @@ import {
   Clapperboard,
 } from "lucide-react";
 import { extractProductKeyword } from "../api/agentCanvas";
+import { buildCanvasNodePrompt } from "../components/agent-canvas/promptUtils";
 
 // ==========================================
 // Run Steps
@@ -780,3 +781,185 @@ export const ASPECT_RATIOS = [
   { label: "21:9", w: 44, h: 20 },
   { label: "9:16", w: 22, h: 40 },
 ];
+
+// ==========================================
+// Canvas / Node helpers shared between NodeComponent and Workbench
+// ==========================================
+
+export const VIDEO_GEN_INPUT_HANDLE_MAIN = "main";
+export const VIDEO_GEN_INPUT_HANDLE_LAST_FRAME = "last_frame";
+
+export const normalizeConnectionTargetHandle = (handle) =>
+  String(handle || "").trim() === VIDEO_GEN_INPUT_HANDLE_LAST_FRAME
+    ? VIDEO_GEN_INPUT_HANDLE_LAST_FRAME
+    : VIDEO_GEN_INPUT_HANDLE_MAIN;
+
+export const MEDIA_UPLOAD_NODE_EMPTY_HEIGHT = 132;
+export const MAX_RENDERED_MEDIA_ITEMS_PER_NODE = 24;
+
+export const DEFAULT_VIDEO_LINEART_STRENGTH = 2;
+export const DEFAULT_VIDEO_LINEART_COLOR = "black";
+export const DEFAULT_VIDEO_SPLIT_OUTPUT_RESOLUTION = "720p";
+
+// ---- File type helpers ----
+const IMAGE_FILE_EXT_PATTERN = /\.(?:png|jpe?g|webp|gif|bmp|svg|avif|heic|heif)$/i;
+const VIDEO_FILE_EXT_PATTERN = /\.(?:mp4|webm|mov|m4v|avi|mkv|m3u8)$/i;
+
+export const isImageFileLike = (file) => {
+  const mime = String(file?.type || "").trim().toLowerCase();
+  if (mime.startsWith("image/")) return true;
+  const name = String(file?.name || "").trim();
+  return IMAGE_FILE_EXT_PATTERN.test(name);
+};
+
+export const isVideoFileLike = (file) => {
+  const mime = String(file?.type || "").trim().toLowerCase();
+  if (mime.startsWith("video/")) return true;
+  const name = String(file?.name || "").trim();
+  return VIDEO_FILE_EXT_PATTERN.test(name);
+};
+
+export const isMediaFileLike = (file) => isImageFileLike(file) || isVideoFileLike(file);
+
+export const normalizeInputMediaKind = (value) => (value === "image" || value === "video" ? value : "mixed");
+
+export const getReferenceNodeTitle = (mediaKind = "mixed") => {
+  const normalizedMediaKind = normalizeInputMediaKind(mediaKind);
+  if (normalizedMediaKind === "image") return "图片参考";
+  if (normalizedMediaKind === "video") return "视频参考";
+  return "媒体参考";
+};
+
+// ---- File reading helpers ----
+const MAX_UPLOAD_IMAGE_DIMENSION = 1920;
+const UPLOAD_IMAGE_JPEG_QUALITY = 0.84;
+
+const readFileAsDataUrl = (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("文件读取失败"));
+    reader.readAsDataURL(file);
+  });
+
+const shouldCompressImageFile = (file) => {
+  const mime = String(file?.type || "").toLowerCase();
+  if (!mime.startsWith("image/")) return false;
+  if (mime.includes("svg") || mime.includes("gif")) return false;
+  return true;
+};
+
+const compressImageFileToDataUrl = async (file) => {
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.decoding = "async";
+    const loaded = new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = () => reject(new Error("图片解码失败"));
+    });
+    image.src = objectUrl;
+    await loaded;
+
+    const sourceWidth = image.naturalWidth || image.width;
+    const sourceHeight = image.naturalHeight || image.height;
+    if (!sourceWidth || !sourceHeight) return readFileAsDataUrl(file);
+
+    const scale = Math.min(1, MAX_UPLOAD_IMAGE_DIMENSION / Math.max(sourceWidth, sourceHeight));
+    const targetWidth = Math.max(1, Math.round(sourceWidth * scale));
+    const targetHeight = Math.max(1, Math.round(sourceHeight * scale));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    const ctx = canvas.getContext("2d", { alpha: false });
+    if (!ctx) return readFileAsDataUrl(file);
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, targetWidth, targetHeight);
+    ctx.drawImage(image, 0, 0, targetWidth, targetHeight);
+
+    return canvas.toDataURL("image/jpeg", UPLOAD_IMAGE_JPEG_QUALITY);
+  } catch (error) {
+    console.warn("[Workbench] image-compress-fallback", error);
+    return readFileAsDataUrl(file);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+};
+
+const readMediaFileAsDataUrl = (file) => {
+  if (shouldCompressImageFile(file)) return compressImageFileToDataUrl(file);
+  return readFileAsDataUrl(file);
+};
+
+export const readFilesAsDataUrls = (files) =>
+  Promise.all(Array.from(files || []).map((file) => readMediaFileAsDataUrl(file)));
+
+// ---- Video split helpers ----
+export const normalizeVideoSplitSecond = (value, fallback = 0) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, Math.round(parsed * 100) / 100);
+};
+
+export const normalizeVideoSplitSegments = (segments, durationSec = 0) => {
+  const safeDuration = normalizeVideoSplitSecond(durationSec, 0);
+  const normalized = (Array.isArray(segments) ? segments : [])
+    .map((item) => {
+      const startSec = normalizeVideoSplitSecond(item?.startSec, 0);
+      const rawEndSec = normalizeVideoSplitSecond(item?.endSec, startSec + 1);
+      const endSec = safeDuration > 0 ? Math.min(rawEndSec, safeDuration) : rawEndSec;
+      return {
+        startSec,
+        endSec,
+      };
+    })
+    .filter((item) => item.endSec > item.startSec);
+
+  return normalized;
+};
+
+// ---- Node ready check ----
+export const checkNodeReady = (node, nodes, connections) => {
+  if (node.type === NODE_TYPES.INPUT) return (node.data.images?.length || 0) > 0;
+  if (node.type === NODE_TYPES.TEXT_INPUT) return (node.data.text?.length || 0) > 0;
+  if (node.type === NODE_TYPES.STORYBOARD_PLAN) return true;
+  if (node.type === NODE_TYPES.ROLE_INPUT) return Boolean(node.data.personaId || node.data.referenceImage || node.data.text);
+  if (node.type === NODE_TYPES.ROLE_STRUCTURER) {
+    return Boolean(
+      String(node.data.roleName || "").trim() ||
+        String(node.data.characterSetting || "").trim() ||
+        String(node.data.relationshipNetwork || "").trim() ||
+        String(node.data.worldviewBackground || "").trim()
+    );
+  }
+  if (node.type === NODE_TYPES.PANORAMA_VIEWER) {
+    if (node.data.image) return true;
+    const inputConns = connections.filter((c) => c.to === node.id);
+    const sourceNodes = inputConns.map((c) => nodes.find((n) => n.id === c.from)).filter(Boolean);
+    return sourceNodes.some((n) => (n.data.images?.length || 0) > 0 || (n.data.uploadedImages?.length || 0) > 0);
+  }
+  if (node.type === NODE_TYPES.OUTPUT) return true;
+
+  const inputConns = connections.filter((c) => c.to === node.id);
+  if (node.type === NODE_TYPES.VIDEO_GEN && node.data.mode === "img2video" && node.data.firstLastFrameOnly) {
+    const mainSourceNodes = inputConns
+      .filter((c) => normalizeConnectionTargetHandle(c.toHandle) !== VIDEO_GEN_INPUT_HANDLE_LAST_FRAME)
+      .map((c) => nodes.find((n) => n.id === c.from))
+      .filter(Boolean);
+    const hasMainImage = mainSourceNodes.some((n) => (n.data.images?.length || 0) > 0 || (n.data.uploadedImages?.length || 0) > 0);
+    const hasPrompt = mainSourceNodes.some((n) => (n.data.text?.length || 0) > 0) || buildCanvasNodePrompt(node).length > 0;
+    return hasMainImage && hasPrompt;
+  }
+  const sourceNodes = inputConns.map((c) => nodes.find((n) => n.id === c.from)).filter(Boolean);
+
+  const hasUpstreamImages = sourceNodes.some((n) => (n.data.images?.length || 0) > 0 || (n.data.uploadedImages?.length || 0) > 0);
+  const hasUpstreamText = sourceNodes.some((n) => (n.data.text?.length || 0) > 0);
+  const hasLocalImages = (node.data.uploadedImages?.length || 0) > 0;
+  const hasInternalPrompt = buildCanvasNodePrompt(node).length > 0;
+
+  if (node.data.mode === "text2img" || node.data.mode === "local_text2img" || node.data.mode === "text2video") return hasUpstreamText || hasInternalPrompt;
+  if (node.data.mode === "multi_image_generate") return hasUpstreamImages || hasLocalImages;
+  if (node.data.mode === "img2video" || node.data.mode === "local_img2video") return hasUpstreamImages;
+  return hasUpstreamImages;
+};
