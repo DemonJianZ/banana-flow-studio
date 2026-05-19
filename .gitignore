@@ -30,6 +30,7 @@ __pycache__/
 venv/
 .env
 .env.*
+!.env.example
 data/ai_chat_tasks.db
 
 # Editor directories and files
