@@ -1,4 +1,18 @@
 import React from "react";
+import {
+  Layers,
+  Hand,
+  ShoppingBag,
+  ImagePlus,
+  Images,
+  Scissors,
+  Scan,
+  LayoutGrid,
+  TrendingUp,
+  Sun,
+  Film,
+  Clapperboard,
+} from "lucide-react";
 import { extractProductKeyword } from "../api/agentCanvas";
 
 // ==========================================
@@ -376,3 +390,393 @@ export const getAgentTurnStepLabel = (turn) => {
   const steps = turn?.intent === "DRAMA" ? DRAMA_RUN_STEPS : AGENT_RUN_STEPS;
   return steps[Math.min(turn?.stepIndex || 0, steps.length - 1)];
 };
+
+// ==========================================
+// Node / Canvas Constants
+// ==========================================
+export const NODE_TYPES = {
+  INPUT: "input",
+  TEXT_INPUT: "text_input",
+  STORYBOARD_PLAN: "storyboard_plan",
+  LOCAL_ASSET_IMAGE: "local_asset_image",
+  ROLE_INPUT: "role_input",
+  ROLE_STRUCTURER: "role_structurer",
+  PROCESSOR: "processor",
+  POST_PROCESSOR: "post_processor",
+  VIDEO_GEN: "video_gen",
+  PANORAMA_VIEWER: "panorama_viewer",
+  OUTPUT: "output",
+};
+
+export const HIDDEN_IMAGE_CONFIG_MODES = new Set([
+  "bg_replace",
+  "gesture_swap",
+  "product_swap",
+]);
+
+// ==========================================
+// Video HD Constants
+// ==========================================
+export const VOLC_VIDEO_HD_TEMPLATE_ENUM_1 = 1;
+export const VOLC_VIDEO_HD_TEMPLATE_ENUM_2 = 2;
+export const DEFAULT_VIDEO_HD_MODEL_ID = "1";
+
+// ==========================================
+// Seedance Model Helpers
+// ==========================================
+export const isSeedanceReferenceModeModel = (...values) =>
+  values.some((value) => {
+    const text = String(value || "").trim().toLowerCase();
+    if (!text) return false;
+    return (
+      text.includes("seedance2.0") ||
+      text.includes("seedance 2.0") ||
+      text.includes("seedance-2.0") ||
+      text.includes("seedance_2.0")
+    );
+  });
+
+export const isSeedanceOmniReferenceModel = (...values) =>
+  values.some((value) => {
+    const text = String(value || "").trim().toLowerCase();
+    if (!text) return false;
+    return (
+      text.includes("seedance2.0") ||
+      text.includes("seedance 2.0") ||
+      text.includes("seedance-2.0") ||
+      text.includes("seedance_2.0")
+    );
+  });
+
+// ==========================================
+// AI Chat Param Helpers
+// ==========================================
+export const sortParamValues = (values) => {
+  const list = Array.isArray(values) ? values.slice() : [];
+  list.sort((a, b) => {
+    const ai = Number(a?.order_index ?? Number.MAX_SAFE_INTEGER);
+    const bi = Number(b?.order_index ?? Number.MAX_SAFE_INTEGER);
+    return ai - bi;
+  });
+  return list;
+};
+
+export const findAIChatParamItem = (paramList, keywords = []) => {
+  const list = Array.isArray(paramList) ? paramList : EMPTY_LIST;
+  const lowerKeywords = keywords.map((item) => String(item || "").toLowerCase()).filter(Boolean);
+  for (const item of list) {
+    const name = String(item?.param_name || item?.name || item?.desc || "").toLowerCase();
+    if (!name) continue;
+    if (lowerKeywords.some((keyword) => name.includes(keyword))) return item;
+  }
+  return null;
+};
+
+export const getAIChatParamDisplayValue = (paramValue) => {
+  const remark = String(paramValue?.remark || "").trim();
+  const value = String(paramValue?.param_value || "").trim();
+  return remark || value;
+};
+
+export const listAIChatParamValues = (paramList, keywords = []) => {
+  const item = findAIChatParamItem(paramList, keywords);
+  if (!item) return EMPTY_LIST;
+  return sortParamValues(item?.param_values || EMPTY_LIST)
+    .map((val) => getAIChatParamDisplayValue(val))
+    .filter(Boolean);
+};
+
+export const listAIChatParamChoiceOptions = (paramList, keywords = []) => {
+  const item = findAIChatParamItem(paramList, keywords);
+  if (!item) return EMPTY_LIST;
+  return sortParamValues(item?.param_values || EMPTY_LIST)
+    .map((val) => {
+      const label = getAIChatParamDisplayValue(val);
+      const value = label;
+      if (!value || !label) return null;
+      return { value, label };
+    })
+    .filter(Boolean);
+};
+
+// ==========================================
+// Prompt Polish Helpers
+// ==========================================
+export const normalizePromptPolishVariants = (result) => {
+  const rawVariants = Array.isArray(result?.variants) ? result.variants : [];
+  const variants = [];
+  const seen = new Set();
+
+  rawVariants.forEach((item, index) => {
+    const text = String(item?.text || "").trim();
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    variants.push({
+      label: String(item?.label || `版本${index + 1}`).trim() || `版本${index + 1}`,
+      text,
+    });
+  });
+
+  if (!variants.length) {
+    const text = String(result?.text || "").trim();
+    if (text) {
+      variants.push({ label: "版本1", text });
+    }
+  }
+
+  return variants.slice(0, 3);
+};
+
+// ==========================================
+// Tool Cards
+// ==========================================
+export const TOOL_CARDS = {
+  bg_replace: {
+    id: "bg_replace",
+    name: "一键换背景",
+    short: "换背景",
+    icon: Layers,
+    desc: "保留商品和手，仅替换背景",
+    scenario: "主图合成 / 详情页",
+    refLabel: "背景参考图",
+    category: "generate",
+    refRequired: true,
+  },
+  gesture_swap: {
+    id: "gesture_swap",
+    name: "参考图换手势",
+    short: "换手势",
+    icon: Hand,
+    desc: "保留商品与背景，迁移手势",
+    scenario: "模仿网红手势",
+    refLabel: "手势参考图",
+    category: "generate",
+    refRequired: true,
+  },
+  product_swap: {
+    id: "product_swap",
+    name: "保留手势换商品",
+    short: "换商品",
+    icon: ShoppingBag,
+    desc: "保留手势与背景，替换商品",
+    scenario: "多商品复用模版",
+    refLabel: "新商品图",
+    category: "generate",
+    refRequired: true,
+  },
+  text2img: {
+    id: "text2img",
+    name: "文生图",
+    short: "文生图",
+    icon: ImagePlus,
+    desc: "从零生成营销素材",
+    scenario: "灵感构思",
+    category: "generate",
+    refRequired: false,
+  },
+  local_text2img: {
+    id: "local_text2img",
+    name: "本地文生图",
+    short: "本地文生图",
+    icon: ImagePlus,
+    desc: "调用 ComfyUI image_z_image_turbo 工作流",
+    scenario: "本地推理 / 低延迟",
+    category: "generate",
+    refRequired: false,
+  },
+  multi_image_generate: {
+    id: "multi_image_generate",
+    name: "图生图",
+    short: "图生图",
+    icon: Images,
+    desc: "参考原图生成新图像",
+    scenario: "风格迁移/重绘",
+    category: "generate",
+    refRequired: false,
+  },
+  rmbg: {
+    id: "rmbg",
+    name: "抠图 (RMBG)",
+    short: "抠图",
+    icon: Scissors,
+    desc: "自动去除背景，输出透明图",
+    scenario: "电商抠图/素材准备",
+    category: "skill",
+    refRequired: false,
+  },
+  feature_extract: {
+    id: "feature_extract",
+    name: "特征提取 (Feature)",
+    short: "特征提取",
+    icon: Scan,
+    desc: "面部/背景/服装首饰特征提取",
+    scenario: "素材清理/特征强化",
+    category: "skill",
+    refRequired: false,
+  },
+  multi_angleshots: {
+    id: "multi_angleshots",
+    name: "多角度镜头",
+    short: "多角度",
+    icon: LayoutGrid,
+    desc: "单图扩展 8 个镜头角度",
+    scenario: "电商展示/机位扩展",
+    category: "skill",
+    refRequired: false,
+  },
+  video_upscale: {
+    id: "video_upscale",
+    name: "视频超清",
+    short: "视频超清",
+    icon: TrendingUp,
+    desc: "视频清晰度增强（自动按 3 秒切片）",
+    scenario: "低清视频修复",
+    category: "skill",
+    refRequired: false,
+  },
+  relight: {
+    id: "relight",
+    name: "智能打光 (Relight)",
+    short: "光影精修",
+    icon: Sun,
+    desc: '修复光线不自然，重塑光影',
+    scenario: '解决"贴图感" / 氛围增强',
+    refLabel: "光影参考图",
+    category: "enhance",
+    refRequired: false,
+  },
+  upscale: {
+    id: "upscale",
+    name: "高清放大 (Upscale)",
+    short: "超清放大",
+    icon: TrendingUp,
+    desc: "提升分辨率与细节",
+    scenario: "最终出图",
+    category: "enhance",
+    refRequired: false,
+  },
+  img2video: {
+    id: "img2video",
+    name: "图生视频",
+    short: "生视频",
+    icon: Film,
+    desc: "静态图片转动态短视频",
+    scenario: "电商动态详情 / 社交媒体",
+    refLabel: "尾帧参考图",
+    category: "video",
+    refRequired: false,
+  },
+  text2video: {
+    id: "text2video",
+    name: "文生视频",
+    short: "文生视频",
+    icon: Clapperboard,
+    desc: "直接调用视频模型生成视频",
+    scenario: "纯提示词生成动态视频",
+    category: "video",
+    refRequired: false,
+  },
+  local_img2video: {
+    id: "local_img2video",
+    name: "本地图生视频",
+    short: "本地图生视频",
+    icon: Film,
+    desc: "调用 ComfyUI Qwen_i2v 工作流",
+    scenario: "本地视频生成",
+    refLabel: "输入图像",
+    category: "video",
+    refRequired: false,
+  },
+};
+
+// ==========================================
+// Feature Extract / Processor Defaults
+// ==========================================
+export const FEATURE_EXTRACT_PRESET_PROMPTS = {
+  face: "提取画面中的面部特征，保留五官与肤色细节，去除背景与多余元素，结果自然清晰。",
+  background: "提取画面中的纯背景，移除所有主体与物体，保持背景干净自然，避免残影。",
+  outfit: "提取画面中的服装与首饰，保留材质与纹理细节，弱化人物面部与背景，结果清晰自然。",
+};
+
+export const getProcessorModeDefaults = (mode) => {
+  if (mode === "text2img") {
+    return { mode, prompt: "", templates: { size: "1k", aspect_ratio: "1:1" } };
+  }
+  if (mode === "local_text2img") {
+    return { mode, prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1" }, model: "comfyui-image-z-image-turbo" };
+  }
+  if (mode === "multi_image_generate") {
+    return { mode, prompt: "", templates: { size: "1k", note: "" } };
+  }
+  if (mode === "rmbg") {
+    return { mode, prompt: "", templates: { size: "1024x1024", aspect_ratio: "1:1" } };
+  }
+  if (mode === "feature_extract") {
+    return {
+      mode,
+      prompt: FEATURE_EXTRACT_PRESET_PROMPTS.face,
+      templates: { size: "1024x1024", aspect_ratio: "1:1", preset: "face" },
+    };
+  }
+  if (mode === "multi_angleshots") {
+    return { mode, prompt: "", templates: {} };
+  }
+  if (mode === "video_upscale") {
+    return { mode, prompt: "视频画质增强", model: DEFAULT_VIDEO_HD_MODEL_ID, templates: { template_enum: VOLC_VIDEO_HD_TEMPLATE_ENUM_1 } };
+  }
+  return { mode, prompt: "", templates: {} };
+};
+
+export const VIDEO_HD_TEMPLATE_OPTIONS = [
+  { label: "2K", value: VOLC_VIDEO_HD_TEMPLATE_ENUM_1 },
+  { label: "4K", value: VOLC_VIDEO_HD_TEMPLATE_ENUM_2 },
+];
+
+// ==========================================
+// Prompt Templates & Aspect Ratios
+// ==========================================
+export const PROMPT_TEMPLATES = {
+  bg_replace: {
+    categories: [
+      { name: "场景风格", key: "style", options: ["纯白摄影棚", "极简家居", "大理石台面", "清新自然户外", "高级展台", "赛博朋克"] },
+      { name: "光影氛围", key: "vibe", options: ["柔和明亮", "自然光", "专业布光", "电影感", "暖色调", "冷淡风"] },
+    ],
+  },
+  gesture_swap: {
+    categories: [{ name: "手势类型", key: "style", options: ["单手握持", "指尖捏住", "双手捧起", "手掌展示", "使用中(涂抹)"] }],
+  },
+  product_swap: {
+    categories: [{ name: "商品材质", key: "style", options: ["哑光质感", "亮面反光", "透明玻璃", "金属光泽", "磨砂表面"] }],
+  },
+  relight: {
+    categories: [
+      { name: "布光类型", key: "style", options: ["柔和漫射光(Soft)", "伦勃朗光(Rembrandt)", "强对比侧光(Hard Side)", "自然窗光(Window)", "蝴蝶光(Butterfly)", "赛博霓虹(Neon)"] },
+      { name: "光源位置", key: "direction", options: ["左侧光", "右侧光", "顶光", "逆光(Backlight)", "正面平光"] },
+      { name: "色温/氛围", key: "vibe", options: ["暖色调(Warm)", "冷色调(Cool)", "中性白(Neutral)", "夕阳感(Sunset)", "清晨感(Morning)"] },
+    ],
+  },
+  img2video: {
+    categories: [
+      { name: "画幅比例", key: "ratio", options: ["16:9", "9:16", "3:4", "21:9", "adaptive"] },
+    ],
+  },
+  text2video: {
+    categories: [
+      { name: "画幅比例", key: "ratio", options: ["16:9", "9:16", "3:4", "21:9", "adaptive"] },
+    ],
+  },
+  local_img2video: {
+    categories: [
+      { name: "画幅比例", key: "ratio", options: ["1:1", "16:9", "9:16", "4:3", "3:4"] },
+    ],
+  },
+};
+
+export const ASPECT_RATIOS = [
+  { label: "1:1", w: 24, h: 24 },
+  { label: "4:3", w: 32, h: 24 },
+  { label: "3:4", w: 24, h: 32 },
+  { label: "16:9", w: 40, h: 22 },
+  { label: "21:9", w: 44, h: 20 },
+  { label: "9:16", w: 22, h: 40 },
+];
