@@ -1,3 +1,15 @@
+# Runtime state files — never commit
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+Thumbs.db
+.run/
+tmp/
+debug_output/
+
 # Logs
 logs
 *.log
