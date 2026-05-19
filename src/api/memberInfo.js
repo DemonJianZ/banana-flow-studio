@@ -3,9 +3,7 @@ import { MEMBER_API_BASE, MEMBER_AUTHORIZATION } from "../config";
 const API_ROOT = (MEMBER_API_BASE || "").replace(/\/+$/, "");
 
 const buildUrl = (path) => {
-  if (!API_ROOT) {
-    throw new Error("会员服务未配置（VITE_MEMBER_API_BASE 未设置）");
-  }
+  if (!API_ROOT) return null;
   if (!path) return API_ROOT;
   if (path.startsWith("http")) return path;
   return path.startsWith("/") ? `${API_ROOT}${path}` : `${API_ROOT}/${path}`;
@@ -170,6 +168,7 @@ const resolveMemberAuthorization = (options = {}) => {
 };
 
 export async function viewMemberInfo(apiFetch, payload = {}, options = {}) {
+  if (!API_ROOT) return null;
   apiFetch = resolveLegacyCompatibleFetch(apiFetch); // 兼容老版本
   const injectedFetch = resolveMicroAppFetch();
   const auth = resolveMemberAuthorization(options);
