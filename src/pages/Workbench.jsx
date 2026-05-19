@@ -69,6 +69,7 @@ import ScriptPlanSummary from "../components/agent-canvas/ScriptPlanSummary";
 import PreferenceSuggestionCard from "../components/agent-canvas/PreferenceSuggestionCard";
 import DramaMarkdownBlock from "../components/workbench/DramaMarkdownBlock";
 import VideoPlayer from "../components/workbench/VideoPlayer";
+import ToolIconBtn from "../components/workbench/ToolIconBtn";
 import {
   buildCanvasNodePrompt,
   buildCanvasNodePreviewPrompt,
@@ -2920,25 +2921,6 @@ const getNodeAnchorPosition = (node, nodeElement, direction = "output", handle =
   };
 };
 
-const ToolIconBtn = ({ icon, onClick, disabled, active, title }) => {
-  const IconComponent = icon;
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      className={`p-1.5 rounded transition-colors ${
-        disabled
-          ? "text-slate-600 cursor-not-allowed"
-          : active
-          ? "bg-red-500/20 text-red-400 hover:bg-red-500/30"
-          : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
-      }`}
-    >
-      {IconComponent ? React.createElement(IconComponent, { className: "w-4 h-4" }) : null}
-    </button>
-  );
-};
 
 const SidebarBtn = ({
   icon,
