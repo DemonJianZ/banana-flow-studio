@@ -3,7 +3,9 @@ import { MEMBER_API_BASE, MEMBER_AUTHORIZATION } from "../config";
 const API_ROOT = (MEMBER_API_BASE || "").replace(/\/+$/, "");
 
 const buildUrl = (path) => {
-  if (!API_ROOT) return null;
+  if (!API_ROOT) {
+    throw new Error("会员服务未配置（VITE_MEMBER_API_BASE 未设置）");
+  }
   if (!path) return API_ROOT;
   if (path.startsWith("http")) return path;
   return path.startsWith("/") ? `${API_ROOT}${path}` : `${API_ROOT}/${path}`;
@@ -133,7 +135,7 @@ const callWithLocalTimeout = async (candidate, requestUrl, requestInit, parentSi
 const buildRequestCandidates = (apiFetch, path, options = {}) => {
   const compatApiFetch = resolveLegacyCompatibleFetch(apiFetch);
   const requestPath = path.startsWith("/") ? path : `/${path}`;
-  const requestUrl = buildUrl(path) ?? requestPath;
+  const requestUrl = buildUrl(path);
   const microAppFetch = resolveMicroAppFetch();
   const candidates = [];
   const apiFetchCandidate =
