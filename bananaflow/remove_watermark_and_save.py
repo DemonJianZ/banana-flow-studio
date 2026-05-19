@@ -1,9 +1,10 @@
 import base64
+import os
 import requests
 from pathlib import Path
 
 
-API_URL = "http://192.168.20.30:8083/api/remove_watermark"
+API_URL = os.getenv("API_BASE", "http://localhost:8082").rstrip("/") + "/api/remove_watermark"
 INPUT_IMAGE = "/home/ai/zhangjian/ai_studio_mvp/banana-flow-studio-dev/bananaflow/水印.png"
 OUTPUT_IMAGE = "output.png"
 TIMEOUT = 120
