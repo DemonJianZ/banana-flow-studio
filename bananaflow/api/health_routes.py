@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 
 from core.config import COMFYUI_URL, AI_CHAT_DOWNSTREAM_URL, DATA_DIR, API_KEY
 
@@ -29,8 +30,6 @@ def healthz() -> dict[str, Any]:
 
 @health_router.get("/readyz")
 def readyz() -> Any:
-    from fastapi.responses import JSONResponse
-
     checks: dict[str, Any] = {}
 
     # 1. SQLite data dir writable
@@ -65,11 +64,9 @@ def _now() -> str:
 
 
 def _check_sqlite_writable() -> dict[str, Any]:
-    import bananaflow.api.health_routes as _self
-    data_dir = _self._DATA_DIR
     try:
-        os.makedirs(data_dir, exist_ok=True)
-        fd, path = tempfile.mkstemp(dir=data_dir, prefix=".readyz_")
+        os.makedirs(_DATA_DIR, exist_ok=True)
+        fd, path = tempfile.mkstemp(dir=_DATA_DIR, prefix=".readyz_")
         os.close(fd)
         os.unlink(path)
         return {"status": "ok"}
@@ -78,8 +75,7 @@ def _check_sqlite_writable() -> dict[str, Any]:
 
 
 def _check_jwt_secret() -> dict[str, Any]:
-    import bananaflow.api.health_routes as _self
-    if _self._JWT_SECRET == _self._JWT_DEFAULT:
+    if _JWT_SECRET == _JWT_DEFAULT:
         return {"status": "degraded", "reason": "development default secret — set JWT_SECRET in production"}
     return {"status": "ok"}
 
@@ -99,8 +95,7 @@ def _check_http_reachable(name: str, url: str) -> dict[str, Any]:
 
 
 def _check_gemini_key() -> dict[str, Any]:
-    import bananaflow.api.health_routes as _self
-    key = str(_self._GEMINI_KEY or "").strip()
+    key = str(_GEMINI_KEY or "").strip()
     if not key:
         return {"status": "skip", "reason": "GEMINI_API_KEY / GOOGLE_API_KEY not set"}
     return {"status": "ok"}

@@ -54,11 +54,12 @@ class TestReadyz(unittest.TestCase):
             with patch("bananaflow.api.health_routes._DATA_DIR", tmpdir):
                 client = self._get_client()
                 r = client.get("/readyz")
-        self.assertIn(r.status_code, (200, 503))
+        self.assertEqual(r.status_code, 200)  # writable dir → at most degraded, never not_ready
         data = r.json()
         self.assertIn("status", data)
         self.assertIn("checks", data)
         self.assertIn("sqlite_writable", data["checks"])
+        self.assertEqual(data["checks"]["sqlite_writable"]["status"], "ok")
 
     def test_readyz_unwritable_dir_returns_503(self):
         with patch("bananaflow.api.health_routes._DATA_DIR", "/nonexistent_dir_xyz"):
