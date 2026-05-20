@@ -366,8 +366,7 @@ def ollama_prompt_polish(user_prompt: str, mode: str = "text2img", req_id: str =
     prompt = (user_prompt or "").strip()
     if not prompt:
         return {"text": "", "variants": []}
-    if not is_ollama_model(MODEL_PROMPT_POLISH):
-        raise RuntimeError("MODEL_PROMPT_POLISH must use ollama: prefix")
+
 
     attempts = [
         (
