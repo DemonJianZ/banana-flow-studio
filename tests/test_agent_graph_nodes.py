@@ -288,5 +288,60 @@ class TestRouter(unittest.TestCase):
         )
 
 
+class TestExecuteChitchat(unittest.TestCase):
+    def test_calls_chitchat_tool_and_sets_response_text(self):
+        from agent_v2.graph.nodes.execute_chitchat import execute_chitchat
+        from unittest import mock
+        state = {
+            "message": "你好",
+            "thread_id": "t1",
+            "member_authorization": "",
+            "trace": [],
+        }
+        mock_payload = {"text": "你好！有什么需要帮助的吗？"}
+        with mock.patch(
+            "agent_v2.graph.nodes.execute_chitchat._run_chitchat_tool",
+            return_value=mock_payload,
+        ):
+            result = execute_chitchat(state)
+        self.assertEqual(result["exec_response_text"], "你好！有什么需要帮助的吗？")
+        self.assertEqual(result["exec_patches"], [])
+        self.assertEqual(result["exec_warnings"], [])
+
+    def test_uses_llm_answer_when_already_set(self):
+        from agent_v2.graph.nodes.execute_chitchat import execute_chitchat
+        state = {
+            "message": "你好",
+            "thread_id": "t1",
+            "member_authorization": "",
+            "trace": [],
+            "_llm_answer": "直接回答：你好！",
+        }
+        from unittest import mock
+        with mock.patch("agent_v2.graph.nodes.execute_chitchat._run_chitchat_tool", return_value={"text": "hi"}):
+            result = execute_chitchat(state)
+        self.assertIn("exec_response_text", result)
+
+
+class TestExecuteClarify(unittest.TestCase):
+    def test_returns_clarification_question(self):
+        from agent_v2.graph.nodes.execute_clarify import execute_clarify
+        state = {
+            "message": "帮我做个视频",
+            "trace": [],
+            "_clarification_question": "请问产品名称是什么？",
+        }
+        result = execute_clarify(state)
+        self.assertEqual(result["exec_response_text"], "请问产品名称是什么？")
+        self.assertEqual(result["exec_patches"], [])
+
+    def test_default_question_when_none_set(self):
+        from agent_v2.graph.nodes.execute_clarify import execute_clarify
+        state = {"message": "...", "trace": [], "_clarification_question": None}
+        result = execute_clarify(state)
+        self.assertIn("exec_response_text", result)
+        self.assertTrue(len(result["exec_response_text"]) > 0)
+
+
 if __name__ == "__main__":
     unittest.main()
