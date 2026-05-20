@@ -374,5 +374,70 @@ class TestExecuteCanvasPlan(unittest.TestCase):
         self.assertEqual(result["exec_data"]["thought"], "")
 
 
+class TestExecuteToolCall(unittest.TestCase):
+    def test_executes_prompt_polish_and_returns_tool_result(self):
+        from agent_v2.graph.nodes.execute_tool import execute_tool_call
+        from unittest import mock
+
+        state = {
+            "message": "产品图片白底",
+            "tool_name": "prompt.polish",
+            "tool_args": {"prompt": "产品图片白底", "mode": "text2img"},
+            "thread_id": "t1",
+            "member_authorization": "",
+            "trace": [],
+        }
+        mock_result = {"text": "clean white background product photo", "variants": []}
+        with mock.patch(
+            "agent_v2.graph.nodes.execute_tool._run_tool",
+            return_value=mock_result,
+        ):
+            result = execute_tool_call(state)
+
+        self.assertEqual(result["exec_data"], mock_result)
+        self.assertEqual(result["exec_patches"], [])
+
+    def test_falls_back_to_chitchat_when_tool_not_found(self):
+        from agent_v2.graph.nodes.execute_tool import execute_tool_call
+        from unittest import mock
+
+        state = {
+            "message": "你好",
+            "tool_name": "nonexistent.tool",
+            "tool_args": {},
+            "thread_id": "t1",
+            "member_authorization": "",
+            "trace": [],
+        }
+        with mock.patch(
+            "agent_v2.graph.nodes.execute_tool._run_chitchat_fallback",
+            return_value={"text": "fallback response"},
+        ):
+            result = execute_tool_call(state)
+        self.assertEqual(result["exec_response_text"], "fallback response")
+
+
+class TestExecuteStoryboard(unittest.TestCase):
+    def test_creates_async_task_and_returns_task_id(self):
+        from agent_v2.graph.nodes.execute_storyboard import execute_storyboard
+        from unittest import mock
+
+        state = {
+            "thread_id": "t1",
+            "tool_args": {"brief": "广告分镜", "aspect_ratio": "16:9"},
+            "member_authorization": "",
+            "trace": [],
+        }
+        with mock.patch(
+            "agent_v2.graph.nodes.execute_storyboard._create_storyboard_task",
+            return_value="task-abc",
+        ):
+            result = execute_storyboard(state)
+
+        self.assertEqual(result["exec_data"]["task_id"], "task-abc")
+        self.assertEqual(result["exec_data"]["status"], "pending")
+        self.assertIn("task-abc", result["exec_response_text"])
+
+
 if __name__ == "__main__":
     unittest.main()
