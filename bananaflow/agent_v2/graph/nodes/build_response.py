@@ -4,7 +4,6 @@ from typing import Any
 
 
 def build_response(state: dict) -> dict:
-    """Assemble AgentInvokeResponse dict and append turn to conversation_history."""
     intent = str(state.get("intent") or "answer_only")
     thread_id = str(state.get("thread_id") or "").strip()
     exec_response_text = str(state.get("exec_response_text") or "").strip()
