@@ -1,6 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
-import * as THREE from "three";
 import {
   Upload,
   Image as ImageIcon,
@@ -57,7 +56,6 @@ import {
   VolumeX,
   FolderOpen,
   Save,
-  Camera,
 } from "lucide-react";
 import { useAuth } from "../auth/AuthProvider";
 import { useNavigate } from "../router";
@@ -78,7 +76,6 @@ import PropertyPanel from "../components/workbench/PropertyPanel";
 import NodeComponent from "../components/workbench/NodeComponent";
 import {
   buildCanvasNodePrompt,
-  buildCanvasNodePreviewPrompt,
   extractCanvasSupplementalPrompt,
 } from "../components/agent-canvas/promptUtils";
 import {
@@ -120,9 +117,7 @@ import { useSidebar } from "../hooks/useSidebar";
 import { detectPreferenceSuggestions } from "../agent/preferenceSuggestion";
 import { buildHitlFeedbackRows } from "../agent/hitlFeedbackHistory";
 import { AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2, API_BASE } from "../config";
-import Html360Viewer from "./Html360Viewer";
 import { findAIChatModelIdByKeywords } from "../lib/aiChatModelResolver";
-import { downloadMedia } from "../lib/downloadMedia";
 import { isVideoContent } from "../lib/mediaType.js";
 import { buildRoleProfileStructuredOutput } from "../lib/roleProfileStructurer.js";
 import {
@@ -135,30 +130,20 @@ import {
   SCRIPT_CONVERSION_GOAL_OPTIONS,
   SCRIPT_AUDIENCE_OPTIONS,
   normalizeScriptBrief,
-  buildArtifactSelectionKey,
-  isSameArtifactSelection,
   isPreviewableArtifact,
-  normalizeLocationName,
   matchesSceneBinding,
   stripStoryboardDisplayIds,
-  escapeRegExp,
-  collectStoryboardMentionTerms,
-  renderStoryboardMentionText,
-  extractScriptPlatform,
   buildInitialScriptBrief,
-  getAgentResultCardWidth,
   getAgentTurnStepLabel,
   NODE_TYPES,
   HIDDEN_IMAGE_CONFIG_MODES,
   VOLC_VIDEO_HD_TEMPLATE_ENUM_1,
   VOLC_VIDEO_HD_TEMPLATE_ENUM_2,
   DEFAULT_VIDEO_HD_MODEL_ID,
-  isSeedanceReferenceModeModel,
   isSeedanceOmniReferenceModel,
   sortParamValues,
   findAIChatParamItem,
   getAIChatParamDisplayValue,
-  listAIChatParamValues,
   listAIChatParamChoiceOptions,
   normalizePromptPolishVariants,
   TOOL_CARDS,
@@ -181,12 +166,11 @@ import {
   normalizeInputMediaKind,
   getReferenceNodeTitle,
   readFilesAsDataUrls,
-  normalizeVideoSplitSecond,
   normalizeVideoSplitSegments,
   checkNodeReady,
 } from "../constants/workbench.jsx";
 import { useAssetLibrary, cloneAssetLibrarySnapshot, buildSnapshotDigest, normalizeAssetLibraryStore, buildAssetLibraryAssetsFromSnapshot, mergeAssetLibraryAssets, normalizeAssetLibraryPersona } from "../hooks/useAssetLibrary";
-import { useCanvas, isEditableElement, getMediaUploadNodePosition, cloneCanvasNodeLight } from "../hooks/useCanvas";
+import { useCanvas, cloneCanvasNodeLight } from "../hooks/useCanvas";
 import { useAgentChat, makeAgentId, shortenSessionTitle, HITL_FEEDBACK_REASON_OPTIONS } from "../hooks/useAgentChat";
 import { useWorkbenchRun } from "../hooks/useWorkbenchRun";
 
@@ -315,7 +299,7 @@ const decodeStoryboardDocumentBuffer = (buffer) => {
         bestScore = score;
         bestText = decoded;
       }
-    } catch (error) {
+    } catch {
       // ignore decoder unsupported/runtime errors
     }
   }
@@ -1170,291 +1154,6 @@ const extractApiError = (data) => {
   return String(d);
 };
 
-// --- Helper: Graph Traversal ---
-const getDownstreamNodes = (startNodeIds, nodes, connections) => {
-  const visited = new Set(startNodeIds);
-  const queue = [...startNodeIds];
-  while (queue.length > 0) {
-    const currentId = queue.shift();
-    const outgoing = connections.filter((c) => c.from === currentId).map((c) => c.to);
-    for (const nextId of outgoing) {
-      if (!visited.has(nextId)) {
-        visited.add(nextId);
-        queue.push(nextId);
-      }
-    }
-  }
-  return visited;
-};
-
-
-
-
-
-const clampPanoramaZoom = (value) => Math.min(2.4, Math.max(0.75, Number(value) || 1));
-const normalizePanoramaYaw = (value) => {
-  const next = Number(value) || 0;
-  return ((next % 360) + 360) % 360;
-};
-
-const PanoramaViewerSurface = ({
-  image,
-  yaw = 0,
-  zoom = 1,
-  onYawChange,
-  onZoomChange,
-  onReset,
-  onOpenFullscreen,
-  onSnapshot,
-  className = "",
-  compact = false,
-}) => {
-  const mountRef = useRef(null);
-  const dragRef = useRef({ active: false, startX: 0, startYaw: 0 });
-  const threeRef = useRef(null);
-  const hasImage = Boolean(image);
-  const safeYaw = normalizePanoramaYaw(yaw);
-  const safeZoom = clampPanoramaZoom(zoom);
-  const cameraFov = Math.max(32, Math.min(92, 76 / safeZoom));
-
-  useEffect(() => {
-    const mount = mountRef.current;
-    if (!mount) return undefined;
-
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(cameraFov, 1, 0.1, 1100);
-    camera.position.set(0, 0, 0.01);
-    const renderer = new THREE.WebGLRenderer({
-      antialias: true,
-      alpha: false,
-      powerPreference: "high-performance",
-      preserveDrawingBuffer: true,
-    });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 3));
-    renderer.setClearColor(0x0f172a, 1);
-    renderer.domElement.className = "h-full w-full";
-    renderer.domElement.dataset.panoramaCanvas = "true";
-    mount.appendChild(renderer.domElement);
-
-    const geometry = new THREE.SphereGeometry(500, 64, 40);
-    geometry.scale(-1, 1, 1);
-    const material = new THREE.MeshBasicMaterial({ color: 0x182033 });
-    const mesh = new THREE.Mesh(geometry, material);
-    scene.add(mesh);
-
-    let frameId = 0;
-    let disposed = false;
-    const resize = () => {
-      if (disposed || !mount) return;
-      const rect = mount.getBoundingClientRect();
-      const width = Math.max(1, Math.floor(rect.width));
-      const height = Math.max(1, Math.floor(rect.height));
-      renderer.setSize(width, height, false);
-      camera.aspect = width / height;
-      camera.updateProjectionMatrix();
-    };
-    const render = () => {
-      if (disposed) return;
-      renderer.render(scene, camera);
-      frameId = window.requestAnimationFrame(render);
-    };
-
-    resize();
-    window.addEventListener("resize", resize);
-    frameId = window.requestAnimationFrame(render);
-    threeRef.current = { camera, renderer, scene, geometry, material, mesh, resize };
-
-    return () => {
-      disposed = true;
-      window.cancelAnimationFrame(frameId);
-      window.removeEventListener("resize", resize);
-      threeRef.current = null;
-      geometry.dispose();
-      material.map?.dispose?.();
-      material.dispose();
-      renderer.dispose();
-      renderer.domElement.remove();
-    };
-  }, []);
-
-  useEffect(() => {
-    const state = threeRef.current;
-    if (!state) return;
-    state.camera.fov = cameraFov;
-    state.camera.updateProjectionMatrix();
-    state.mesh.geometry = state.geometry;
-    state.mesh.position.set(0, 0, 0);
-    state.mesh.rotation.set(0, 0, 0);
-    const phi = THREE.MathUtils.degToRad(90);
-    const theta = THREE.MathUtils.degToRad(safeYaw);
-    state.camera.lookAt(
-      500 * Math.sin(phi) * Math.cos(theta),
-      0,
-      500 * Math.sin(phi) * Math.sin(theta),
-    );
-  }, [cameraFov, safeYaw]);
-
-  useEffect(() => {
-    const state = threeRef.current;
-    if (!state) return undefined;
-    if (!image) {
-      state.material.map?.dispose?.();
-      state.material.map = null;
-      state.material.color.set(0x182033);
-      state.material.needsUpdate = true;
-      return undefined;
-    }
-    let cancelled = false;
-    const loader = new THREE.TextureLoader();
-    loader.setCrossOrigin("anonymous");
-    loader.load(
-      image,
-      (texture) => {
-        if (cancelled || !threeRef.current) {
-          texture.dispose();
-          return;
-        }
-        texture.colorSpace = THREE.SRGBColorSpace;
-        texture.wrapS = THREE.RepeatWrapping;
-        texture.wrapT = THREE.ClampToEdgeWrapping;
-        texture.minFilter = THREE.LinearFilter;
-        texture.magFilter = THREE.LinearFilter;
-        const current = threeRef.current.material;
-        current.map?.dispose?.();
-        current.map = texture;
-        current.color.set(0xffffff);
-        current.needsUpdate = true;
-      },
-      undefined,
-      () => {
-        if (!threeRef.current) return;
-        threeRef.current.material.color.set(0x182033);
-        threeRef.current.material.needsUpdate = true;
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [image]);
-
-  const handlePointerDown = (event) => {
-    if (!hasImage) return;
-    event.preventDefault();
-    event.stopPropagation();
-    dragRef.current = { active: true, startX: event.clientX, startYaw: safeYaw };
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-  };
-
-  const handlePointerMove = (event) => {
-    if (!dragRef.current.active) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const delta = event.clientX - dragRef.current.startX;
-    onYawChange?.(normalizePanoramaYaw(dragRef.current.startYaw - delta / safeZoom));
-  };
-
-  const handlePointerUp = (event) => {
-    if (!dragRef.current.active) return;
-    event.preventDefault();
-    event.stopPropagation();
-    dragRef.current.active = false;
-    event.currentTarget.releasePointerCapture?.(event.pointerId);
-  };
-
-  const captureSnapshot = () => {
-    const state = threeRef.current;
-    if (!state || !hasImage) return;
-    state.renderer.render(state.scene, state.camera);
-    const dataUrl = state.renderer.domElement.toDataURL("image/png");
-    if (dataUrl) onSnapshot?.(dataUrl);
-  };
-
-  return (
-    <div
-      className={`nodrag relative overflow-hidden rounded-[16px] border border-slate-200 bg-slate-950 ${className}`}
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-      onPointerCancel={handlePointerUp}
-      onWheel={(event) => {
-        if (!hasImage) return;
-        event.preventDefault();
-        event.stopPropagation();
-        onZoomChange?.(clampPanoramaZoom(safeZoom + (event.deltaY > 0 ? -0.08 : 0.08)));
-      }}
-    >
-      <div ref={mountRef} className="absolute inset-0 cursor-grab active:cursor-grabbing" />
-      <div className="pointer-events-none absolute inset-x-0 top-0 h-14 bg-gradient-to-b from-black/42 to-transparent" />
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-black/50 to-transparent" />
-      <div className="pointer-events-none absolute left-1/2 top-1/2 h-10 w-10 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/20" />
-      <div className="pointer-events-none absolute left-1/2 top-1/2 h-px w-8 -translate-x-1/2 bg-white/25" />
-      <div className="pointer-events-none absolute left-1/2 top-1/2 h-8 w-px -translate-y-1/2 bg-white/25" />
-
-      {hasImage ? (
-        <div className="absolute bottom-3 left-3 flex items-center gap-2 rounded-full border border-white/15 bg-black/42 px-3 py-1.5 text-[11px] font-medium text-white/85 backdrop-blur-md">
-          <Scan className="h-3.5 w-3.5" />
-          <span>{Math.round(safeYaw)} deg</span>
-          <span className="text-white/45">/</span>
-          <span>{Math.round(safeZoom * 100)}%</span>
-        </div>
-      ) : (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center text-white/72">
-          <Scan className="h-7 w-7 text-white/55" />
-          <div className="text-[13px] font-medium text-white">等待全景图</div>
-          <div className="text-[11px] leading-5 text-white/55">上传或连接一张 2:1 全景图后浏览</div>
-        </div>
-      )}
-
-      {hasImage ? (
-        <div className="absolute right-3 top-3 flex items-center gap-1.5">
-          <button
-            type="button"
-            className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-black/42 text-white/82 backdrop-blur-md transition hover:bg-white/14 hover:text-white"
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              onReset?.();
-            }}
-            title="重置视角"
-            aria-label="重置视角"
-          >
-            <RotateCcw className="h-3.5 w-3.5" />
-          </button>
-          {!compact ? (
-            <button
-              type="button"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-black/42 text-white/82 backdrop-blur-md transition hover:bg-white/14 hover:text-white"
-              onPointerDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                onOpenFullscreen?.();
-              }}
-              title="全屏浏览"
-              aria-label="全屏浏览"
-            >
-              <Maximize className="h-3.5 w-3.5" />
-            </button>
-          ) : null}
-          <button
-            type="button"
-            className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-black/42 text-white/82 backdrop-blur-md transition hover:bg-white/14 hover:text-white"
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              captureSnapshot();
-            }}
-            title="截图当前视角"
-            aria-label="截图当前视角"
-          >
-            <Camera className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      ) : null}
-    </div>
-  );
-};
-
-
 const getNodeAnchorPosition = (node, nodeElement, direction = "output", handle = VIDEO_GEN_INPUT_HANDLE_MAIN) => {
   const width =
     nodeElement?.offsetWidth ||
@@ -1475,10 +1174,10 @@ const getNodeAnchorPosition = (node, nodeElement, direction = "output", handle =
 
 
 const Workbench = () => {
-  const { user, logout, apiFetch } = useAuth();
+  const { user, apiFetch } = useAuth();
   const navigate = useNavigate();
   const {
-    hoveredSidebarItemKey, setHoveredSidebarItemKey,
+    setHoveredSidebarItemKey,
     hoveredSidebarPreview, setHoveredSidebarPreview,
     sidebarNodeInputMenu, setSidebarNodeInputMenu,
     sidebarWorkflowMenu, setSidebarWorkflowMenu,
@@ -1509,21 +1208,18 @@ const Workbench = () => {
     selectedNodeIds, setSelectedNodeIds,
     selectedConnectionIds, setSelectedConnectionIds,
     activeNodeId, setActiveNodeId,
-    isSpacePressed, setIsSpacePressed,
-    interactionMode, setInteractionMode,
-    dragStart, setDragStart,
-    initialNodePos, setInitialNodePos,
-    selectionBox, setSelectionBox,
+    setIsSpacePressed,
+    selectionBox,
     connectingSource, setConnectingSource,
     hoveredConnectionId, setHoveredConnectionId,
     hoveredConnectTarget, setHoveredConnectTarget,
-    mousePos, setMousePos,
-    canvasDropActive, setCanvasDropActive,
-    canvasDropUploading, setCanvasDropUploading,
+    mousePos,
+    canvasDropActive,
+    canvasDropUploading,
     canvasId,
     nodeElementMapRef, nodesRef, connectionsRef,
-    canvasRef, canvasDragDepthRef, canvasHoverClientRef,
-    nodeDragCleanupRef, connectionDragSelectionRef, dragSelectionStyleRef,
+    canvasRef, canvasHoverClientRef,
+    connectionDragSelectionRef,
     connectionHoverTargetRef,
     canUndo, canRedo,
     pushHistory, undo, redo,
@@ -1537,7 +1233,7 @@ const Workbench = () => {
     handleMouseMove, handleMouseUp,
     getCursor,
     createMediaUploadNodeAt,
-    getCanvasViewportCenterPoint, getCanvasPastePoint,
+    getCanvasViewportCenterPoint,
     handleCanvasDragEnter, handleCanvasDragOver, handleCanvasDragLeave, handleCanvasDrop,
     appendTemplateGraph,
   } = useCanvas({
@@ -1550,22 +1246,21 @@ const Workbench = () => {
     assetLibraryStore, setAssetLibraryStore,
     showAssetLibrary, setShowAssetLibrary,
     assetLibraryTab, setAssetLibraryTab,
-    assetLibraryLoaded, setAssetLibraryLoaded,
+    assetLibraryLoaded,
     expandedAssetWorkIds, setExpandedAssetWorkIds,
-    assetLibraryDetailWorkId, setAssetLibraryDetailWorkId,
-    assetLibraryDetailPersonaId, setAssetLibraryDetailPersonaId,
-    editingAssetWorkTitleId, setEditingAssetWorkTitleId,
+    setAssetLibraryDetailWorkId,
+    setAssetLibraryDetailPersonaId,
+    editingAssetWorkTitleId,
     editingAssetWorkTitleDraft, setEditingAssetWorkTitleDraft,
     pendingUploadNodeId, setPendingUploadNodeId,
     assetLibraryPickerMode, setAssetLibraryPickerMode,
     assetLibraryPersonaImageInputRef,
     assetLibraryRestoredRef,
-    assetLibraryDrafts, assetLibraryWorks, assetLibraryWorkVersions,
+    assetLibraryDrafts, assetLibraryWorks,
     assetLibraryAssets, assetLibraryPersonas, personaMentionOptions,
-    assetLibraryVersionsByWorkId, assetLibraryAssetsByWorkId,
+    assetLibraryVersionsByWorkId,
     activeCanvasDraft, upsertCanvasDraftSnapshot,
     assetLibraryDetailWork, assetLibraryDetailPersona,
-    assetLibraryDetailVersions, assetLibraryDetailLatestVersion,
     assetLibraryDetailSnapshot, assetLibraryDetailDigest, assetLibraryDetailAssets,
     beginEditAssetWorkTitle, cancelEditAssetWorkTitle, commitEditAssetWorkTitle,
     createAssetLibraryPersona, updateAssetLibraryPersona, removeAssetLibraryPersona,
@@ -1574,23 +1269,20 @@ const Workbench = () => {
 
   const onRunToastForAgentRef = useRef(null);
   const {
-    rightPanelWidth, setRightPanelWidth,
-    agentStore, setAgentStore,
     agentInput, setAgentInput,
     agentInputFocused, setAgentInputFocused,
     agentPromptPolishLoading, setAgentPromptPolishLoading,
     agentPromptPolishError, setAgentPromptPolishError,
-    promptPolishDialog, setPromptPolishDialog,
+    promptPolishDialog,
     activeComposerActionId, setActiveComposerActionId,
     showScriptExamples, setShowScriptExamples,
     showCanvasExamples, setShowCanvasExamples,
     agentComposerFiles, setAgentComposerFiles,
     agentDevMode, setAgentDevMode,
-    agentHistoryCollapsed, setAgentHistoryCollapsed,
+    agentHistoryCollapsed,
     showPreferencesPanel, setShowPreferencesPanel,
     preferencesPanelPrefill, setPreferencesPanelPrefill,
     preferenceNotice, setPreferenceNotice,
-    memoryPreferencesCache, setMemoryPreferencesCache,
     savingSuggestionId, setSavingSuggestionId,
     savingFeedbackTargetId, setSavingFeedbackTargetId,
     feedbackDialog, setFeedbackDialog,
@@ -1602,10 +1294,8 @@ const Workbench = () => {
     agentInputRef,
     agentUploadInputRef,
     agentComposerRef,
-    promptPolishApplyRef,
     agentCardDragRef,
     agentConversationBottomRef,
-    rightPanelResizeRef,
     agentSessions,
     activeAgentSession,
     agentTurns,
@@ -1629,7 +1319,6 @@ const Workbench = () => {
     clearActiveAgentConversation,
     setPendingTaskForActiveSession,
     clearPendingTaskForActiveSession,
-    mapPreferenceListToKey,
     refreshMemoryPreferences,
     updateSuggestionStatus,
     ensureAgentResultCard,
@@ -1644,20 +1333,18 @@ const Workbench = () => {
     isRunning, setIsRunning,
     runAbortControllerRef, nodeAbortControllersRef,
     cancelledNodeIdsRef, runningNodeIdsRef,
-    apiStatus, setApiStatus,
+    apiStatus,
     setGlobalError,
     previewImage, setPreviewImage,
     showHistoryPanel, setShowHistoryPanel,
     activeHistoryTab, setActiveHistoryTab,
-    apiHistory, setApiHistory,
+    apiHistory,
     expandedHistoryIds, setExpandedHistoryIds,
-    apiStats, setApiStats,
+    apiStats,
     runToast, setRunToast,
-    fetchHistoryAndStats,
     normalizeHistoryOutputs,
     normalizeHistoryInputs,
     formatHistoryParams,
-    cancelCurrentGeneration,
     cancelNodeGeneration,
     safeInvoke,
   } = useWorkbenchRun({ apiFetch, setNodes });
@@ -1859,11 +1546,7 @@ const Workbench = () => {
   }, []);
 
   const {
-    memberInfo,
-    setMemberInfo,
-    memberInfoLoading,
     memberInfoLoginUrl,
-    userAuths,
     userAuthsLoading,
     navigateToMemberLogin,
     memberLabel,
@@ -2228,96 +1911,6 @@ const Workbench = () => {
     };
   }, [activeArtifact]);
 
-  const activeStoryboardNode = useMemo(() => {
-    const artifactNodeId = String(activeArtifact?.fromNodeId || "").trim();
-    if (artifactNodeId) {
-      const byArtifact = nodes.find((node) => node.id === artifactNodeId && node.type === NODE_TYPES.STORYBOARD_PLAN);
-      if (byArtifact) return byArtifact;
-    }
-    if (selectedNodeIds.size === 1) {
-      const selectedId = Array.from(selectedNodeIds)[0];
-      const bySelection = nodes.find((node) => node.id === selectedId && node.type === NODE_TYPES.STORYBOARD_PLAN);
-      if (bySelection) return bySelection;
-    }
-    return null;
-  }, [activeArtifact, nodes, selectedNodeIds]);
-
-  const selectStoryboardAssetFromPanel = useCallback(
-    (assetType, asset, storyboardNode = activeStoryboardNode) => {
-      if (!storyboardNode || !asset) return;
-      const normalizedType = assetType === "locations" ? "scene" : "entity";
-      const selectionId = String(asset?.entity_id || asset?.name || "").trim();
-      const selectionLabelPrefix = assetType === "characters" ? "角色" : assetType === "subjects" ? "主体" : "场景";
-      setActiveArtifact({
-        kind: "storyboard_selection",
-        fromNodeId: storyboardNode.id,
-        meta: {
-          selectionType: normalizedType,
-          selectionId,
-          selectionLabel: `${selectionLabelPrefix} · ${String(asset?.name || "").trim()}`,
-          selectionSummary: String(asset?.core_description || asset?.description || "").trim(),
-          payload:
-            assetType === "locations"
-              ? {
-                  sceneId: "",
-                  sceneNo: null,
-                  sceneTitle: String(asset?.name || "").trim(),
-                  sceneLocation: String(asset?.name || "").trim(),
-                  locationId: selectionId,
-                }
-              : {
-                  entityId: selectionId,
-                  entityName: String(asset?.name || "").trim(),
-                  entityType: selectionLabelPrefix,
-                },
-        },
-      });
-      setAgentInputFocused(true);
-    },
-    [activeStoryboardNode],
-  );
-
-  const focusRelatedStoryboardShot = useCallback(
-    (assetType, asset, storyboardNode = activeStoryboardNode) => {
-      if (!storyboardNode || !asset) return;
-      const plan = storyboardNode.data?.storyboard_plan || {};
-      const scenes = Array.isArray(plan?.scenes) ? plan.scenes : [];
-      const assetName = String(asset?.name || "").trim();
-      const matchingScene =
-        assetType === "locations"
-          ? scenes.find((scene) => String(scene?.location || "").trim() === assetName)
-          : scenes.find((scene) =>
-              (Array.isArray(scene?.shots) ? scene.shots : []).some((shot) =>
-                (Array.isArray(shot?.referenced_entities) ? shot.referenced_entities : []).includes(assetName),
-              ),
-            );
-      if (matchingScene) {
-        const firstShot = (Array.isArray(matchingScene?.shots) ? matchingScene.shots : [])[0];
-        if (firstShot) {
-          setActiveArtifact({
-            kind: "storyboard_selection",
-            fromNodeId: storyboardNode.id,
-            meta: {
-              selectionType: "shot",
-              selectionId: String(firstShot?.shot_id || "").trim(),
-              selectionLabel: `镜头 ${firstShot?.shot_no || 1} · ${String(matchingScene?.location || matchingScene?.title || "").trim()}`,
-              selectionSummary: String(firstShot?.visual_description || "").trim(),
-              payload: {
-                shotId: String(firstShot?.shot_id || "").trim(),
-                shotNo: firstShot?.shot_no || 1,
-                sceneId: String(matchingScene?.scene_id || "").trim(),
-                sceneTitle: String(matchingScene?.title || "").trim(),
-                sceneLocation: String(matchingScene?.location || "").trim(),
-              },
-            },
-          });
-        }
-      }
-      setSelectedNodeIds(new Set([storyboardNode.id]));
-    },
-    [activeStoryboardNode],
-  );
-
   const resolveStoryboardAssetForMention = useCallback((storyboardNode, mentionEntry) => {
     if (!storyboardNode || !mentionEntry?.assetType) return null;
     const plan = storyboardNode.data?.storyboard_plan || {};
@@ -2332,14 +1925,6 @@ const Workbench = () => {
     );
   }, []);
 
-  const closeStoryboardAssetHoverCard = useCallback(() => {
-    if (storyboardAssetHoverCloseTimerRef.current) {
-      window.clearTimeout(storyboardAssetHoverCloseTimerRef.current);
-      storyboardAssetHoverCloseTimerRef.current = null;
-    }
-    setHoveredStoryboardAssetCard(null);
-  }, []);
-
   const scheduleCloseStoryboardAssetHoverCard = useCallback(() => {
     if (storyboardAssetHoverCloseTimerRef.current) {
       window.clearTimeout(storyboardAssetHoverCloseTimerRef.current);
@@ -2348,14 +1933,6 @@ const Workbench = () => {
       setHoveredStoryboardAssetCard((current) => (current?.sticky ? current : null));
       storyboardAssetHoverCloseTimerRef.current = null;
     }, 120);
-  }, []);
-
-  const closeStoryboardShotHoverCard = useCallback(() => {
-    if (storyboardShotHoverCloseTimerRef.current) {
-      window.clearTimeout(storyboardShotHoverCloseTimerRef.current);
-      storyboardShotHoverCloseTimerRef.current = null;
-    }
-    setHoveredStoryboardShotCard(null);
   }, []);
 
   const scheduleCloseStoryboardShotHoverCard = useCallback(() => {
@@ -3120,54 +2697,6 @@ const Workbench = () => {
     ], { alignToViewportCenter: true });
   };
 
-  const createVideo2VideoTemplate = () => {
-    const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 200, data: { images: [], mediaKind: "video", title: getReferenceNodeTitle("video") } };
-    const n2 = {
-      id: generateId(),
-      type: NODE_TYPES.PROCESSOR,
-      x: 500,
-      y: 200,
-      data: {
-        mode: "video_upscale",
-        prompt: "视频画质增强",
-        templates: { template_enum: VOLC_VIDEO_HD_TEMPLATE_ENUM_1 },
-        batchSize: 1,
-        status: "idle",
-        refImage: null,
-        model: DEFAULT_VIDEO_HD_MODEL_ID,
-      },
-    };
-    const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
-    appendTemplateGraph([n1, n2, n3], [
-      { id: generateId(), from: n1.id, to: n2.id },
-      { id: generateId(), from: n2.id, to: n3.id },
-    ], { alignToViewportCenter: true });
-  };
-
-  const createVideoUpscaleTemplate = () => {
-    const n1 = { id: generateId(), type: NODE_TYPES.INPUT, x: 100, y: 200, data: { images: [] } };
-    const n2 = {
-      id: generateId(),
-      type: NODE_TYPES.PROCESSOR,
-      x: 500,
-      y: 200,
-      data: {
-        mode: "video_upscale",
-        prompt: "视频画质增强",
-        templates: { template_enum: VOLC_VIDEO_HD_TEMPLATE_ENUM_1 },
-        batchSize: 1,
-        status: "idle",
-        refImage: null,
-        model: DEFAULT_VIDEO_HD_MODEL_ID,
-      },
-    };
-    const n3 = { id: generateId(), type: NODE_TYPES.OUTPUT, x: 900, y: 200, data: { images: [] } };
-    appendTemplateGraph([n1, n2, n3], [
-      { id: generateId(), from: n1.id, to: n2.id },
-      { id: generateId(), from: n2.id, to: n3.id },
-    ], { alignToViewportCenter: true });
-  };
-
   const createConnectedVideoNode = (sourceNodeId) => {
     pushHistory();
     const sourceNode = nodes.find((n) => n.id === sourceNodeId);
@@ -3684,7 +3213,7 @@ const Workbench = () => {
   }, []);
 
   const runCompactRemoveWatermark = useCallback(
-    async (sourceNodeId, imageIndex = 0) => {
+    async (sourceNodeId, _imageIndex = 0) => {
       try {
         const sourceNode = nodesRef.current.find((n) => n.id === sourceNodeId);
         const images = Array.isArray(sourceNode?.data?.images) ? sourceNode.data.images : [];
@@ -3696,7 +3225,7 @@ const Workbench = () => {
         }
 
         const resultImages = [];
-        for (const { item, index } of imageEntries) {
+        for (const { item } of imageEntries) {
           const resp = await apiFetch(`/api/remove_watermark`, {
             method: "POST",
             skipAuth: true,
@@ -3737,7 +3266,7 @@ const Workbench = () => {
   );
 
   const runCompactRmbg = useCallback(
-    async (sourceNodeId, imageIndex = 0) => {
+    async (sourceNodeId, _imageIndex = 0) => {
       try {
         const sourceNode = nodesRef.current.find((n) => n.id === sourceNodeId);
         const images = Array.isArray(sourceNode?.data?.images) ? sourceNode.data.images : [];
@@ -3749,7 +3278,7 @@ const Workbench = () => {
         }
 
         const resultImages = [];
-        for (const { item, index } of imageEntries) {
+        for (const { item } of imageEntries) {
           const resp = await apiFetch(`/api/rmbg`, {
             method: "POST",
             skipAuth: true,
@@ -3880,7 +3409,6 @@ const Workbench = () => {
       const safeTemplateEnum =
         parseInt(String(templateEnum ?? VOLC_VIDEO_HD_TEMPLATE_ENUM_1), 10) || VOLC_VIDEO_HD_TEMPLATE_ENUM_1;
       const authorizationInfo = resolveMemberAuthorizationInfo();
-      const firstSourceImage = String(retrySources?.[imageEntries[0]?.index] || imageEntries[0]?.item || "").trim();
       const proxyPayload = {
         authorization: authorizationInfo?.value || "",
         history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
@@ -4197,67 +3725,6 @@ const Workbench = () => {
     window.addEventListener("mouseup", onMouseUp);
   };
 
-  const revealAgentResultCardInCanvas = useCallback(
-    (turnId) => {
-      const card = agentResultCards.find((item) => item.turnId === turnId);
-      if (!card) {
-        ensureAgentResultCard(turnId);
-        return;
-      }
-
-      setAgentResultCards((prev) =>
-        prev.map((item) =>
-          item.turnId === turnId ? { ...item, minimized: false, collapsed: false } : item,
-        ),
-      );
-      setSelectedAgentCardIds(new Set([card.id]));
-      setActiveAgentCardId(card.id);
-
-      const canvasEl = canvasRef.current;
-      const turn = (activeAgentSession?.turns || []).find((item) => item.id === turnId);
-      if (!canvasEl) return;
-
-      const currentViewport = viewportRef.current || { x: 0, y: 0, zoom: 1 };
-      const zoom = currentViewport.zoom || 1;
-      const padding = 64;
-      const estimatedHeight = 680;
-
-      const visibleLeft = -currentViewport.x / zoom;
-      const visibleTop = -currentViewport.y / zoom;
-      const visibleRight = visibleLeft + canvasEl.clientWidth / zoom;
-      const visibleBottom = visibleTop + canvasEl.clientHeight / zoom;
-
-      const cardLeft = card.x;
-      const cardTop = card.y;
-      const cardRight = card.x + card.w;
-      const cardBottom = card.y + estimatedHeight;
-
-      let nextX = currentViewport.x;
-      let nextY = currentViewport.y;
-
-      if (cardLeft < visibleLeft + padding) {
-        nextX = -(cardLeft - padding) * zoom;
-      } else if (cardRight > visibleRight - padding) {
-        nextX = (canvasEl.clientWidth - (cardRight + padding) * zoom);
-      }
-
-      if (cardTop < visibleTop + padding) {
-        nextY = -(cardTop - padding) * zoom;
-      } else if (cardBottom > visibleBottom - padding) {
-        nextY = (canvasEl.clientHeight - (cardBottom + padding) * zoom);
-      }
-
-      if (nextX !== currentViewport.x || nextY !== currentViewport.y) {
-        setViewport((prev) => ({
-          ...prev,
-          x: nextX,
-          y: nextY,
-        }));
-      }
-    },
-    [activeAgentSession?.turns, agentResultCards, ensureAgentResultCard],
-  );
-
   const sendAIChatLanguageStream = useCallback(
     async (userText, route = null) => {
       const message = String(userText || "").trim();
@@ -4421,7 +3888,6 @@ const Workbench = () => {
       const response = await sendAgentMessage(
         {
           message,
-          recentMessages: buildAgentRecentMessages(),
           currentNodes: cloneDeep(currentNodes),
           currentConnections: cloneDeep(connectionsRef.current || []),
           selectedArtifact: activeArtifact
@@ -4444,7 +3910,7 @@ const Workbench = () => {
       );
       return response;
     },
-    [activeAgentSession?.id, activeArtifact, apiFetch, buildAgentRecentMessages, canvasId, getRecentAgentUploadedDocuments, shouldReuseRecentUploadedDocuments],
+    [activeAgentSession?.id, activeArtifact, apiFetch, canvasId, getRecentAgentUploadedDocuments, shouldReuseRecentUploadedDocuments],
   );
 
   const runMissionOnTurn = useCallback(
@@ -4467,8 +3933,8 @@ const Workbench = () => {
           },
         );
         // Backend may route to storyboard.design even when called from the script flow.
-        if (agentResponse?.action === "tool_call" && agentResponse?.data?.is_async && agentResponse?.data?.task_id) {
-          const storyboardTaskId = String(agentResponse.data.task_id);
+        if (agentResponse?.intent === "tool_call" && agentResponse?.async_task?.task_id) {
+          const storyboardTaskId = String(agentResponse.async_task.task_id);
           updateActiveAgentSession((session) => ({
             ...session,
             turns: (session.turns || []).map((turn) =>
@@ -4521,10 +3987,10 @@ const Workbench = () => {
           return;
         }
 
-        if (!(agentResponse?.action === "tool_call" && Array.isArray(agentResponse?.data?.topics))) {
+        if (!(agentResponse?.intent === "tool_call" && Array.isArray(agentResponse?.tool_result?.topics))) {
           throw new Error("Agent 未返回脚本结果");
         }
-        const response = agentResponse.data;
+        const response = agentResponse.tool_result;
         updateActiveAgentSession((session) => {
           const turnsNext = (session.turns || []).map((turn) =>
             turn.id === turnId
@@ -4577,10 +4043,10 @@ const Workbench = () => {
             existingScript: payload?.existingScript || payload?.existing_script || "",
           },
         );
-        if (!(agentResponse?.action === "tool_call" && typeof agentResponse?.data?.text === "string")) {
+        if (!(agentResponse?.intent === "tool_call" && typeof agentResponse?.tool_result?.text === "string")) {
           throw new Error("Agent 未返回短剧结果");
         }
-        const response = agentResponse.data;
+        const response = agentResponse.tool_result;
         updateActiveAgentSession((session) => ({
           ...session,
           turns: (session.turns || []).map((turn) =>
@@ -4621,7 +4087,7 @@ const Workbench = () => {
     async (userText, routeMeta = {}, requestOptions = {}) => {
       updateApiDebugStatus("agentPlanner", {
         status: "loading",
-        message: "POST /api/agent/message -> canvas_plan",
+        message: "POST /api/agent/invoke -> canvas_plan",
         detail: "",
       });
       try {
@@ -4649,12 +4115,12 @@ const Workbench = () => {
             supplementalPrompt: requestPayload.supplementalPrompt || "",
           },
         );
-        if (!(agentResponse?.action === "canvas_plan" && agentResponse?.data && typeof agentResponse.data === "object")) {
+        if (!(agentResponse?.intent === "canvas_plan")) {
           throw new Error("Agent 未返回画布规划结果");
         }
-        const response = agentResponse.data;
+        const toolResult = agentResponse.tool_result || {};
 
-        const plannerDebug = response?.debug?.planner || {};
+        const plannerDebug = toolResult?.debug?.planner || {};
         const plannerPath = String(plannerDebug?.planner_path || "unknown");
         updateApiDebugStatus("agentPlanner", {
           status: plannerPath.includes("fallback") || plannerPath === "legacy" ? "warning" : "success",
@@ -4662,7 +4128,7 @@ const Workbench = () => {
         });
         pushApiDebugDetail("agentPlanner", {
           type: "response",
-          path: "/api/agent/message",
+          path: "/api/agent/invoke",
           payload: {
             prompt: requestPayload.prompt,
             supplementalPrompt: requestPayload.supplementalPrompt || "",
@@ -4672,14 +4138,14 @@ const Workbench = () => {
           },
           response: {
             debug: plannerDebug,
-            patch_count: Array.isArray(response?.patch) ? response.patch.length : 0,
-            summary: response?.summary || "",
-            thought: response?.thought || "",
+            patch_count: Array.isArray(agentResponse?.patches) ? agentResponse.patches.length : 0,
+            summary: agentResponse?.message || toolResult?.summary || "",
+            thought: agentResponse?.thought || toolResult?.thought || "",
           },
         });
 
-        const patch = Array.isArray(response?.patch) ? response.patch : [];
-        if (!patch.length && !parseCanvasClarification(response)) {
+        const patch = Array.isArray(agentResponse?.patches) ? agentResponse.patches : [];
+        if (!patch.length && !parseCanvasClarification(agentResponse)) {
           throw new Error("Agent 未返回可执行的画布补丁");
         }
 
@@ -4687,15 +4153,16 @@ const Workbench = () => {
           pushHistory();
           _applyPatch(patch);
         }
-        return response;
+        // Return agentResponse so callers can access top-level fields (thought, message, patches)
+        return agentResponse;
       } catch (error) {
         updateApiDebugStatus("agentPlanner", {
           status: "error",
-          message: error?.message || "POST /api/agent/message failed",
+          message: error?.message || "POST /api/agent/invoke failed",
         });
         pushApiDebugDetail("agentPlanner", {
           type: "error",
-          path: "/api/agent/message",
+          path: "/api/agent/invoke",
           message: error?.message || String(error || ""),
         });
         throw error;
@@ -4703,11 +4170,6 @@ const Workbench = () => {
     },
     [activeArtifact, canvasId, _applyPatch, pushApiDebugDetail, pushHistory, runAgentConversation, updateApiDebugStatus],
   );
-
-  const getLatestResultTurn = useCallback(() => {
-    const turns = activeAgentSession?.turns || [];
-    return [...turns].reverse().find((turn) => turn?.status === "done" && turn?.response) || null;
-  }, [activeAgentSession?.turns]);
 
   const toValueArray = useCallback((value) => {
     if (Array.isArray(value)) {
@@ -5053,7 +4515,7 @@ const Workbench = () => {
             }
             appendAssistantTurn(
               missionText,
-              String(response?.summary || response?.response_text || response?.thought || "").trim(),
+              String(response?.message || response?.summary || response?.thought || "").trim(),
               {
                 status: clarification ? "clarify" : "assistant",
                 userTextOverride: "",
@@ -5070,7 +4532,7 @@ const Workbench = () => {
             );
             if (clarification) {
               setRunToast({
-                message: String(response?.summary || response?.response_text || response?.thought || "").trim(),
+                message: String(response?.message || response?.summary || response?.thought || "").trim(),
                 type: "info",
               });
             }
@@ -5114,22 +4576,20 @@ const Workbench = () => {
             uploadedDocuments,
           },
         );
-        const responseText = String(response?.response_text || "").trim();
+        const responseText = String(response?.message || "").trim();
         const routeDebug = buildRouteDebug(
           {
             ...route,
-            reason: response?.decision?.matched_rule
-              ? `agent_v2:${response.decision.matched_rule}`
-              : `agent_v2:${route.reason || "message"}`,
+            reason: `agent_v2:${route.reason || "message"}`,
           },
           true,
           response,
         );
 
-        if (response?.action === "canvas_plan" && response?.data && typeof response.data === "object") {
-          const plannerResult = response.data;
-          const patch = Array.isArray(plannerResult?.patch) ? plannerResult.patch : [];
-          const clarification = parseCanvasClarification(plannerResult);
+        if (response?.intent === "canvas_plan") {
+          const plannerResult = response.tool_result || {};
+          const patch = Array.isArray(response?.patches) ? response.patches : [];
+          const clarification = parseCanvasClarification(response);
           if (patch.length) {
             pushHistory();
             const patchResult = _applyPatch(patch);
@@ -5153,7 +4613,7 @@ const Workbench = () => {
           }
           updateAgentTurn(pendingTurnId, {
             status: clarification ? "clarify" : "assistant",
-            assistantText: String(plannerResult?.summary || plannerResult?.response_text || plannerResult?.thought || responseText).trim(),
+            assistantText: String(response?.message || plannerResult?.summary || plannerResult?.thought || responseText).trim(),
             showCancelPending: !!clarification,
             routeDebug,
             response: plannerResult,
@@ -5162,15 +4622,15 @@ const Workbench = () => {
           });
           if (clarification) {
             setRunToast({
-              message: String(plannerResult?.summary || plannerResult?.response_text || plannerResult?.thought || responseText).trim(),
+              message: String(response?.message || plannerResult?.summary || plannerResult?.thought || responseText).trim(),
               type: "info",
             });
           }
           return;
         }
 
-        if (response?.action === "tool_call" && response?.data?.is_async && response?.data?.task_id) {
-          const storyboardTaskId = String(response.data.task_id);
+        if (response?.intent === "tool_call" && response?.async_task?.task_id) {
+          const storyboardTaskId = String(response.async_task.task_id);
           updateAgentTurn(pendingTurnId, {
             status: "running",
             assistantText: responseText || "分镜方案生成中，请稍候...",
@@ -5219,57 +4679,9 @@ const Workbench = () => {
           return;
         }
 
-        if (
-          response?.action === "tool_call" &&
-          response?.data?.canvas_patch &&
-          typeof response.data.canvas_patch === "object"
-        ) {
-          const canvasPatchResult = response.data.canvas_patch;
-          const patch = Array.isArray(canvasPatchResult?.patch) ? canvasPatchResult.patch : [];
-          const storyboardNodeIds = patch
-            .filter((op) => op?.op === "add_node" && op?.node?.type === NODE_TYPES.STORYBOARD_PLAN)
-            .map((op) => String(op?.node?.id || "").trim())
-            .filter(Boolean);
-          if (patch.length) {
-            pushHistory();
-            const patchResult = _applyPatch(patch);
-            if (patchResult?.nodes && patchResult?.connections) {
-              upsertCanvasDraftSnapshot({
-                nodes: patchResult.nodes,
-                connections: patchResult.connections,
-                viewport: patchResult.viewport || viewportRef.current,
-              });
-            }
-          }
-          updateAgentTurn(pendingTurnId, {
-            status: "done",
-            assistantText: String(
-              responseText ||
-                canvasPatchResult?.summary ||
-                response?.data?.summary ||
-                "已生成可编辑分镜方案。"
-            ).trim(),
-            routeDebug,
-            response: {
-              ...(response.data || {}),
-              storyboardNodeIds,
-              summary: String(
-                responseText ||
-                  canvasPatchResult?.summary ||
-                  response?.data?.summary ||
-                  "已生成可编辑分镜方案。"
-              ).trim(),
-            },
-            intent: "STORYBOARD",
-            intentReason: routeDebug.reason,
-            stepIndex: AGENT_RUN_STEPS.length - 1,
-          });
-          return;
-        }
-
-        if (response?.action === "tool_call" && Array.isArray(response?.data?.topics)) {
+        if (response?.intent === "tool_call" && Array.isArray(response?.tool_result?.topics)) {
           const product = String(
-            response?.data?.audience_context?.product ||
+            response?.tool_result?.audience_context?.product ||
               extractProductKeyword(missionText) ||
               "",
           ).trim();
@@ -5281,7 +4693,7 @@ const Workbench = () => {
             intent: "SCRIPT",
             intentReason: routeDebug.reason,
             routeDebug,
-            response: response.data,
+            response: response.tool_result,
             scriptBrief: normalizeScriptBrief({ product }),
             scriptBriefDraft: null,
           });
@@ -5289,14 +4701,14 @@ const Workbench = () => {
         }
 
         if (
-          response?.action === "tool_call" &&
-          typeof response?.data?.text === "string" &&
-          (Object.prototype.hasOwnProperty.call(response?.data || {}, "summary") ||
-            Object.prototype.hasOwnProperty.call(response?.data || {}, "mode"))
+          response?.intent === "tool_call" &&
+          typeof response?.tool_result?.text === "string" &&
+          (Object.prototype.hasOwnProperty.call(response?.tool_result || {}, "summary") ||
+            Object.prototype.hasOwnProperty.call(response?.tool_result || {}, "mode"))
         ) {
           const dramaPayload = {
             prompt: missionText,
-            taskMode: String(response?.data?.mode || "").trim() || "episode_script",
+            taskMode: String(response?.tool_result?.mode || "").trim() || "episode_script",
           };
           updateAgentTurn(pendingTurnId, {
             extractedProduct: "",
@@ -5306,14 +4718,14 @@ const Workbench = () => {
             intent: "DRAMA",
             intentReason: routeDebug.reason,
             routeDebug,
-            response: response.data,
+            response: response.tool_result,
             dramaPayload,
           });
           return;
         }
 
         updateAgentTurn(pendingTurnId, {
-          status: response?.action === "clarify" ? "clarify" : "assistant",
+          status: response?.intent === "clarify" ? "clarify" : "assistant",
           assistantText: responseText || "我在。",
           routeDebug,
         });
@@ -5473,7 +4885,7 @@ const Workbench = () => {
           mimeType: String(file.type || "").trim() || "text/plain",
           textContent,
         });
-      } catch (error) {
+      } catch {
         setRunToast({ message: `${file.name} 读取失败`, type: "error" });
       }
     }
@@ -6110,7 +5522,7 @@ const Workbench = () => {
           y: sourceNode.y - 120 + row * 190,
           data: patch,
         };
-        runtimeNodes.set(newNodeId, clone(newNode));
+        runtimeNodes.set(newNodeId, cloneCanvasNodeLight(newNode));
         createdNodes.push(newNode);
         patches.set(newNodeId, patch);
         requiredConnections.push({ from: sourceNode.id, to: newNodeId });
@@ -7038,7 +6450,7 @@ const Workbench = () => {
   };
 
   const runCompactThreeView = useCallback(
-    async (sourceNodeId, imageIndex = 0) => {
+    async (sourceNodeId, _imageIndex = 0) => {
       const sourceNode = nodesRef.current.find((node) => node.id === sourceNodeId);
       const sourceImages = Array.isArray(sourceNode?.data?.images) ? sourceNode.data.images : [];
       const retrySources =
@@ -7407,7 +6819,7 @@ const Workbench = () => {
     return (
       <>
         <div className="flex flex-col items-center gap-1.5">
-          {visibleItems.map((item, itemIndex) => (
+          {visibleItems.map((item) => (
             <SidebarBtn
               key={item.id}
               icon={item.icon}
@@ -10329,7 +9741,6 @@ const Workbench = () => {
               const assetId = String(asset?.entity_id || asset?.name || "").trim();
               const assetState =
                 storyboardNode?.data?.storyboard_asset_state?.[assetType]?.[assetId] || {};
-              const isLocked = !!assetState?.locked;
               const generatedAt = assetState?.lastGeneratedAt ? new Date(assetState.lastGeneratedAt).toLocaleString() : "";
               const tabLabel = assetType === "characters" ? "角色" : assetType === "subjects" ? "主体" : "场景";
               const generatedImages = Array.isArray(assetState?.images) ? assetState.images.filter(Boolean) : [];
@@ -10344,10 +9755,6 @@ const Workbench = () => {
               const lockedImageUrl = String(assetState?.lockedImageUrl || "").trim();
               const generationStatus = String(assetState?.status || "").trim();
               const tweakText = String(hoveredStoryboardAssetCard?.tweakText || "").trim();
-              const effectivePrompt =
-                String(hoveredStoryboardAssetCard?.customPrompt || "").trim() ||
-                String(assetState?.prompt || "").trim() ||
-                buildStoryboardAssetGenerationPrompt(assetType, asset, storyboardNode?.data?.storyboard_plan || {});
               return (
                 <div
                   className="fixed z-[190] w-[360px] pointer-events-auto"

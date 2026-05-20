@@ -173,7 +173,7 @@ export async function sendAgentMessage(payload, apiFetch, meta) {
     message: String(payload?.message || "").trim(),
     force_action: payload?.forceAction || undefined,
     ui_action: payload?.uiAction || undefined,
-    recent_messages: Array.isArray(payload?.recentMessages) ? payload.recentMessages : [],
+    // NO recent_messages — context comes from server-side checkpointing
     supplemental_prompt: String(payload?.supplementalPrompt || "").trim() || undefined,
     current_nodes: Array.isArray(payload?.currentNodes) ? payload.currentNodes : [],
     current_connections: Array.isArray(payload?.currentConnections) ? payload.currentConnections : [],
@@ -194,7 +194,7 @@ export async function sendAgentMessage(payload, apiFetch, meta) {
     uploaded_documents: Array.isArray(payload?.uploadedDocuments) ? payload.uploadedDocuments : [],
     canvas_node_hints: payload?.canvasNodeHints && typeof payload.canvasNodeHints === "object" ? payload.canvasNodeHints : undefined,
   };
-  const resp = await call("/api/agent/message", {
+  const resp = await call("/api/agent/invoke", {
     method: "POST",
     body: JSON.stringify(reqBody),
     headers: buildAgentHeaders(meta),
@@ -232,10 +232,10 @@ export async function polishCanvasPrompt(payload, apiFetch, meta) {
     apiFetch,
     meta,
   );
-  if (!(data?.action === "tool_call" && data?.data && typeof data.data === "object")) {
-    throw new Error(String(data?.response_text || "").trim() || "Agent 未返回提示词润色结果");
+  if (!(data?.intent === "tool_call" && data?.tool_result && typeof data.tool_result === "object")) {
+    throw new Error(String(data?.message || "").trim() || "Agent 未返回提示词润色结果");
   }
-  return data.data;
+  return data.tool_result;
 }
 
 const delay = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
