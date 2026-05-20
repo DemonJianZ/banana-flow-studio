@@ -164,5 +164,129 @@ class TestAssembleContextNode(unittest.TestCase):
         self.assertEqual(result["artifact_summary"]["selection_type"], "scene")
 
 
+import types as _types
+
+
+def _install_google_stub():
+    if "google.genai" in sys.modules:
+        return
+    google_module = _types.ModuleType("google")
+    genai_module = _types.ModuleType("google.genai")
+    genai_module.types = _types.SimpleNamespace(
+        Part=lambda text="": _types.SimpleNamespace(text=text),
+        GenerateContentConfig=lambda **kwargs: _types.SimpleNamespace(**kwargs),
+    )
+    google_module.genai = genai_module
+    sys.modules["google"] = google_module
+    sys.modules["google.genai"] = genai_module
+
+
+_install_google_stub()
+
+
+class TestClassifyIntentNode(unittest.TestCase):
+    def _base_state(self, intent="", **overrides):
+        state = {
+            "message": "你好",
+            "intent": intent,
+            "intent_confidence": 0.0,
+            "intent_reason": "",
+            "tool_name": "",
+            "tool_args": {},
+            "canvas_summary": {},
+            "artifact_summary": {},
+            "conversation_history": [],
+            "mode": None,
+            "task_mode": None,
+            "product": None,
+            "canvas_id": None,
+            "thread_id": "t1",
+            "member_authorization": "",
+            "uploaded_documents": [],
+            "selected_artifact": None,
+            "trace": [],
+        }
+        state.update(overrides)
+        return state
+
+    def test_skips_llm_when_intent_already_set(self):
+        from agent_v2.graph.nodes.classify import classify_intent
+        from unittest import mock
+        state = self._base_state(intent="canvas_plan", tool_name="")
+        with mock.patch("agent_v2.graph.nodes.classify._call_llm_coordinator") as mock_llm:
+            result = classify_intent(state)
+        mock_llm.assert_not_called()
+        self.assertEqual(result["intent"], "canvas_plan")
+
+    def test_calls_llm_and_parses_answer_only(self):
+        from agent_v2.graph.nodes.classify import classify_intent
+        from unittest import mock
+        state = self._base_state(intent="")
+        llm_json = '{"action":"answer_only","reason":"casual","confidence":0.9,"matched_capabilities":["general_answer"],"answer":"你好！"}'
+        with mock.patch("agent_v2.graph.nodes.classify._call_llm_coordinator", return_value=llm_json):
+            result = classify_intent(state)
+        self.assertEqual(result["intent"], "answer_only")
+        self.assertAlmostEqual(result["intent_confidence"], 0.9)
+
+    def test_falls_back_to_answer_only_on_llm_failure(self):
+        from agent_v2.graph.nodes.classify import classify_intent
+        from unittest import mock
+        state = self._base_state(intent="")
+        with mock.patch("agent_v2.graph.nodes.classify._call_llm_coordinator", side_effect=RuntimeError("timeout")):
+            result = classify_intent(state)
+        self.assertEqual(result["intent"], "answer_only")
+        self.assertEqual(result["intent_reason"], "coordinator_fallback")
+
+    def test_storyboard_promise_guard_upgrades_to_tool_call(self):
+        from agent_v2.graph.nodes.classify import classify_intent
+        from unittest import mock
+        state = self._base_state(
+            intent="",
+            message="比例16:9，黑色电影风格，总时长48秒",
+            conversation_history=[{"role": "user", "text": "帮我做一个产品广告分镜"}],
+        )
+        promise_json = '{"action":"answer_only","reason":"llm_promise","confidence":0.62,"answer":"好的，我将调用故事板设计工具为您生成分镜草稿。"}'
+        with mock.patch("agent_v2.graph.nodes.classify._call_llm_coordinator", return_value=promise_json):
+            result = classify_intent(state)
+        self.assertEqual(result["intent"], "tool_call")
+        self.assertEqual(result["tool_name"], "storyboard.design")
+
+
+class TestRouter(unittest.TestCase):
+    def test_answer_only_routes_to_chitchat(self):
+        from agent_v2.graph.router import _route_after_classify
+        self.assertEqual(_route_after_classify({"intent": "answer_only"}), "execute_chitchat")
+
+    def test_clarify_routes_to_clarify(self):
+        from agent_v2.graph.router import _route_after_classify
+        self.assertEqual(_route_after_classify({"intent": "clarify"}), "execute_clarify")
+
+    def test_canvas_plan_routes_to_canvas(self):
+        from agent_v2.graph.router import _route_after_classify
+        self.assertEqual(_route_after_classify({"intent": "canvas_plan"}), "execute_canvas_plan")
+
+    def test_tool_call_routes_to_tool(self):
+        from agent_v2.graph.router import _route_after_classify
+        self.assertEqual(_route_after_classify({"intent": "tool_call"}), "execute_tool_call")
+
+    def test_unknown_falls_back_to_chitchat(self):
+        from agent_v2.graph.router import _route_after_classify
+        self.assertEqual(_route_after_classify({"intent": "unknown_intent"}), "execute_chitchat")
+
+    def test_storyboard_tool_routes_to_storyboard(self):
+        from agent_v2.graph.router import _route_after_tool
+        self.assertEqual(
+            _route_after_tool({"tool_name": "storyboard.design", "exec_data": {}}),
+            "execute_storyboard",
+        )
+
+    def test_non_storyboard_routes_to_build_response(self):
+        from agent_v2.graph.router import _route_after_tool
+        self.assertEqual(
+            _route_after_tool({"tool_name": "prompt.polish", "exec_data": {}}),
+            "build_response",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
