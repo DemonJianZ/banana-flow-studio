@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 # Maps classify_intent output to the target execute node.
@@ -87,7 +88,7 @@ def _call_planner_llm(state: dict) -> dict[str, Any] | None:
         intent = str(state.get("intent") or "answer_only")
         tool_name = str(state.get("tool_name") or "").strip()
         message = str(state.get("message") or "").strip()
-        canvas_summary = dict(state.get("canvas_summary") or {})
+        canvas_node_count = (state.get("canvas_summary") or {}).get("node_count", 0)
 
         payload = {
             "classify_result": {
@@ -95,11 +96,10 @@ def _call_planner_llm(state: dict) -> dict[str, Any] | None:
                 "tool_name": tool_name or None,
             },
             "message": message,
-            "canvas_node_count": canvas_summary.get("node_count", 0),
+            "canvas_node_count": canvas_node_count,
         }
 
-        import json as _json
-        full_prompt = _PLANNER_SYSTEM_PROMPT + "\n\n" + _json.dumps(payload, ensure_ascii=False)
+        full_prompt = _PLANNER_SYSTEM_PROMPT + "\n\n" + json.dumps(payload, ensure_ascii=False)
 
         response = call_genai_retry_with_proxy(
             contents=[types.Part(text=full_prompt)],
@@ -117,8 +117,7 @@ def _call_planner_llm(state: dict) -> dict[str, Any] | None:
         if not text:
             return None
 
-        raw = text.replace("```json", "").replace("```", "").strip()
-        parsed = _json.loads(raw)
+        parsed = json.loads(text)
         if not isinstance(parsed, dict):
             return None
         return parsed
@@ -127,6 +126,7 @@ def _call_planner_llm(state: dict) -> dict[str, Any] | None:
 
 
 def _merge_llm_into_plan(base: dict[str, Any], llm: dict[str, Any]) -> dict[str, Any]:
+    # target_agent is excluded: routing must stay deterministic, not LLM-driven.
     safe_fields = {
         "intent", "task_type", "user_goal", "target_object",
         "action", "required_context", "expected_output",
@@ -134,8 +134,16 @@ def _merge_llm_into_plan(base: dict[str, Any], llm: dict[str, Any]) -> dict[str,
     }
     merged = dict(base)
     for field in safe_fields:
-        if field in llm and llm[field] is not None:
-            merged[field] = llm[field]
+        value = llm.get(field)
+        if value is None:
+            continue
+        # Protect async_task expected_output (e.g. storyboard) from LLM downgrade.
+        if field == "expected_output" and base.get("expected_output") == "async_task":
+            continue
+        # Discard unrecognised intent values — they would corrupt trace routing.
+        if field == "intent" and value not in _INTENT_TO_TARGET_AGENT:
+            continue
+        merged[field] = value
     merged["_source"] = "llm"
     return merged
 
