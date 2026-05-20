@@ -9,8 +9,80 @@ _STORYBOARD_KEYWORDS = ("分镜", "故事板", "storyboard", "shot list", "镜�
 _PROMISE_MARKERS = ("我将", "我会", "为您生成", "为你生成", "调用", "分镜草稿", "故事板设计工具")
 
 
+def _build_capability_catalog() -> list[dict]:
+    from agent.tools import build_builtin_registry
+    virtual = [
+        {
+            "name": "general_answer",
+            "description": "Answer naturally without calling tools when no system capability is needed.",
+            "category": "virtual",
+            "enabled": True,
+            "timeout_seconds": None,
+            "retry": {"max_attempts": 1},
+            "cost_level": "low",
+            "tags": ["chat", "general_answer"],
+            "annotations": {"readOnlyHint": True, "idempotentHint": False, "destructiveHint": False},
+            "input_schema": {"type": "object", "properties": {"message": {"type": "string"}}, "additionalProperties": True},
+        },
+        {
+            "name": "canvas_planner",
+            "description": "Use when the user wants canvas edits, workflow planning, nodes, edges, or patch generation.",
+            "category": "virtual",
+            "enabled": True,
+            "timeout_seconds": None,
+            "retry": {"max_attempts": 1},
+            "cost_level": "medium",
+            "tags": ["canvas", "planner", "workflow"],
+            "annotations": {"readOnlyHint": False, "idempotentHint": False, "destructiveHint": False},
+            "input_schema": {"type": "object", "properties": {"message": {"type": "string"}}, "additionalProperties": True},
+        },
+    ]
+    registry = build_builtin_registry()
+    catalog = list(virtual)
+    for item in registry.to_prompt_catalog(enabled=True):
+        catalog.append(dict(item))
+        for alias in list(item.get("aliases") or []):
+            alias_name = str(alias or "").strip()
+            if not alias_name:
+                continue
+            alias_item = dict(item)
+            alias_item["name"] = alias_name
+            alias_item["canonical_name"] = item.get("name")
+            catalog.append(alias_item)
+    return catalog
+
+
+def _coordinator_system_prompt() -> str:
+    return (
+        "你是 Bananaflow Agent v2 的协调器，一个像私人助理一样自然对话的系统。\n"
+        "默认优先自然回答，只有在系统能力明显有帮助时才调用工具或规划器。\n\n"
+        "你只能输出以下 action 之一：\n"
+        "- answer_only\n"
+        "- clarify\n"
+        "- tool_call\n"
+        "- canvas_plan\n"
+        "- workflow_plan\n\n"
+        "规则：\n"
+        "1. 普通问答、寒暄、解释、建议，优先 answer_only。\n"
+        "2. 只有当 capability catalog 中某个能力明显更合适时，才输出 tool_call。\n"
+        "2.1 如果你判断应该调用工具，就直接输出 tool_call，不要只在 answer 里承诺“我将调用工具/我会生成/接下来为你设计”。\n"
+        "3. 如果用户要改画布、增删节点、连线、编排工作流，输出 canvas_plan。\n"
+        "4. 如果任务需要多个连续步骤，输出 workflow_plan 并给出 steps。\n"
+        "5. 没有明显工具匹配时，不要硬选工具，输出 answer_only。\n"
+        "6. tool_name 必须来自 capability catalog。\n"
+        "6.1 如果用户明确要分镜设计、故事板、shot list、镜头规划，优先使用 storyboard.design，而不是只做口头回复。\n"
+        "6.2 如果用户消息本身是一段分镜头脚本表、镜头表、shot table、csv/tsv 风格镜头清单，即使没有明确说“生成故事板”，也优先理解为要整理成 storyboard，并使用 storyboard.design。\n"
+        "7. 只输出 JSON，不要输出解释。\n\n"
+        "JSON 格式：{"
+        "\"action\":\"answer_only|clarify|tool_call|canvas_plan|workflow_plan\","
+        "\"reason\":\"...\",\"confidence\":0.0,"
+        "\"matched_capabilities\":[\"...\"],\"answer\":\"...\",\"clarification_question\":\"...\","
+        "\"tool_name\":\"...\",\"tool_args\":{},"
+        "\"steps\":[{\"action\":\"tool_call|canvas_plan\",\"tool_name\":\"...\",\"tool_args\":{},\"reason\":\"...\"}]}"
+    )
+
+
 def _build_coordinator_prompt(state: dict, capability_catalog: list[dict]) -> str:
-    from agent_v2.gateway.prompts import coordinator_system_prompt
     import json as _json
 
     history = list(state.get("conversation_history") or [])[-8:]
@@ -36,16 +108,15 @@ def _build_coordinator_prompt(state: dict, capability_catalog: list[dict]) -> st
         },
         "capability_catalog": list(capability_catalog or []),
     }
-    return coordinator_system_prompt() + "\n\n" + _json.dumps(payload, ensure_ascii=False)
+    return _coordinator_system_prompt() + "\n\n" + _json.dumps(payload, ensure_ascii=False)
 
 
 def _call_llm_coordinator(state: dict) -> str:
     """Call the LLM and return raw JSON string. Raises on failure."""
-    from agent_v2.gateway.catalog import build_capability_catalog
     from core.config import AGENT_MODEL_HTTP_PROXY, AGENT_MODEL_HTTPS_PROXY, MODEL_AGENT
 
     authorization = str(state.get("member_authorization") or "").strip()
-    catalog = build_capability_catalog()
+    catalog = _build_capability_catalog()
     full_prompt = _build_coordinator_prompt(state, catalog)
 
     if authorization:

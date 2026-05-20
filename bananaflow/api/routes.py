@@ -109,8 +109,6 @@ from utils.images import parse_data_url, bytes_to_data_url, get_image_from_respo
 from utils.size import calculate_target_resolution
 from prompts.business import build_business_prompt
 
-from agent_v2.gateway.schemas import AgentMessageRequest, AgentMessageResponse
-from agent_v2.gateway.service import handle_agent_message
 from agent_v2.graph.schemas import AgentInvokeRequest, AgentInvokeResponse as AgentInvokeResponseModel
 from quality.harvester import harvest_eval_case
 from memory.service import (
@@ -3284,33 +3282,6 @@ async def agent_invoke(
             "async_task": {"task_id": task_id, "status": "pending", "is_async": True},
         })
 
-    return response
-
-
-@router.post("/api/agent/message", response_model=AgentMessageResponse)
-async def agent_message(
-    req: AgentMessageRequest,
-    request: Request,
-    current_user=Depends(_get_current_user_optional),
-) -> AgentMessageResponse:
-    tenant_id, user_id = _resolve_agent_actor(request, current_user)
-    response = await asyncio.to_thread(
-        handle_agent_message, req, request=request, tenant_id=tenant_id, user_id=user_id
-    )
-    # Storyboard design runs async — launch background task and scrub internal fields from response.
-    if response.data.get("_async_storyboard") and response.data.get("task_id"):
-        task_id = str(response.data["task_id"])
-        tool_args = dict(response.data.get("tool_args") or {})
-        authorization = str(response.data.get("authorization") or "")
-        bg_req_id = str(response.data.get("req_id") or "")
-        bg_thread_id = str(response.data.get("thread_id") or req.thread_id or "")
-        asyncio.create_task(_run_storyboard_async(
-            task_id, tool_args, authorization=authorization, req_id=bg_req_id,
-            thread_id=bg_thread_id, tenant_id=tenant_id or "", user_id=user_id or "",
-        ))
-        response = response.model_copy(update={
-            "data": {"task_id": task_id, "status": "pending", "is_async": True},
-        })
     return response
 
 
