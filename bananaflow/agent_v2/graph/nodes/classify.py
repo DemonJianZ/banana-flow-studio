@@ -102,9 +102,11 @@ def _call_llm_coordinator(state: dict) -> str:
     full_prompt = _build_coordinator_prompt(state, catalog)
 
     if authorization:
-        from services.ai_chat_client import call_ai_chat_text
-        response = call_ai_chat_text(message=full_prompt, authorization=authorization)
-        return str(response.text or "").strip()
+        from core.config import AI_CHAT_DOWNSTREAM_URL
+        if AI_CHAT_DOWNSTREAM_URL:
+            from services.ai_chat_client import call_ai_chat_text
+            response = call_ai_chat_text(message=full_prompt, authorization=authorization)
+            return str(response.text or "").strip()
 
     from google.genai import types
     from services.genai_client import call_genai_retry_with_proxy
