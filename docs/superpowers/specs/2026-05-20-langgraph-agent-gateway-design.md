@@ -44,7 +44,7 @@ class AgentState(TypedDict):
     conversation_history: Annotated[list, add_messages]  # checkpointed，跨轮累积
 
     # 意图（classify_intent 写入）
-    intent: str                    # answer_only | clarify | tool_call | canvas_plan | storyboard
+    intent: str                    # answer_only | clarify | tool_call | canvas_plan
     intent_confidence: float
     intent_reason: str
     tool_name: str | None
@@ -88,6 +88,8 @@ classify_intent ─────────────────────�
   ├─[clarify]─────────────────► execute_clarify            │
   ├─[canvas_plan]─────────────► execute_canvas_plan        │
   └─[tool_call]───────────────► execute_tool_call ─────────┘
+                                                             │ storyboard 由 tool_name 判断，
+                                                             │ 不是独立的 intent 值
                                       │
                               _route_after_tool()
                                       │
@@ -152,7 +154,7 @@ class AgentInvokeResponse(BaseModel):
     warnings: list[str] = []       # 非致命警告
 
     # 元信息
-    intent: str = ""               # 路由决策
+    intent: str = ""               # 路由决策（answer_only | clarify | tool_call | canvas_plan）
     thread_id: str = ""            # 回传，前端用于下次请求
 
     # 异步任务（storyboard）
