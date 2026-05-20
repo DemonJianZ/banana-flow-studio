@@ -92,6 +92,24 @@ def create_app() -> FastAPI:
         expired_count = expire_preferences()
         sys_logger.info(f"memory ttl cleanup on startup: expired_count={expired_count}")
     init_client()
+
+    async def _init_agent_graph() -> None:
+        import os as _os
+        import aiosqlite
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+        from agent_v2.graph import build_agent_graph
+
+        db_dir = _os.path.join(_os.path.dirname(__file__), "..", "data")
+        _os.makedirs(db_dir, exist_ok=True)
+        db_path = _os.path.join(db_dir, "agent_checkpoints.db")
+        conn = await aiosqlite.connect(db_path)
+        checkpointer = AsyncSqliteSaver(conn)
+        await checkpointer.setup()
+        app.state.agent_graph = build_agent_graph(checkpointer=checkpointer)
+        sys_logger.info("agent_graph initialized with AsyncSqliteSaver at %s", db_path)
+
+    app.add_event_handler("startup", _init_agent_graph)
+
     return app
 
 app = create_app()

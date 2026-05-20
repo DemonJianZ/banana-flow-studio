@@ -111,6 +111,7 @@ from prompts.business import build_business_prompt
 
 from agent_v2.gateway.schemas import AgentMessageRequest, AgentMessageResponse
 from agent_v2.gateway.service import handle_agent_message
+from agent_v2.graph.schemas import AgentInvokeRequest, AgentInvokeResponse as AgentInvokeResponseModel
 from quality.harvester import harvest_eval_case
 from memory.service import (
     deactivate_preference as deactivate_user_preference,
@@ -3196,6 +3197,96 @@ async def _run_storyboard_async(
         update_storyboard_task(task_id, status="error", error_msg=f"{type(exc).__name__}: {exc}")
 
 
+@router.post("/api/agent/invoke", response_model=AgentInvokeResponseModel)
+async def agent_invoke(
+    req: AgentInvokeRequest,
+    request: Request,
+    current_user=Depends(_get_current_user_optional),
+) -> AgentInvokeResponseModel:
+    import asyncio
+    from uuid import uuid4
+    tenant_id, user_id = _resolve_agent_actor(request, current_user)
+    member_authorization = _resolve_member_authorization(request)
+    thread_id = str(req.thread_id or "").strip() or str(uuid4())
+    req_id = getattr(request.state, "req_id", "noid")
+
+    graph = request.app.state.agent_graph
+    config = {"configurable": {"thread_id": thread_id}}
+    initial_state: dict = {
+        "message": str(req.message or "").strip(),
+        "thread_id": thread_id,
+        "canvas_id": str(req.canvas_id or "").strip() or None,
+        "mode": str(req.mode or "").strip() or None,
+        "force_action": str(req.force_action or "").strip() or None,
+        "ui_action": str(req.ui_action or "").strip() or None,
+        "uploaded_documents": list(req.uploaded_documents or []),
+        "selected_artifact": dict(req.selected_artifact) if req.selected_artifact else None,
+        "canvas_node_hints": dict(req.canvas_node_hints) if req.canvas_node_hints else None,
+        "member_authorization": member_authorization,
+        "current_nodes": list(req.current_nodes or []),
+        "current_connections": list(req.current_connections or []),
+        "supplemental_prompt": str(req.supplemental_prompt or "").strip() or None,
+        "product": str(req.product or "").strip() or None,
+        "audience": str(req.audience or "").strip() or None,
+        "price_band": str(req.price_band or "").strip() or None,
+        "conversion_goal": str(req.conversion_goal or "").strip() or None,
+        "primary_platform": str(req.primary_platform or "").strip() or None,
+        "secondary_platform": str(req.secondary_platform or "").strip() or None,
+        "selected_angle": str(req.selected_angle or "").strip() or None,
+        "task_mode": str(req.task_mode or "").strip() or None,
+        "episode_count": req.episode_count,
+        "existing_script": str(req.existing_script or "").strip() or None,
+        "canvas_summary": {},
+        "artifact_summary": {},
+        "intent": "",
+        "intent_confidence": 0.0,
+        "intent_reason": "",
+        "tool_name": "",
+        "tool_args": {},
+        "exec_response_text": "",
+        "exec_patches": [],
+        "exec_warnings": [],
+        "exec_data": {},
+        "final_response": None,
+        "trace": [],
+        "_clarification_question": None,
+        "_llm_answer": None,
+    }
+
+    result_state = await graph.ainvoke(initial_state, config=config)
+    final_resp_dict = dict(result_state.get("final_response") or {})
+    if not final_resp_dict:
+        final_resp_dict = {
+            "ok": False, "message": "", "patches": [], "warnings": [],
+            "intent": "answer_only", "thread_id": thread_id,
+            "async_task": None, "tool_result": None, "thought": None,
+            "trace": [], "error": "graph returned no final_response",
+        }
+
+    response = AgentInvokeResponseModel(**final_resp_dict)
+
+    # Launch storyboard background task if graph signalled async storyboard
+    if response.async_task and response.async_task.get("task_id"):
+        task_id = str(response.async_task["task_id"])
+        tool_args = dict(response.async_task.get("tool_args") or {})
+        authorization = str(response.async_task.get("authorization") or member_authorization)
+        bg_thread_id = str(response.async_task.get("thread_id") or thread_id)
+        asyncio.create_task(_run_storyboard_async(
+            task_id, tool_args,
+            authorization=authorization,
+            req_id=req_id,
+            thread_id=bg_thread_id,
+            tenant_id=tenant_id or "",
+            user_id=user_id or "",
+        ))
+        # Scrub internal fields from async_task before returning
+        response = response.model_copy(update={
+            "async_task": {"task_id": task_id, "status": "pending", "is_async": True},
+        })
+
+    return response
+
+
 @router.post("/api/agent/message", response_model=AgentMessageResponse)
 async def agent_message(
     req: AgentMessageRequest,
@@ -3232,10 +3323,8 @@ def get_storyboard_status(task_id: str, current_user=Depends(_get_current_user_o
 
 
 @router.get("/main_assets/{file_path:path}")
-def serve_main_asset(file_path: str, current_user=Depends(_get_current_user_optional)):
+def serve_main_asset(file_path: str):
     """Serve files from the storyboard main_assets directory with path-traversal protection."""
-    if not current_user:
-        raise HTTPException(status_code=401, detail="未授权")
     asset_root = Path(_get_storyboard_asset_root()).resolve()
     # FastAPI already URL-decodes path params; resolve prevents traversal
     safe_path = (asset_root / file_path).resolve()
