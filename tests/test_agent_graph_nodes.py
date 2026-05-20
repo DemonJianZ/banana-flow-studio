@@ -115,5 +115,54 @@ class TestNormalizeRequestNode(unittest.TestCase):
         self.assertEqual(result["tool_name"], "")
 
 
+class TestAssembleContextNode(unittest.TestCase):
+    def test_builds_canvas_summary_from_nodes(self):
+        from agent_v2.graph.nodes.context import assemble_context
+        state = {
+            "current_nodes": [
+                {"id": "n1", "type": "image_gen"},
+                {"id": "n2", "type": "text_input"},
+                {"id": "n3", "type": "image_gen"},  # duplicate type
+            ],
+            "current_connections": [{"from": "n1", "to": "n2"}],
+            "selected_artifact": None,
+            "thread_id": "t1",
+            "canvas_id": "c1",
+            "mode": None,
+            "task_mode": None,
+            "product": None,
+        }
+        result = assemble_context(state)
+        self.assertEqual(result["canvas_summary"]["node_count"], 3)
+        self.assertEqual(result["canvas_summary"]["connection_count"], 1)
+        self.assertIn("image_gen", result["canvas_summary"]["node_types"])
+        # duplicate types deduplicated
+        self.assertEqual(len([t for t in result["canvas_summary"]["node_types"] if t == "image_gen"]), 1)
+
+    def test_builds_artifact_summary_from_selected(self):
+        from agent_v2.graph.nodes.context import assemble_context
+        state = {
+            "current_nodes": [],
+            "current_connections": [],
+            "selected_artifact": {
+                "kind": "storyboard_selection",
+                "fromNodeId": "s1",
+                "meta": {
+                    "selectionType": "scene",
+                    "selectionId": "scene-2",
+                    "selectionLabel": "场景 2",
+                },
+            },
+            "thread_id": "t1",
+            "canvas_id": None,
+            "mode": None,
+            "task_mode": None,
+            "product": None,
+        }
+        result = assemble_context(state)
+        self.assertEqual(result["artifact_summary"]["kind"], "storyboard_selection")
+        self.assertEqual(result["artifact_summary"]["selection_type"], "scene")
+
+
 if __name__ == "__main__":
     unittest.main()
