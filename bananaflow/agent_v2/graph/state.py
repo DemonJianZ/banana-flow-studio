@@ -54,6 +54,9 @@ class AgentState(TypedDict):
     _clarification_question: str | None
     _llm_answer: str | None
 
+    # ── Task plan (set by plan_task node, consumed by execute_* nodes) ──
+    task_plan: dict | None
+
     # ── Final response (set by build_response) ──
     final_response: dict | None
 
