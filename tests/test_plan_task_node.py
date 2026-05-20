@@ -19,8 +19,8 @@ class TestTaskPlanState(unittest.TestCase):
         from agent_v2.graph.state import AgentState
         hints = typing.get_type_hints(AgentState, include_extras=True)
         hint = str(hints["task_plan"])
-        # Should allow None
         self.assertIn("None", hint)
+        self.assertIn("dict", hint)
 
 
 if __name__ == "__main__":
