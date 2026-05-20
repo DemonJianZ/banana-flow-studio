@@ -439,5 +439,67 @@ class TestExecuteStoryboard(unittest.TestCase):
         self.assertIn("task-abc", result["exec_response_text"])
 
 
+class TestBuildResponseNode(unittest.TestCase):
+    def _base_state(self, **overrides):
+        state = {
+            "intent": "answer_only",
+            "thread_id": "t1",
+            "message": "你好",
+            "exec_response_text": "你好！",
+            "exec_patches": [],
+            "exec_warnings": [],
+            "exec_data": {},
+            "tool_name": "",
+            "trace": [{"type": "NORMALIZE_REQUEST"}],
+        }
+        state.update(overrides)
+        return state
+
+    def test_assembles_chitchat_response(self):
+        from agent_v2.graph.nodes.build_response import build_response
+        result = build_response(self._base_state())
+        resp = result["final_response"]
+        self.assertTrue(resp["ok"])
+        self.assertEqual(resp["message"], "你好！")
+        self.assertEqual(resp["patches"], [])
+        self.assertEqual(resp["intent"], "answer_only")
+        self.assertEqual(resp["thread_id"], "t1")
+        self.assertIsNone(resp["async_task"])
+
+    def test_assembles_canvas_plan_response_with_patches(self):
+        from agent_v2.graph.nodes.build_response import build_response
+        state = self._base_state(
+            intent="canvas_plan",
+            exec_response_text="已搭建画布",
+            exec_patches=[{"op": "add_node", "node": {"id": "n1"}}],
+            exec_data={"thought": "", "summary": "已搭建画布"},
+        )
+        result = build_response(state)
+        resp = result["final_response"]
+        self.assertEqual(resp["intent"], "canvas_plan")
+        self.assertEqual(len(resp["patches"]), 1)
+
+    def test_assembles_storyboard_async_response(self):
+        from agent_v2.graph.nodes.build_response import build_response
+        state = self._base_state(
+            intent="tool_call",
+            tool_name="storyboard.design",
+            exec_response_text="分镜方案生成中...",
+            exec_data={"task_id": "task-xyz", "status": "pending", "_async_storyboard": True},
+        )
+        result = build_response(state)
+        resp = result["final_response"]
+        self.assertEqual(resp["async_task"]["task_id"], "task-xyz")
+        self.assertIsNone(resp["tool_result"])
+
+    def test_appends_conversation_history(self):
+        from agent_v2.graph.nodes.build_response import build_response
+        result = build_response(self._base_state())
+        history = result.get("conversation_history", [])
+        self.assertEqual(len(history), 2)
+        self.assertEqual(history[0]["role"], "user")
+        self.assertEqual(history[1]["role"], "assistant")
+
+
 if __name__ == "__main__":
     unittest.main()
