@@ -19,8 +19,11 @@ def _route_after_plan(state: dict) -> str:
     return target
 
 
+_STORYBOARD_TOOL_NAMES = {"storyboard.design", "agent_storyboard_design"}
+
+
 def _route_after_classify(state: dict) -> str:
-    """Kept for backward-compat. In the live graph classify_intent goes to plan_task."""
+    """Routes on state.intent (not task_plan.target_agent). Used by existing tests."""
     intent = str(state.get("intent") or "answer_only")
     if intent == "clarify":
         return "execute_clarify"
@@ -34,6 +37,6 @@ def _route_after_classify(state: dict) -> str:
 def _route_after_tool(state: dict) -> str:
     """Conditional edge: execute_tool_call → execute_storyboard OR build_response."""
     tool_name = str(state.get("tool_name") or "").strip()
-    if tool_name in {"storyboard.design", "agent_storyboard_design"}:
+    if tool_name in _STORYBOARD_TOOL_NAMES:
         return "execute_storyboard"
     return "build_response"
