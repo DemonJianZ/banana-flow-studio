@@ -99,12 +99,17 @@ def create_app() -> FastAPI:
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
         from agent_v2.graph import build_agent_graph
 
+        # langgraph-checkpoint-sqlite 3.0.1 calls self.conn.is_alive() which
+        # only exists on threading.Thread, not on aiosqlite.Connection.
+        if not hasattr(aiosqlite.Connection, "is_alive"):
+            aiosqlite.Connection.is_alive = lambda self: self._running
+
         db_dir = _os.path.join(_os.path.dirname(__file__), "..", "data")
         _os.makedirs(db_dir, exist_ok=True)
         db_path = _os.path.join(db_dir, "agent_checkpoints.db")
-        conn = await aiosqlite.connect(db_path)
-        checkpointer = AsyncSqliteSaver(conn)
-        await checkpointer.setup()
+        ctx = AsyncSqliteSaver.from_conn_string(db_path)
+        checkpointer = await ctx.__aenter__()
+        app.state._agent_graph_ctx = ctx  # keep alive to prevent GC
         app.state.agent_graph = build_agent_graph(checkpointer=checkpointer)
         sys_logger.info("agent_graph initialized with AsyncSqliteSaver at %s", db_path)
 
