@@ -94,5 +94,30 @@ class TestPlanTaskNode(unittest.TestCase):
         self.assertEqual(tp["target_agent"], "execute_chitchat")
 
 
+class TestRouterAfterPlan(unittest.TestCase):
+    def _plan_state(self, target_agent: str) -> dict:
+        return {"task_plan": {"target_agent": target_agent}, "tool_name": ""}
+
+    def test_routes_chitchat(self):
+        from agent_v2.graph.router import _route_after_plan
+        self.assertEqual(_route_after_plan(self._plan_state("execute_chitchat")), "execute_chitchat")
+
+    def test_routes_clarify(self):
+        from agent_v2.graph.router import _route_after_plan
+        self.assertEqual(_route_after_plan(self._plan_state("execute_clarify")), "execute_clarify")
+
+    def test_routes_canvas_plan(self):
+        from agent_v2.graph.router import _route_after_plan
+        self.assertEqual(_route_after_plan(self._plan_state("execute_canvas_plan")), "execute_canvas_plan")
+
+    def test_routes_tool_call(self):
+        from agent_v2.graph.router import _route_after_plan
+        self.assertEqual(_route_after_plan(self._plan_state("execute_tool_call")), "execute_tool_call")
+
+    def test_unknown_target_agent_falls_back_to_chitchat(self):
+        from agent_v2.graph.router import _route_after_plan
+        self.assertEqual(_route_after_plan(self._plan_state("unknown_node")), "execute_chitchat")
+
+
 if __name__ == "__main__":
     unittest.main()

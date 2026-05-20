@@ -1,8 +1,26 @@
 from __future__ import annotations
 
+_VALID_EXECUTE_NODES = {
+    "execute_chitchat",
+    "execute_clarify",
+    "execute_canvas_plan",
+    "execute_tool_call",
+}
+
+
+def _route_after_plan(state: dict) -> str:
+    """Conditional edge: plan_task → execute_* node.
+    Reads target_agent from task_plan; falls back to execute_chitchat.
+    """
+    task_plan = dict(state.get("task_plan") or {})
+    target = str(task_plan.get("target_agent") or "execute_chitchat")
+    if target not in _VALID_EXECUTE_NODES:
+        return "execute_chitchat"
+    return target
+
 
 def _route_after_classify(state: dict) -> str:
-    """Conditional edge: classify_intent → execute_* node."""
+    """Kept for backward-compat. In the live graph classify_intent goes to plan_task."""
     intent = str(state.get("intent") or "answer_only")
     if intent == "clarify":
         return "execute_clarify"
@@ -10,7 +28,7 @@ def _route_after_classify(state: dict) -> str:
         return "execute_canvas_plan"
     if intent == "tool_call":
         return "execute_tool_call"
-    return "execute_chitchat"  # answer_only + any unknown
+    return "execute_chitchat"
 
 
 def _route_after_tool(state: dict) -> str:
