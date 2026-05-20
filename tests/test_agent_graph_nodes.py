@@ -343,5 +343,36 @@ class TestExecuteClarify(unittest.TestCase):
         self.assertTrue(len(result["exec_response_text"]) > 0)
 
 
+class TestExecuteCanvasPlan(unittest.TestCase):
+    def test_applies_planner_result_to_patches(self):
+        from agent_v2.graph.nodes.execute_canvas import execute_canvas_plan
+        from unittest import mock
+
+        planner_result = {
+            "patch": [{"op": "add_node", "node": {"id": "n1", "type": "image_gen"}}],
+            "summary": "已搭建画布。",
+            "thought": "",
+        }
+        state = {
+            "message": "帮我搭一个图生图流程",
+            "thread_id": "t1",
+            "supplemental_prompt": None,
+            "current_nodes": [],
+            "current_connections": [],
+            "selected_artifact": None,
+            "canvas_id": "c1",
+            "trace": [],
+        }
+        with mock.patch(
+            "agent_v2.graph.nodes.execute_canvas._run_canvas_planner",
+            return_value=planner_result,
+        ):
+            result = execute_canvas_plan(state)
+
+        self.assertEqual(result["exec_patches"], planner_result["patch"])
+        self.assertEqual(result["exec_response_text"], "已搭建画布。")
+        self.assertEqual(result["exec_data"]["thought"], "")
+
+
 if __name__ == "__main__":
     unittest.main()
