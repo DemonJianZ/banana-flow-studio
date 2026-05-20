@@ -181,5 +181,31 @@ class TestExecuteNodesConsumePlan(unittest.TestCase):
         self.assertIn("task_type", build_entry)
 
 
+class TestGraphTopology(unittest.TestCase):
+    def test_plan_task_node_in_graph(self):
+        from agent_v2.graph import build_agent_graph
+        g = build_agent_graph()
+        self.assertIn("plan_task", g.nodes, "plan_task must be a node in the compiled graph")
+
+    def test_classify_intent_edges_to_plan_task(self):
+        from agent_v2.graph import build_agent_graph
+        g = build_agent_graph()
+        mermaid = g.get_graph().draw_mermaid()
+        self.assertIn("classify_intent", mermaid)
+        self.assertIn("plan_task", mermaid)
+        # classify_intent must connect to plan_task
+        self.assertTrue(
+            "classify_intent" in mermaid and "plan_task" in mermaid,
+            "Both classify_intent and plan_task must appear in graph"
+        )
+
+    def test_plan_task_does_not_edge_to_classify(self):
+        from agent_v2.graph import build_agent_graph
+        g = build_agent_graph()
+        mermaid = g.get_graph().draw_mermaid()
+        # plan_task should never route back to classify_intent
+        self.assertNotIn("plan_task --> classify_intent", mermaid.replace("  ", " "))
+
+
 if __name__ == "__main__":
     unittest.main()

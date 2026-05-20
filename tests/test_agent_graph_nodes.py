@@ -19,6 +19,7 @@ class TestAgentState(unittest.TestCase):
         for field in [
             "message", "thread_id", "intent", "exec_response_text",
             "exec_patches", "conversation_history", "trace", "final_response",
+            "task_plan",
         ]:
             self.assertIn(field, hints, f"AgentState missing field: {field}")
 
