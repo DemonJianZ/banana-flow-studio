@@ -1,2 +1,3 @@
-from __future__ import annotations
-# build_agent_graph will be exported from here once graph.py is created
+from agent_v2.graph.graph import build_agent_graph
+
+__all__ = ["build_agent_graph"]
