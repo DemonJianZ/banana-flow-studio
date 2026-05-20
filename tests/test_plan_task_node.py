@@ -23,5 +23,76 @@ class TestTaskPlanState(unittest.TestCase):
         self.assertIn("dict", hint)
 
 
+class TestPlanTaskNode(unittest.TestCase):
+    def _make_state(self, intent="answer_only", tool_name="", tool_args=None, **overrides):
+        base = {
+            "message": "你好",
+            "thread_id": "t1",
+            "intent": intent,
+            "intent_confidence": 1.0,
+            "intent_reason": "llm_coordinator",
+            "tool_name": tool_name,
+            "tool_args": tool_args or {},
+            "member_authorization": "",
+            "canvas_summary": {},
+            "artifact_summary": {},
+            "conversation_history": [],
+            "trace": [],
+            "task_plan": None,
+        }
+        base.update(overrides)
+        return base
+
+    def test_plan_task_produces_task_plan(self):
+        from agent_v2.graph.nodes.plan_task import plan_task
+        state = self._make_state(intent="answer_only", message="你好")
+        result = plan_task(state)
+        self.assertIn("task_plan", result)
+        tp = result["task_plan"]
+        self.assertIsInstance(tp, dict)
+
+    def test_task_plan_has_required_fields(self):
+        from agent_v2.graph.nodes.plan_task import plan_task
+        state = self._make_state(intent="canvas_plan", message="帮我加一个文字节点")
+        result = plan_task(state)
+        tp = result["task_plan"]
+        for field in ["intent", "target_agent", "task_type", "user_goal",
+                      "action", "expected_output", "risk_level", "need_confirmation"]:
+            self.assertIn(field, tp, f"task_plan missing field: {field}")
+
+    def test_target_agent_matches_classify_intent(self):
+        from agent_v2.graph.nodes.plan_task import plan_task
+        cases = [
+            ("answer_only", "execute_chitchat"),
+            ("clarify",     "execute_clarify"),
+            ("canvas_plan", "execute_canvas_plan"),
+            ("tool_call",   "execute_tool_call"),
+        ]
+        for intent, expected_agent in cases:
+            with self.subTest(intent=intent):
+                state = self._make_state(intent=intent)
+                result = plan_task(state)
+                self.assertEqual(
+                    result["task_plan"]["target_agent"],
+                    expected_agent,
+                    f"intent={intent} must map to {expected_agent}",
+                )
+
+    def test_plan_task_returns_trace_entry(self):
+        from agent_v2.graph.nodes.plan_task import plan_task
+        state = self._make_state(intent="answer_only")
+        result = plan_task(state)
+        trace = result["trace"]
+        self.assertTrue(any(t.get("type") == "PLAN_TASK" for t in trace))
+
+    def test_plan_task_fallback_on_unknown_intent(self):
+        """Unknown intent falls back to execute_chitchat without raising."""
+        from agent_v2.graph.nodes.plan_task import plan_task
+        state = self._make_state(intent="unknown_intent")
+        result = plan_task(state)
+        tp = result["task_plan"]
+        self.assertEqual(tp["target_agent"], "execute_chitchat")
+
+
 if __name__ == "__main__":
     unittest.main()
