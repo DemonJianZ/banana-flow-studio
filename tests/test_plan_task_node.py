@@ -53,7 +53,7 @@ class TestPlanTaskNode(unittest.TestCase):
 
     def test_task_plan_has_required_fields(self):
         from agent_v2.graph.nodes.plan_task import plan_task
-        state = self._make_state(intent="canvas_plan", message="帮我加一个文字节点")
+        state = self._make_state(intent="tool_call", message="帮我生成一张商品图")
         result = plan_task(state)
         tp = result["task_plan"]
         for field in ["intent", "target_agent", "task_type", "user_goal",
@@ -64,8 +64,6 @@ class TestPlanTaskNode(unittest.TestCase):
         from agent_v2.graph.nodes.plan_task import plan_task
         cases = [
             ("answer_only", "execute_chitchat"),
-            ("clarify",     "execute_clarify"),
-            ("canvas_plan", "execute_canvas_plan"),
             ("tool_call",   "execute_tool_call"),
         ]
         for intent, expected_agent in cases:
@@ -101,14 +99,6 @@ class TestRouterAfterPlan(unittest.TestCase):
     def test_routes_chitchat(self):
         from agent_v2.graph.router import _route_after_plan
         self.assertEqual(_route_after_plan(self._plan_state("execute_chitchat")), "execute_chitchat")
-
-    def test_routes_clarify(self):
-        from agent_v2.graph.router import _route_after_plan
-        self.assertEqual(_route_after_plan(self._plan_state("execute_clarify")), "execute_clarify")
-
-    def test_routes_canvas_plan(self):
-        from agent_v2.graph.router import _route_after_plan
-        self.assertEqual(_route_after_plan(self._plan_state("execute_canvas_plan")), "execute_canvas_plan")
 
     def test_routes_tool_call(self):
         from agent_v2.graph.router import _route_after_plan
@@ -148,15 +138,6 @@ class TestExecuteNodesConsumePlan(unittest.TestCase):
         }
         base.update(overrides)
         return base
-
-    def test_execute_clarify_uses_task_plan_fallback(self):
-        from agent_v2.graph.nodes.execute_clarify import execute_clarify
-        state = self._state_with_plan(intent="clarify", user_goal="需要更多信息")
-        state["_clarification_question"] = None
-        state["task_plan"]["target_agent"] = "execute_clarify"
-        result = execute_clarify(state)
-        self.assertTrue(len(result["exec_response_text"]) > 0)
-        self.assertTrue(any(t.get("type") == "EXECUTE_CLARIFY" for t in result["trace"]))
 
     def test_build_response_includes_task_plan_in_trace(self):
         from agent_v2.graph.nodes.build_response import build_response

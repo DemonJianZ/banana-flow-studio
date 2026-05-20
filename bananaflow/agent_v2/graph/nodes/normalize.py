@@ -139,16 +139,6 @@ def normalize_request(state: dict) -> dict:
         }
 
     # 3. ui_action
-    if ui_action == "canvas_plan":
-        trace_entry["shortcut"] = "ui_action.canvas_plan"
-        return {
-            "intent": "canvas_plan",
-            "intent_confidence": 1.0,
-            "intent_reason": "ui_action",
-            "tool_name": "",
-            "tool_args": {},
-            "trace": [trace_entry],
-        }
     if ui_action == "prompt_polish":
         mode = str(state.get("mode") or "text2img").strip() or "text2img"
         trace_entry["shortcut"] = "ui_action.prompt_polish"
@@ -158,18 +148,6 @@ def normalize_request(state: dict) -> dict:
             "intent_reason": "ui_action",
             "tool_name": "prompt.polish",
             "tool_args": {"prompt": message, "mode": mode},
-            "trace": [trace_entry],
-        }
-
-    # 4. Selected storyboard edit
-    if _is_selected_storyboard_edit(state):
-        trace_entry["shortcut"] = "selection.storyboard_edit"
-        return {
-            "intent": "canvas_plan",
-            "intent_confidence": 1.0,
-            "intent_reason": "selected_storyboard_edit",
-            "tool_name": "",
-            "tool_args": {},
             "trace": [trace_entry],
         }
 

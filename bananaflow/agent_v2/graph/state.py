@@ -38,7 +38,7 @@ class AgentState(TypedDict):
     conversation_history: Annotated[list[dict[str, Any]], operator.add]
 
     # ── Intent (set by normalize_request shortcut OR classify_intent LLM) ──
-    intent: str          # answer_only | clarify | tool_call | canvas_plan
+    intent: str          # answer_only | tool_call
     intent_confidence: float
     intent_reason: str
     tool_name: str | None

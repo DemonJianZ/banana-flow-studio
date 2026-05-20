@@ -7,15 +7,11 @@ from typing import Any
 # Routing is deterministic and is NOT subject to LLM override.
 _INTENT_TO_TARGET_AGENT: dict[str, str] = {
     "answer_only": "execute_chitchat",
-    "clarify":     "execute_clarify",
-    "canvas_plan": "execute_canvas_plan",
     "tool_call":   "execute_tool_call",
 }
 
 _INTENT_TO_EXPECTED_OUTPUT: dict[str, str] = {
     "answer_only": "message",
-    "clarify":     "message",
-    "canvas_plan": "canvas_patch",
     "tool_call":   "tool_result",
 }
 
@@ -35,12 +31,6 @@ def _deterministic_task_plan(state: dict) -> dict[str, Any]:
     elif tool_name == "prompt.polish":
         task_type = "polish_prompt"
         action = "润色"
-    elif intent == "canvas_plan":
-        task_type = "edit_canvas"
-        action = "规划"
-    elif intent == "clarify":
-        task_type = "request_clarification"
-        action = "澄清"
     elif tool_name:
         task_type = f"tool.{tool_name}"
         action = "调用"
@@ -66,7 +56,7 @@ def _deterministic_task_plan(state: dict) -> dict[str, Any]:
 _PLANNER_SYSTEM_PROMPT = (
     "你是 Bananaflow 任务规划器。根据用户消息和已知分类意图，提取标准任务对象（JSON）。\n\n"
     "输出字段说明：\n"
-    "- intent: canvas.modify|canvas.create|tool.storyboard|tool.polish|answer.question|request.clarify\n"
+    "- intent: tool.storyboard|tool.polish|tool.other|answer.question\n"
     "- task_type: 具体操作类型（如 attach_character_asset / edit_canvas_node / generate_storyboard）\n"
     "- user_goal: 用自然语言简短描述用户真实目标（15字以内）\n"
     "- target_object: 目标对象（人物名、节点名、镜头编号等），无则 null\n"

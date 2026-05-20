@@ -84,27 +84,6 @@ class TestAgentGraphE2E(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp["message"], "你好！请问有什么可以帮到您？")
         self.assertEqual(resp["patches"], [])
 
-    async def test_canvas_plan_via_force_action(self):
-        from langgraph.checkpoint.memory import MemorySaver
-        from agent_v2.graph import build_agent_graph
-
-        graph = build_agent_graph(checkpointer=MemorySaver())
-        state = self._make_initial_state("帮我搭建图生图画布", thread_id="e2e-t2")
-        state["force_action"] = "canvas_plan"
-
-        planner_result = {
-            "patch": [{"op": "add_node", "node": {"id": "n1", "type": "image_gen"}}],
-            "summary": "已搭建画布",
-            "thought": "",
-        }
-        with mock.patch("agent_v2.graph.nodes.execute_canvas._run_canvas_planner", return_value=planner_result):
-            result = await graph.ainvoke(state, config={"configurable": {"thread_id": "e2e-t2"}})
-
-        resp = result["final_response"]
-        self.assertEqual(resp["intent"], "canvas_plan")
-        self.assertEqual(len(resp["patches"]), 1)
-        self.assertEqual(resp["message"], "已搭建画布")
-
     async def test_conversation_history_accumulates_across_turns(self):
         from langgraph.checkpoint.memory import MemorySaver
         from agent_v2.graph import build_agent_graph

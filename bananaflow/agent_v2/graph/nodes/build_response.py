@@ -26,16 +26,11 @@ def build_response(state: dict) -> dict:
             "authorization": str(exec_data.get("authorization") or ""),
             "thread_id": str(exec_data.get("thread_id") or thread_id),
         }
-    elif intent == "canvas_plan":
-        thought = str(exec_data.get("thought") or "").strip() or None
-        tool_result = dict(exec_data) if exec_data else None
     elif intent == "tool_call" and exec_data and not async_task:
         tool_result = dict(exec_data)
 
     # Message text
     message = exec_response_text
-    if not message and intent == "canvas_plan":
-        message = str(exec_data.get("summary") or exec_data.get("response_text") or "").strip()
     if not message and tool_name in {"prompt.polish"}:
         message = str(exec_data.get("text") or "").strip()
 

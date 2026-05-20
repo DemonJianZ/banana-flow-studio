@@ -70,7 +70,7 @@ class TestAgentInvokeRoute(unittest.IsolatedAsyncioTestCase):
             message="OK",
             patches=[{"op": "add_node", "node": {"id": "n1"}}],
             warnings=["low_confidence"],
-            intent="canvas_plan",
+            intent="answer_only",
             thread_id="t1",
         )
         self.assertEqual(len(resp.patches), 1)

@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 class AgentInvokeRequest(BaseModel):
     message: str = ""
-    force_action: Optional[Literal["answer_only", "clarify", "tool_call", "canvas_plan"]] = None
+    force_action: Optional[Literal["answer_only", "tool_call"]] = None
     ui_action: Optional[str] = None
 
     supplemental_prompt: Optional[str] = None

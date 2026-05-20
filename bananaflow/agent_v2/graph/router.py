@@ -2,8 +2,6 @@ from __future__ import annotations
 
 _VALID_EXECUTE_NODES = {
     "execute_chitchat",
-    "execute_clarify",
-    "execute_canvas_plan",
     "execute_tool_call",
 }
 
@@ -25,10 +23,6 @@ _STORYBOARD_TOOL_NAMES = {"storyboard.design", "agent_storyboard_design"}
 def _route_after_classify(state: dict) -> str:
     """Routes on state.intent (not task_plan.target_agent). Used by existing tests."""
     intent = str(state.get("intent") or "answer_only")
-    if intent == "clarify":
-        return "execute_clarify"
-    if intent == "canvas_plan":
-        return "execute_canvas_plan"
     if intent == "tool_call":
         return "execute_tool_call"
     return "execute_chitchat"

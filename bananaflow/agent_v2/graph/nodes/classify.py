@@ -24,18 +24,6 @@ def _build_capability_catalog() -> list[dict]:
             "annotations": {"readOnlyHint": True, "idempotentHint": False, "destructiveHint": False},
             "input_schema": {"type": "object", "properties": {"message": {"type": "string"}}, "additionalProperties": True},
         },
-        {
-            "name": "canvas_planner",
-            "description": "Use when the user wants canvas edits, workflow planning, nodes, edges, or patch generation.",
-            "category": "virtual",
-            "enabled": True,
-            "timeout_seconds": None,
-            "retry": {"max_attempts": 1},
-            "cost_level": "medium",
-            "tags": ["canvas", "planner", "workflow"],
-            "annotations": {"readOnlyHint": False, "idempotentHint": False, "destructiveHint": False},
-            "input_schema": {"type": "object", "properties": {"message": {"type": "string"}}, "additionalProperties": True},
-        },
     ]
     registry = build_builtin_registry()
     catalog = list(virtual)
@@ -58,27 +46,21 @@ def _coordinator_system_prompt() -> str:
         "默认优先自然回答，只有在系统能力明显有帮助时才调用工具或规划器。\n\n"
         "你只能输出以下 action 之一：\n"
         "- answer_only\n"
-        "- clarify\n"
-        "- tool_call\n"
-        "- canvas_plan\n"
-        "- workflow_plan\n\n"
+        "- tool_call\n\n"
         "规则：\n"
         "1. 普通问答、寒暄、解释、建议，优先 answer_only。\n"
         "2. 只有当 capability catalog 中某个能力明显更合适时，才输出 tool_call。\n"
         "2.1 如果你判断应该调用工具，就直接输出 tool_call，不要只在 answer 里承诺“我将调用工具/我会生成/接下来为你设计”。\n"
-        "3. 如果用户要改画布、增删节点、连线、编排工作流，输出 canvas_plan。\n"
-        "4. 如果任务需要多个连续步骤，输出 workflow_plan 并给出 steps。\n"
-        "5. 没有明显工具匹配时，不要硬选工具，输出 answer_only。\n"
-        "6. tool_name 必须来自 capability catalog。\n"
-        "6.1 如果用户明确要分镜设计、故事板、shot list、镜头规划，优先使用 storyboard.design，而不是只做口头回复。\n"
-        "6.2 如果用户消息本身是一段分镜头脚本表、镜头表、shot table、csv/tsv 风格镜头清单，即使没有明确说“生成故事板”，也优先理解为要整理成 storyboard，并使用 storyboard.design。\n"
-        "7. 只输出 JSON，不要输出解释。\n\n"
+        "3. 没有明显工具匹配时，不要硬选工具，输出 answer_only。\n"
+        "4. tool_name 必须来自 capability catalog。\n"
+        "4.1 如果用户明确要分镜设计、故事板、shot list、镜头规划，优先使用 storyboard.design，而不是只做口头回复。\n"
+        "4.2 如果用户消息本身是一段分镜头脚本表、镜头表、shot table、csv/tsv 风格镜头清单，即使没有明确说“生成故事板”，也优先理解为要整理成 storyboard，并使用 storyboard.design。\n"
+        "5. 只输出 JSON，不要输出解释。\n\n"
         "JSON 格式：{"
-        "\"action\":\"answer_only|clarify|tool_call|canvas_plan|workflow_plan\","
+        "\"action\":\"answer_only|tool_call\","
         "\"reason\":\"...\",\"confidence\":0.0,"
-        "\"matched_capabilities\":[\"...\"],\"answer\":\"...\",\"clarification_question\":\"...\","
-        "\"tool_name\":\"...\",\"tool_args\":{},"
-        "\"steps\":[{\"action\":\"tool_call|canvas_plan\",\"tool_name\":\"...\",\"tool_args\":{},\"reason\":\"...\"}]}"
+        "\"matched_capabilities\":[\"...\"],\"answer\":\"...\","
+        "\"tool_name\":\"...\",\"tool_args\":{}}"
     )
 
 
@@ -212,13 +194,16 @@ def classify_intent(state: dict) -> dict:
             "intent_reason": "coordinator_fallback",
             "tool_name": "",
             "tool_args": {},
-            "_clarification_question": None,
             "trace": list(state.get("trace") or []) + [
                 {"type": "CLASSIFY_INTENT", "intent": "answer_only", "rule": "fallback"}
             ],
         }
 
     action = str(payload.get("action") or "answer_only")
+    # Only answer_only and tool_call are valid; anything else falls back
+    if action not in {"answer_only", "tool_call"}:
+        action = "answer_only"
+
     tool_name = str(payload.get("tool_name") or "").strip()
     tool_args = dict(payload.get("tool_args") or {})
 
@@ -236,18 +221,12 @@ def classify_intent(state: dict) -> dict:
     else:
         rule = "llm_coordinator"
 
-    clarification_question = (
-        str(payload.get("clarification_question") or "").strip()
-        if action == "clarify" else None
-    )
-
     return {
         "intent": action,
         "intent_confidence": float(payload.get("confidence") or 1.0),
         "intent_reason": str(payload.get("reason") or "").strip(),
         "tool_name": tool_name,
         "tool_args": tool_args,
-        "_clarification_question": clarification_question,
         "trace": list(state.get("trace") or []) + [
             {"type": "CLASSIFY_INTENT", "intent": action, "rule": rule,
              "confidence": float(payload.get("confidence") or 1.0)}

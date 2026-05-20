@@ -72,28 +72,6 @@ class TestNormalizeRequestNode(unittest.TestCase):
         self.assertEqual(result["tool_name"], "prompt.polish")
         self.assertEqual(result["tool_args"]["mode"], "text2img")
 
-    def test_force_action_canvas_plan_sets_intent(self):
-        from agent_v2.graph.nodes.normalize import normalize_request
-        state = self._make_state(message="帮我搭画布", force_action="canvas_plan")
-        result = normalize_request(state)
-        self.assertEqual(result["intent"], "canvas_plan")
-
-    def test_ui_action_canvas_plan_sets_intent(self):
-        from agent_v2.graph.nodes.normalize import normalize_request
-        state = self._make_state(message="搭建画布", ui_action="canvas_plan")
-        result = normalize_request(state)
-        self.assertEqual(result["intent"], "canvas_plan")
-
-    def test_selected_storyboard_edit_sets_canvas_plan(self):
-        from agent_v2.graph.nodes.normalize import normalize_request
-        state = self._make_state(
-            message="把这个镜头改得更克制",
-            selected_artifact={"kind": "storyboard_selection", "fromNodeId": "s1",
-                               "meta": {"selectionType": "shot", "selectionId": "shot-1"}},
-        )
-        result = normalize_request(state)
-        self.assertEqual(result["intent"], "canvas_plan")
-
     def test_uploaded_storyboard_csv_sets_storyboard_tool(self):
         from agent_v2.graph.nodes.normalize import normalize_request
         state = self._make_state(
@@ -213,11 +191,11 @@ class TestClassifyIntentNode(unittest.TestCase):
     def test_skips_llm_when_intent_already_set(self):
         from agent_v2.graph.nodes.classify import classify_intent
         from unittest import mock
-        state = self._base_state(intent="canvas_plan", tool_name="")
+        state = self._base_state(intent="answer_only", tool_name="")
         with mock.patch("agent_v2.graph.nodes.classify._call_llm_coordinator") as mock_llm:
             result = classify_intent(state)
         mock_llm.assert_not_called()
-        self.assertEqual(result["intent"], "canvas_plan")
+        self.assertEqual(result["intent"], "answer_only")
 
     def test_calls_llm_and_parses_answer_only(self):
         from agent_v2.graph.nodes.classify import classify_intent
@@ -257,14 +235,6 @@ class TestRouter(unittest.TestCase):
     def test_answer_only_routes_to_chitchat(self):
         from agent_v2.graph.router import _route_after_classify
         self.assertEqual(_route_after_classify({"intent": "answer_only"}), "execute_chitchat")
-
-    def test_clarify_routes_to_clarify(self):
-        from agent_v2.graph.router import _route_after_classify
-        self.assertEqual(_route_after_classify({"intent": "clarify"}), "execute_clarify")
-
-    def test_canvas_plan_routes_to_canvas(self):
-        from agent_v2.graph.router import _route_after_classify
-        self.assertEqual(_route_after_classify({"intent": "canvas_plan"}), "execute_canvas_plan")
 
     def test_tool_call_routes_to_tool(self):
         from agent_v2.graph.router import _route_after_classify
@@ -322,57 +292,6 @@ class TestExecuteChitchat(unittest.TestCase):
         with mock.patch("agent_v2.graph.nodes.execute_chitchat._run_chitchat_tool", return_value={"text": "hi"}):
             result = execute_chitchat(state)
         self.assertIn("exec_response_text", result)
-
-
-class TestExecuteClarify(unittest.TestCase):
-    def test_returns_clarification_question(self):
-        from agent_v2.graph.nodes.execute_clarify import execute_clarify
-        state = {
-            "message": "帮我做个视频",
-            "trace": [],
-            "_clarification_question": "请问产品名称是什么？",
-        }
-        result = execute_clarify(state)
-        self.assertEqual(result["exec_response_text"], "请问产品名称是什么？")
-        self.assertEqual(result["exec_patches"], [])
-
-    def test_default_question_when_none_set(self):
-        from agent_v2.graph.nodes.execute_clarify import execute_clarify
-        state = {"message": "...", "trace": [], "_clarification_question": None}
-        result = execute_clarify(state)
-        self.assertIn("exec_response_text", result)
-        self.assertTrue(len(result["exec_response_text"]) > 0)
-
-
-class TestExecuteCanvasPlan(unittest.TestCase):
-    def test_applies_planner_result_to_patches(self):
-        from agent_v2.graph.nodes.execute_canvas import execute_canvas_plan
-        from unittest import mock
-
-        planner_result = {
-            "patch": [{"op": "add_node", "node": {"id": "n1", "type": "image_gen"}}],
-            "summary": "已搭建画布。",
-            "thought": "",
-        }
-        state = {
-            "message": "帮我搭一个图生图流程",
-            "thread_id": "t1",
-            "supplemental_prompt": None,
-            "current_nodes": [],
-            "current_connections": [],
-            "selected_artifact": None,
-            "canvas_id": "c1",
-            "trace": [],
-        }
-        with mock.patch(
-            "agent_v2.graph.nodes.execute_canvas._run_canvas_planner",
-            return_value=planner_result,
-        ):
-            result = execute_canvas_plan(state)
-
-        self.assertEqual(result["exec_patches"], planner_result["patch"])
-        self.assertEqual(result["exec_response_text"], "已搭建画布。")
-        self.assertEqual(result["exec_data"]["thought"], "")
 
 
 class TestExecuteToolCall(unittest.TestCase):
@@ -466,19 +385,6 @@ class TestBuildResponseNode(unittest.TestCase):
         self.assertEqual(resp["intent"], "answer_only")
         self.assertEqual(resp["thread_id"], "t1")
         self.assertIsNone(resp["async_task"])
-
-    def test_assembles_canvas_plan_response_with_patches(self):
-        from agent_v2.graph.nodes.build_response import build_response
-        state = self._base_state(
-            intent="canvas_plan",
-            exec_response_text="已搭建画布",
-            exec_patches=[{"op": "add_node", "node": {"id": "n1"}}],
-            exec_data={"thought": "", "summary": "已搭建画布"},
-        )
-        result = build_response(state)
-        resp = result["final_response"]
-        self.assertEqual(resp["intent"], "canvas_plan")
-        self.assertEqual(len(resp["patches"]), 1)
 
     def test_assembles_storyboard_async_response(self):
         from agent_v2.graph.nodes.build_response import build_response
