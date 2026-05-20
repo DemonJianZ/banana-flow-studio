@@ -11,6 +11,7 @@ def execute_storyboard(state: dict) -> dict:
     thread_id = str(state.get("thread_id") or "").strip()
     tool_args = dict(state.get("tool_args") or {})
     trace = list(state.get("trace") or [])
+    task_plan = dict(state.get("task_plan") or {})
 
     task_id = _create_storyboard_task(thread_id)
     async_data = {
@@ -20,6 +21,7 @@ def execute_storyboard(state: dict) -> dict:
         "authorization": str(state.get("member_authorization") or "").strip(),
         "thread_id": thread_id,
         "_async_storyboard": True,
+        "user_goal": str(task_plan.get("user_goal") or "").strip(),
     }
 
     return {

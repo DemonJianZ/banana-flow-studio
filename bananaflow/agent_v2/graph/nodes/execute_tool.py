@@ -56,6 +56,7 @@ def execute_tool_call(state: dict) -> dict:
     member_authorization = str(state.get("member_authorization") or "").strip()
     trace = list(state.get("trace") or [])
     tool_trace: list[Any] = []
+    task_plan = dict(state.get("task_plan") or {})
 
     # Verify tool exists before attempting execution
     from agent.tools import build_builtin_registry
@@ -73,8 +74,9 @@ def execute_tool_call(state: dict) -> dict:
 
     # Ensure prompt.polish args are populated
     if tool_name == "prompt.polish" and "prompt" not in tool_args:
+        user_goal = str(task_plan.get("user_goal") or "").strip()
         tool_args = {
-            "prompt": message,
+            "prompt": user_goal or message,
             "mode": str(state.get("mode") or "text2img").strip() or "text2img",
         }
 

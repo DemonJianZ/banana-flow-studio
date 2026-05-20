@@ -18,7 +18,10 @@ def _run_chitchat_tool(message: str, trace_sink: list, member_authorization: str
 
 
 def execute_chitchat(state: dict) -> dict:
-    message = str(state.get("message") or "").strip()
+    task_plan = dict(state.get("task_plan") or {})
+    user_goal = str(task_plan.get("user_goal") or "").strip()
+    raw_message = str(state.get("message") or "").strip()
+    message = user_goal or raw_message
     thread_id = str(state.get("thread_id") or "").strip()
     member_authorization = str(state.get("member_authorization") or "").strip()
     trace = list(state.get("trace") or [])

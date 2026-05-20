@@ -7,8 +7,13 @@ def _run_canvas_planner(state: dict) -> dict:
     from agent.planner import agent_plan_impl
     from schemas.api import AgentRequest
 
+    task_plan = dict(state.get("task_plan") or {})
+    user_goal = str(task_plan.get("user_goal") or "").strip()
+    raw_message = str(state.get("message") or "").strip()
+    prompt = user_goal or raw_message
+
     plan_req = AgentRequest(
-        prompt=str(state.get("message") or ""),
+        prompt=prompt,
         supplemental_prompt=state.get("supplemental_prompt"),
         current_nodes=list(state.get("current_nodes") or []),
         current_connections=list(state.get("current_connections") or []),

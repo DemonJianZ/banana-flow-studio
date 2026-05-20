@@ -119,5 +119,67 @@ class TestRouterAfterPlan(unittest.TestCase):
         self.assertEqual(_route_after_plan(self._plan_state("unknown_node")), "execute_chitchat")
 
 
+class TestExecuteNodesConsumePlan(unittest.TestCase):
+    def _state_with_plan(self, intent="answer_only", user_goal="测试目标", **overrides):
+        base = {
+            "message": "原始消息",
+            "thread_id": "t1",
+            "intent": intent,
+            "tool_name": "",
+            "tool_args": {},
+            "member_authorization": "",
+            "trace": [],
+            "exec_response_text": "",
+            "exec_patches": [],
+            "exec_warnings": [],
+            "exec_data": {},
+            "task_plan": {
+                "intent": intent,
+                "target_agent": "execute_chitchat",
+                "task_type": "answer_question",
+                "user_goal": user_goal,
+                "target_object": None,
+                "action": "回答",
+                "required_context": [],
+                "expected_output": "message",
+                "risk_level": "low",
+                "need_confirmation": False,
+            },
+        }
+        base.update(overrides)
+        return base
+
+    def test_execute_clarify_uses_task_plan_fallback(self):
+        from agent_v2.graph.nodes.execute_clarify import execute_clarify
+        state = self._state_with_plan(intent="clarify", user_goal="需要更多信息")
+        state["_clarification_question"] = None
+        state["task_plan"]["target_agent"] = "execute_clarify"
+        result = execute_clarify(state)
+        self.assertTrue(len(result["exec_response_text"]) > 0)
+        self.assertTrue(any(t.get("type") == "EXECUTE_CLARIFY" for t in result["trace"]))
+
+    def test_build_response_includes_task_plan_in_trace(self):
+        from agent_v2.graph.nodes.build_response import build_response
+        state = self._state_with_plan()
+        state.update({
+            "exec_patches": [],
+            "exec_warnings": [],
+            "exec_data": {},
+            "exec_response_text": "hello",
+            "canvas_summary": {},
+            "artifact_summary": {},
+            "conversation_history": [],
+            "canvas_id": None,
+            "mode": None,
+            "final_response": None,
+        })
+        result = build_response(state)
+        final = result["final_response"]
+        trace = final["trace"]
+        build_entry = next((t for t in trace if t.get("type") == "BUILD_RESPONSE"), None)
+        self.assertIsNotNone(build_entry)
+        self.assertIn("task_type", build_entry)
+
+
 if __name__ == "__main__":
     unittest.main()

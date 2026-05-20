@@ -40,11 +40,14 @@ def build_response(state: dict) -> dict:
     if not message and tool_name in {"prompt.polish"}:
         message = str(exec_data.get("text") or "").strip()
 
+    task_plan = dict(state.get("task_plan") or {})
     trace_entry: dict[str, Any] = {
         "type": "BUILD_RESPONSE",
         "intent": intent,
         "message_preview": message[:120] if message else "",
         "patch_count": len(exec_patches),
+        "task_type": str(task_plan.get("task_type") or ""),
+        "user_goal": str(task_plan.get("user_goal") or "")[:60],
     }
 
     final_response: dict[str, Any] = {
