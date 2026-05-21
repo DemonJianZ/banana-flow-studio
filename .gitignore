@@ -9,6 +9,9 @@ Thumbs.db
 .run/
 tmp/
 debug_output/
+*.pid
+.ruff_cache/
+.pytest_cache/
 
 # Logs
 logs

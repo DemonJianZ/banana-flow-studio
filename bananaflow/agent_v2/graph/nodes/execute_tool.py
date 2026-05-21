@@ -3,6 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 
+_STORYBOARD_TOOL_NAMES = {"storyboard.design", "agent_storyboard_design"}
+_SHOT_WORKFLOW_TOOL_NAMES = {"shot_workflow.compose", "agent_shot_workflow_compose"}
+
+
 def _run_tool(
     tool_name: str,
     tool_args: dict,
@@ -57,6 +61,23 @@ def execute_tool_call(state: dict) -> dict:
     trace = list(state.get("trace") or [])
     tool_trace: list[Any] = []
     task_plan = dict(state.get("task_plan") or {})
+
+    if tool_name in _STORYBOARD_TOOL_NAMES:
+        return {
+            "exec_response_text": "",
+            "exec_patches": [],
+            "exec_warnings": [],
+            "exec_data": {},
+            "trace": trace + [{"type": "EXECUTE_TOOL_CALL", "tool": tool_name, "delegated_to": "execute_storyboard"}],
+        }
+    if tool_name in _SHOT_WORKFLOW_TOOL_NAMES:
+        return {
+            "exec_response_text": "",
+            "exec_patches": [],
+            "exec_warnings": [],
+            "exec_data": {},
+            "trace": trace + [{"type": "EXECUTE_TOOL_CALL", "tool": tool_name, "delegated_to": "execute_shot_workflow"}],
+        }
 
     # Verify tool exists before attempting execution
     from agent.tools import build_builtin_registry

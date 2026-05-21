@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import {
   X,
   Play,
@@ -454,63 +454,6 @@ const PropertyPanel = ({
       setPromptPolishLoading(false);
     }
   };
-
-  const getEmbeddedVideoOptionBadge = useCallback((label, value = "") => {
-    const text = `${String(label || "")} ${String(value || "")}`.toLowerCase();
-    if (text.includes("vip")) return "VIP";
-    return "";
-  }, []);
-
-  const renderEmbeddedVideoSegmentGroup = useCallback(
-    ({
-      title,
-      options = EMPTY_LIST,
-      selectedValue = "",
-      onSelect,
-      wide = false,
-    }) => (
-      <div className="space-y-2">
-        <div className="text-[10px] font-bold uppercase tracking-[0.1em] text-slate-500">{title}</div>
-        <div className="flex flex-wrap gap-2">
-          {options.map((option) => {
-            const value = String(option?.value ?? "").trim();
-            const label = String(option?.label ?? option?.value ?? "").trim();
-            const description = String(option?.description || "").trim();
-            const badge = String(option?.badge || getEmbeddedVideoOptionBadge(label, value)).trim();
-            const isSelected = String(selectedValue || "").trim() === value;
-
-            return (
-              <button
-                key={`${title}_${value}`}
-                type="button"
-                onClick={() => onSelect?.(value)}
-                className={`relative flex min-h-[36px] items-center justify-center rounded-[10px] border px-3 py-2 text-[11px] font-medium transition-all ${
-                  wide ? "min-w-[132px] flex-1 justify-start text-left" : "min-w-[68px]"
-                } ${
-                  isSelected
-                    ? "border-cyan-200 bg-cyan-50 text-cyan-700"
-                    : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
-                }`}
-              >
-                {badge ? (
-                  <span className={`absolute right-1.5 top-1.5 rounded-full px-1.5 py-0.5 text-[9px] font-semibold leading-none ${
-                    isSelected ? "bg-cyan-100 text-cyan-700" : "bg-slate-100 text-slate-500"
-                  }`}>
-                    {badge}
-                  </span>
-                ) : null}
-                <span className={`flex min-w-0 ${wide ? "flex-col items-start gap-0.5 pr-7" : "items-center"}`}>
-                  <span className="truncate">{label}</span>
-                  {wide && description ? <span className="truncate text-[10px] text-slate-400">{description}</span> : null}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    ),
-    [getEmbeddedVideoOptionBadge],
-  );
 
   if (!hasConfigNode) return null;
 

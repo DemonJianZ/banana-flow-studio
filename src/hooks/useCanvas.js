@@ -14,7 +14,7 @@ import {
 // Config & Constants
 // ==========================================
 const generateId = () => Math.random().toString(36).substr(2, 9);
-const GRID_SIZE = 20; // eslint-disable-line no-unused-vars
+const GRID_SIZE = 20;
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 3;
 const MEDIA_UPLOAD_NODE_WIDTH = 280;
@@ -255,10 +255,12 @@ export function useCanvas({
           ? 1280
           : node.type === NODE_TYPES.TEXT_INPUT
           ? 320
+          : node.type === NODE_TYPES.STORYBOARD_INPUT
+          ? 380
           : node.type === NODE_TYPES.ROLE_INPUT
           ? 76
           : 280);
-      const height = element?.offsetHeight || (node.type === NODE_TYPES.STORYBOARD_PLAN ? 620 : node.type === NODE_TYPES.ROLE_INPUT ? 76 : 180);
+      const height = element?.offsetHeight || (node.type === NODE_TYPES.STORYBOARD_PLAN ? 620 : node.type === NODE_TYPES.STORYBOARD_INPUT ? 260 : node.type === NODE_TYPES.ROLE_INPUT ? 76 : 180);
       return { width, height };
     };
 

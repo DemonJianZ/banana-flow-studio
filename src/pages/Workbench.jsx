@@ -65,6 +65,9 @@ import ScriptExecutionPlan from "../components/agent-canvas/ScriptExecutionPlan"
 import ScriptPlanSummary from "../components/agent-canvas/ScriptPlanSummary";
 import PreferenceSuggestionCard from "../components/agent-canvas/PreferenceSuggestionCard";
 import DramaMarkdownBlock from "../components/workbench/DramaMarkdownBlock";
+import ShotAnnotatedScriptBlock from "../components/workbench/ShotAnnotatedScriptBlock";
+import ScriptExtractionCard from "../components/workbench/ScriptExtractionCard";
+import AssetGenConfirmCard from "../components/workbench/AssetGenConfirmCard";
 import VideoPlayer from "../components/workbench/VideoPlayer";
 import ToolIconBtn from "../components/workbench/ToolIconBtn";
 import PromptPolishPickerModal from "../components/workbench/PromptPolishPickerModal";
@@ -123,6 +126,8 @@ import { buildRoleProfileStructuredOutput } from "../lib/roleProfileStructurer.j
 import {
   EMPTY_LIST,
   AGENT_RUN_STEPS,
+  STORYBOARD_RUN_STEPS,
+  SHOT_WORKFLOW_RUN_STEPS,
   DRAMA_RUN_STEPS,
   AGENT_RESULT_CARD_WIDTH,
   SCRIPT_PLATFORM_OPTIONS,
@@ -182,8 +187,10 @@ const PreferencesPanel = React.lazy(() => import("../components/agent-canvas/Pre
 const generateId = () => Math.random().toString(36).substr(2, 9);
 const GRID_SIZE = 20;
 const ASSET_LIBRARY_STORE_KEY = "bananaflow_asset_library_v1";
-const AGENT_COMPOSER_FILE_ACCEPT = "image/*,.csv,.tsv,.txt,.md,.markdown,text/plain,text/csv,text/markdown";
-const AGENT_DOCUMENT_MAX_BYTES = 1024 * 1024;
+const AGENT_COMPOSER_FILE_ACCEPT = "image/*,.csv,.tsv,.txt,.md,.markdown,.docx,.doc,text/plain,text/csv,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword";
+const AGENT_DOCUMENT_MAX_BYTES = 5 * 1024 * 1024;
+const WORD_DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const WORD_LEGACY_DOC_MIME_TYPE = "application/msword";
 const AGENT_QUICK_ACTIONS = [
   { id: "script", label: "生成爆款脚本" },
   { id: "drama", label: "创作短剧" },
@@ -232,6 +239,143 @@ const HITL_FEEDBACK_UI_ENABLED = isFlagEnabled(
 );
 
 
+const STORYBOARD_SCRIPT_TEXT_MARKERS = [
+  "人物：",
+  "人物:",
+  "角色：",
+  "角色:",
+  "场景：",
+  "场景:",
+  "时间：",
+  "时间:",
+  "画外音",
+  "旁白",
+  "△",
+  "▲",
+];
+
+const looksLikeShotWorkflowScriptText = (text, uploadedDocuments = []) => {
+  const docs = Array.isArray(uploadedDocuments) ? uploadedDocuments : [];
+  if (docs.some((item) => String(item?.kind || "").trim() === "storyboard_script_table")) return true;
+  const source = String(text || "").trim();
+  if (source.length < 80) return false;
+  if (/分镜|故事板|storyboard|shot list|镜头脚本|镜头设计/i.test(source)) return true;
+  const markerHits = STORYBOARD_SCRIPT_TEXT_MARKERS.filter((marker) => source.includes(marker)).length;
+  const dialogueHits = (source.match(/^\s*[\u4e00-\u9fa5A-Za-z·]{1,12}\s*[:：]/gm) || []).length;
+  const sceneHits = (source.match(/^\s*[△▲]/gm) || []).length;
+  return markerHits >= 2 && (dialogueHits >= 2 || sceneHits >= 2);
+};
+
+const countStoryboardShots = (plan) =>
+  (Array.isArray(plan?.scenes) ? plan.scenes : []).reduce(
+    (sum, scene) => sum + (Array.isArray(scene?.shots) ? scene.shots.length : 0),
+    0,
+  );
+
+const buildStoryboardWorkflowStepState = (plan) => {
+  const lab = plan?.local_asset_bindings || {};
+  const boundCharacters = Array.isArray(lab.character_bindings) ? lab.character_bindings.length : 0;
+  const boundScenes = Array.isArray(lab.scene_bindings) ? lab.scene_bindings.length : 0;
+  const shotCount = countStoryboardShots(plan);
+  return [
+    { id: "script", label: "剧本输入", status: "success" },
+    { id: "plan", label: "分镜设计", status: shotCount > 0 ? "success" : "ready", count: shotCount },
+    { id: "assets", label: "资产绑定", status: boundCharacters || boundScenes ? "success" : "ready", count: boundCharacters + boundScenes },
+    { id: "shots", label: "镜头图生产", status: "ready", count: shotCount },
+  ];
+};
+
+const enhanceStoryboardPatchWithProductionWorkflow = (rawPatch, options = {}) => {
+  const patch = Array.isArray(rawPatch) ? rawPatch : [];
+  if (!patch.length) return [];
+  const storyboardOpIndex = patch.findIndex((op) => op?.op === "add_node" && op?.node?.type === NODE_TYPES.STORYBOARD_PLAN);
+  if (storyboardOpIndex < 0) return patch;
+
+  const originalStoryboard = patch[storyboardOpIndex].node || {};
+  const shouldCreateSourceNode = !options.sourceNodeId && options.createSourceNode !== false;
+  const dx = shouldCreateSourceNode ? 440 : 0;
+  const storyboardNodeIds = [];
+  let firstStoryboardNodeId = "";
+  let sourceNodeId = String(options.sourceNodeId || "").trim();
+  let sourceNode = null;
+
+  if (shouldCreateSourceNode) {
+    sourceNodeId = `storyboard_input_${generateId()}`;
+    const sourceText = String(options.sourceText || "").trim();
+    const baseX = Number(originalStoryboard.x || 120);
+    const baseY = Number(originalStoryboard.y || 120);
+    sourceNode = {
+      id: sourceNodeId,
+      type: NODE_TYPES.STORYBOARD_INPUT,
+      x: baseX,
+      y: baseY,
+      data: {
+        title: "剧本输入",
+        status: "success",
+        error: "",
+        scriptFileName: String(options.sourceTitle || "对话输入剧本").trim() || "对话输入剧本",
+        summary: "已读取剧本，并接入故事板制作流程。",
+        generatedStoryboardNodeIds: [],
+        progressLabel: "",
+        textPreview: sourceText.slice(0, 1200),
+        source: "agent_chat_storyboard",
+      },
+    };
+  }
+
+  const enhancedPatch = patch.map((op) => {
+    if (op?.op !== "add_node" || !op?.node) return op;
+    const nextNode = {
+      ...op.node,
+      x: Number(op.node.x || 0) + dx,
+      y: Number(op.node.y || 0),
+      data: { ...(op.node.data || {}) },
+    };
+    if (nextNode.type === NODE_TYPES.STORYBOARD_PLAN) {
+      const plan = nextNode.data.storyboard_plan || {};
+      const shotCount = countStoryboardShots(plan);
+      storyboardNodeIds.push(String(nextNode.id || "").trim());
+      if (!firstStoryboardNodeId) firstStoryboardNodeId = String(nextNode.id || "").trim();
+      nextNode.data = {
+        ...nextNode.data,
+        source_storyboard_input_node_id: sourceNodeId || nextNode.data.source_storyboard_input_node_id || "",
+        workflow_mode: "storyboard_image_production",
+        workflow_status: "ready",
+        workflow_summary: shotCount > 0 ? `已拆分 ${shotCount} 个镜头，可继续批量生成分镜图。` : "分镜生产工作流已就绪。",
+        workflow_steps: buildStoryboardWorkflowStepState(plan),
+      };
+    }
+    return { ...op, node: nextNode };
+  });
+
+  if (sourceNode) {
+    sourceNode.data.generatedStoryboardNodeIds = storyboardNodeIds.filter(Boolean);
+    enhancedPatch.unshift({ op: "add_node", node: sourceNode });
+  }
+  if (sourceNodeId && firstStoryboardNodeId) {
+    enhancedPatch.push({
+      op: "add_connection",
+      connection: { id: generateId(), from: sourceNodeId, to: firstStoryboardNodeId },
+    });
+  }
+  if (firstStoryboardNodeId) {
+    enhancedPatch.push({ op: "select_nodes", ids: [firstStoryboardNodeId] });
+  }
+  return enhancedPatch;
+};
+
+const isDocxDocumentFile = (file) => {
+  const name = String(file?.name || "").trim().toLowerCase();
+  const type = String(file?.type || "").trim().toLowerCase();
+  return name.endsWith(".docx") || type === WORD_DOCX_MIME_TYPE;
+};
+
+const isLegacyWordDocumentFile = (file) => {
+  const name = String(file?.name || "").trim().toLowerCase();
+  const type = String(file?.type || "").trim().toLowerCase();
+  return name.endsWith(".doc") || type === WORD_LEGACY_DOC_MIME_TYPE;
+};
+
 const isAgentComposerDocumentFile = (file) => {
   const name = String(file?.name || "").trim().toLowerCase();
   const type = String(file?.type || "").trim().toLowerCase();
@@ -241,6 +385,8 @@ const isAgentComposerDocumentFile = (file) => {
       name.endsWith(".txt") ||
       name.endsWith(".md") ||
       name.endsWith(".markdown") ||
+      isDocxDocumentFile(file) ||
+      isLegacyWordDocumentFile(file) ||
       type.startsWith("text/") ||
       type === "application/csv" ||
       type === "text/csv"
@@ -304,6 +450,35 @@ const decodeStoryboardDocumentBuffer = (buffer) => {
     }
   }
   return String(bestText || "").trim();
+};
+
+const extractDocxTextContent = async (arrayBuffer) => {
+  const mammothModule = await import("mammoth/mammoth.browser.js");
+  const mammothClient = mammothModule.default || mammothModule;
+  if (typeof mammothClient.extractRawText !== "function") {
+    throw new Error("Word 文档解析器加载失败");
+  }
+  const result = await mammothClient.extractRawText({ arrayBuffer });
+  return String(result?.value || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+};
+
+const readAgentDocumentText = async (file) => {
+  if (isLegacyWordDocumentFile(file)) {
+    throw new Error(`${file.name || "Word 文档"} 是旧版 .doc 格式，请另存为 .docx 后上传`);
+  }
+  const buffer = await file.arrayBuffer();
+  if (isDocxDocumentFile(file)) {
+    return extractDocxTextContent(buffer);
+  }
+  return decodeStoryboardDocumentBuffer(buffer);
+};
+
+const getAgentDocumentMimeType = (file) => {
+  const type = String(file?.type || "").trim();
+  if (type) return type;
+  if (isDocxDocumentFile(file)) return WORD_DOCX_MIME_TYPE;
+  if (isLegacyWordDocumentFile(file)) return WORD_LEGACY_DOC_MIME_TYPE;
+  return "text/plain";
 };
 
 const isAbortLikeError = (error) => {
@@ -2170,12 +2345,16 @@ const Workbench = () => {
           ? 1280
           : targetNode.type === NODE_TYPES.TEXT_INPUT
           ? 320
+          : targetNode.type === NODE_TYPES.STORYBOARD_INPUT
+          ? 380
           : targetNode.type === NODE_TYPES.ROLE_INPUT
           ? 76
           : 280;
       const height =
         targetNode.type === NODE_TYPES.STORYBOARD_PLAN
           ? 620
+          : targetNode.type === NODE_TYPES.STORYBOARD_INPUT
+          ? 260
           : targetNode.type === NODE_TYPES.ROLE_INPUT
           ? 76
           : 200;
@@ -2533,6 +2712,15 @@ const Workbench = () => {
     const d = {
       [NODE_TYPES.INPUT]: { images: [], mediaKind: "image", title: getReferenceNodeTitle("image") },
       [NODE_TYPES.TEXT_INPUT]: { text: "" },
+      [NODE_TYPES.STORYBOARD_INPUT]: {
+        title: "故事板输入",
+        status: "idle",
+        error: "",
+        scriptFileName: "",
+        summary: "",
+        generatedStoryboardNodeIds: [],
+        progressLabel: "",
+      },
       [NODE_TYPES.ROLE_INPUT]: { personaId: "", name: "", referenceImage: "", images: [], text: "" },
       [NODE_TYPES.ROLE_STRUCTURER]: {
         title: "角色结构化",
@@ -2604,7 +2792,7 @@ const Workbench = () => {
     if (selectedNodeIds.size === 1) {
       const sourceId = Array.from(selectedNodeIds)[0];
       const sourceNode = nodes.find((n) => n.id === sourceId);
-      const canInput = t !== NODE_TYPES.INPUT && t !== NODE_TYPES.TEXT_INPUT && t !== NODE_TYPES.ROLE_INPUT;
+      const canInput = t !== NODE_TYPES.INPUT && t !== NODE_TYPES.TEXT_INPUT && t !== NODE_TYPES.STORYBOARD_INPUT && t !== NODE_TYPES.ROLE_INPUT;
       if (sourceNode && canInput) {
         newConnection = { id: generateId(), from: sourceId, to: id };
         newNode.x = sourceNode.x + 350;
@@ -3840,17 +4028,6 @@ const Workbench = () => {
     [apiFetch, defaultLanguageModelId, pushApiDebugDetail, resolveModelParamsForId, updateActiveAgentSession, updateApiDebugStatus],
   );
 
-  const buildAgentRecentMessages = useCallback(() => {
-    const turns = activeAgentSession?.turns || [];
-    const recent = [];
-    for (const turn of turns.slice(-6)) {
-      const userText = String(turn?.userText || "").trim();
-      const assistantText = String(turn?.assistantText || "").trim();
-      if (userText) recent.push({ role: "user", text: userText });
-      if (assistantText) recent.push({ role: "assistant", text: assistantText });
-    }
-    return recent;
-  }, [activeAgentSession?.turns]);
 
   const getRecentAgentUploadedDocuments = useCallback(() => {
     const turns = activeAgentSession?.turns || [];
@@ -3955,7 +4132,12 @@ const Workbench = () => {
               }));
             }
           });
-          const sbPatch = Array.isArray(taskResult?.patch) ? taskResult.patch : [];
+          const rawSbPatch = Array.isArray(taskResult?.patch) ? taskResult.patch : [];
+          const sbPatch = enhanceStoryboardPatchWithProductionWorkflow(rawSbPatch, {
+            sourceText: userText,
+            sourceTitle: "对话输入剧本",
+            createSourceNode: true,
+          });
           const sbNodeIds = sbPatch
             .filter((op) => op?.op === "add_node" && op?.node?.type === "storyboard_plan")
             .map((op) => String(op?.node?.id || "").trim())
@@ -3974,7 +4156,7 @@ const Workbench = () => {
                 ? {
                     ...turn,
                     status: "done",
-                    stepIndex: AGENT_RUN_STEPS.length - 1,
+                    stepIndex: STORYBOARD_RUN_STEPS.length - 1,
                     assistantText: String(taskResult?.summary || "已生成可编辑分镜方案。").trim(),
                     response: { storyboardNodeIds: sbNodeIds, summary: String(taskResult?.summary || "").trim() },
                     intent: "STORYBOARD",
@@ -4054,7 +4236,7 @@ const Workbench = () => {
               ? {
                   ...turn,
                   status: "done",
-                  stepIndex: AGENT_RUN_STEPS.length - 1,
+                  stepIndex: DRAMA_RUN_STEPS.length - 1,
                   response,
                   exports: turn.exports || {},
                   dramaPayload: payload,
@@ -4554,11 +4736,18 @@ const Workbench = () => {
         }
       }
 
-      const route = {
-        intent: "UNKNOWN",
-        reason: "frontend_router_removed",
-        product: "",
-      };
+      const isShotWorkflowMission = looksLikeShotWorkflowScriptText(missionText, uploadedDocuments);
+      const route = isShotWorkflowMission
+        ? {
+            intent: "SHOT_WORKFLOW",
+            reason: "frontend_shot_workflow_script_detected",
+            product: "",
+          }
+        : {
+            intent: "UNKNOWN",
+            reason: "frontend_router_removed",
+            product: "",
+          };
       const extractedSupplementalPrompt = extractCanvasSupplementalPrompt(missionText);
       const pendingTurnId = appendAgentTurn({
         userText: missionText,
@@ -4574,6 +4763,7 @@ const Workbench = () => {
           {
             supplementalPrompt: extractedSupplementalPrompt || "",
             uploadedDocuments,
+            ...(isShotWorkflowMission ? { forceAction: "shot_workflow_design" } : {}),
           },
         );
         const responseText = String(response?.message || "").trim();
@@ -4629,6 +4819,50 @@ const Workbench = () => {
           return;
         }
 
+        if (
+          response?.intent === "tool_call" &&
+          response?.tool_result?.kind === "script_extraction"
+        ) {
+          updateAgentTurn(pendingTurnId, {
+            status: "done",
+            assistantText: responseText || String(response?.tool_result?.summary || "已从剧本中提取分镜信息，请确认后继续搭建工作流。").trim(),
+            routeDebug,
+            response: response.tool_result,
+            intent: "SCRIPT_EXTRACTION",
+            intentReason: routeDebug.reason,
+          });
+          return;
+        }
+
+        if (
+          response?.intent === "tool_call" &&
+          response?.tool_result?.kind === "shot_workflow" &&
+          Array.isArray(response?.patches)
+        ) {
+          const patch = response.patches;
+          if (patch.length) {
+            pushHistory();
+            const patchResult = _applyPatch(patch);
+            if (patchResult?.nodes && patchResult?.connections) {
+              upsertCanvasDraftSnapshot({
+                nodes: patchResult.nodes,
+                connections: patchResult.connections,
+                viewport: patchResult.viewport || viewportRef.current,
+              });
+            }
+          }
+          updateAgentTurn(pendingTurnId, {
+            status: "done",
+            assistantText: responseText || String(response?.tool_result?.summary || "已搭建分镜出图工作流。").trim(),
+            routeDebug,
+            response: response.tool_result,
+            intent: "SHOT_WORKFLOW",
+            intentReason: routeDebug.reason,
+            stepIndex: SHOT_WORKFLOW_RUN_STEPS.length - 1,
+          });
+          return;
+        }
+
         if (response?.intent === "tool_call" && response?.async_task?.task_id) {
           const storyboardTaskId = String(response.async_task.task_id);
           updateAgentTurn(pendingTurnId, {
@@ -4644,7 +4878,12 @@ const Workbench = () => {
                 updateAgentTurn(pendingTurnId, { assistantText: "分镜方案生成中（AI 正在思考）..." });
               }
             });
-            const patch = Array.isArray(taskResult?.patch) ? taskResult.patch : [];
+            const rawPatch = Array.isArray(taskResult?.patch) ? taskResult.patch : [];
+            const patch = enhanceStoryboardPatchWithProductionWorkflow(rawPatch, {
+              sourceText: missionText,
+              sourceTitle: uploadedDocuments.length ? uploadedDocuments.map((item) => item.name).filter(Boolean).join("，") : "对话输入剧本",
+              createSourceNode: true,
+            });
             const storyboardNodeIds = patch
               .filter((op) => op?.op === "add_node" && op?.node?.type === "storyboard_plan")
               .map((op) => String(op?.node?.id || "").trim())
@@ -4667,7 +4906,7 @@ const Workbench = () => {
               response: { storyboardNodeIds, summary: String(taskResult?.summary || "").trim() },
               intent: "STORYBOARD",
               intentReason: routeDebug.reason,
-              stepIndex: AGENT_RUN_STEPS.length - 1,
+              stepIndex: STORYBOARD_RUN_STEPS.length - 1,
             });
           } catch (storyboardErr) {
             updateAgentTurn(pendingTurnId, {
@@ -4759,6 +4998,115 @@ const Workbench = () => {
     ],
   );
 
+  // After extraction confirmed: show the asset gen ask card (client-side, no backend call)
+  const confirmScriptExtraction = useCallback(
+    (extractionData) => {
+      appendAssistantTurn("", "已确认剧本提取内容，接下来是否要生成角色与场景的参考设定图？", {
+        intent: "ASSET_GEN_CONFIRM",
+        response: extractionData,
+        routeDebug: buildRouteDebug({ intent: "ASSET_GEN_CONFIRM", reason: "script_extraction_confirmed", product: "" }, false),
+        status: "done",
+      });
+    },
+    [appendAssistantTurn],
+  );
+
+  // Build asset canvas groups
+  const buildAssetCanvas = useCallback(
+    async (extractionData) => {
+      const pendingTurnId = appendAgentTurn({
+        userText: "生成角色与场景参考设定图",
+        status: "running",
+        assistantText: "",
+        routeDebug: buildRouteDebug({ intent: "ASSET_CANVAS_BUILT", reason: "asset_gen_confirmed", product: "" }, true),
+        uploadedDocuments: [],
+      });
+      try {
+        const response = await runAgentConversation(
+          "",
+          { intent: "ASSET_CANVAS_BUILT", reason: "asset_gen_confirmed", product: "" },
+          { forceAction: "shot_workflow.build_asset_canvas", canvasNodeHints: { confirmed_extraction: extractionData } },
+        );
+        const responseText = String(response?.message || "").trim();
+        const routeDebug = buildRouteDebug({ intent: "ASSET_CANVAS_BUILT", reason: "asset_gen_confirmed" }, true, response);
+        const patch = Array.isArray(response?.patches) ? response.patches : [];
+        if (patch.length) {
+          pushHistory();
+          const patchResult = _applyPatch(patch);
+          if (patchResult?.nodes && patchResult?.connections) {
+            upsertCanvasDraftSnapshot({ nodes: patchResult.nodes, connections: patchResult.connections, viewport: patchResult.viewport || viewportRef.current });
+          }
+        }
+        updateAgentTurn(pendingTurnId, {
+          status: "done",
+          assistantText: responseText || String(response?.tool_result?.summary || "已在画布上创建参考设定图组。").trim(),
+          routeDebug,
+          response: response?.tool_result || {},
+          intent: "ASSET_CANVAS_BUILT",
+          intentReason: routeDebug.reason,
+        });
+      } catch (error) {
+        updateAgentTurn(pendingTurnId, {
+          status: "error",
+          error: error?.message || "请求失败，请稍后重试。",
+          routeDebug: buildRouteDebug({ intent: "ASSET_CANVAS_BUILT", reason: "asset_canvas_error" }, true),
+        });
+      }
+    },
+    [appendAgentTurn, runAgentConversation, updateAgentTurn, upsertCanvasDraftSnapshot, _applyPatch, pushHistory],
+  );
+
+  // Skip asset gen, go straight to shot workflow
+  const skipToShotWorkflow = useCallback(
+    async (extractionData) => {
+      const sourceText = String(extractionData?.source_text || "").trim();
+      const pendingTurnId = appendAgentTurn({
+        userText: "跳过设定图，直接搭建出图工作流",
+        status: "running",
+        assistantText: "",
+        routeDebug: buildRouteDebug({ intent: "SHOT_WORKFLOW", reason: "asset_gen_skipped", product: "" }, true),
+        uploadedDocuments: [],
+      });
+      try {
+        const response = await runAgentConversation(
+          sourceText,
+          { intent: "SHOT_WORKFLOW", reason: "asset_gen_skipped", product: "" },
+          { forceAction: "shot_workflow.compose", canvasNodeHints: { confirmed_extraction: extractionData } },
+        );
+        const responseText = String(response?.message || "").trim();
+        const routeDebug = buildRouteDebug({ intent: "SHOT_WORKFLOW", reason: "asset_gen_skipped" }, true, response);
+        if (response?.intent === "tool_call" && response?.tool_result?.kind === "shot_workflow" && Array.isArray(response?.patches)) {
+          const patch = response.patches;
+          if (patch.length) {
+            pushHistory();
+            const patchResult = _applyPatch(patch);
+            if (patchResult?.nodes && patchResult?.connections) {
+              upsertCanvasDraftSnapshot({ nodes: patchResult.nodes, connections: patchResult.connections, viewport: patchResult.viewport || viewportRef.current });
+            }
+          }
+          updateAgentTurn(pendingTurnId, {
+            status: "done",
+            assistantText: responseText || String(response?.tool_result?.summary || "已搭建分镜出图工作流。").trim(),
+            routeDebug,
+            response: response.tool_result,
+            intent: "SHOT_WORKFLOW",
+            intentReason: routeDebug.reason,
+            stepIndex: SHOT_WORKFLOW_RUN_STEPS.length - 1,
+          });
+        } else {
+          updateAgentTurn(pendingTurnId, { status: "done", assistantText: responseText || "已处理。", routeDebug });
+        }
+      } catch (error) {
+        updateAgentTurn(pendingTurnId, {
+          status: "error",
+          error: error?.message || "请求失败，请稍后重试。",
+          routeDebug: buildRouteDebug({ intent: "SHOT_WORKFLOW", reason: "skip_asset_gen_error" }, true),
+        });
+      }
+    },
+    [appendAgentTurn, runAgentConversation, updateAgentTurn, upsertCanvasDraftSnapshot, _applyPatch, pushHistory],
+  );
+
   const sendAgentMission = () => {
     const text = String(agentInput || "").trim();
     const documentAttachments = agentComposerFiles
@@ -4776,7 +5124,7 @@ const Workbench = () => {
         item.kind === "storyboard_script_table" ||
         /\.(csv|tsv)$/i.test(String(item.name || "")),
     )
-      ? "请将这份分镜头脚本整理成故事板"
+      ? "请为这份分镜头脚本搭建每个镜头的出图工作流"
       : documentAttachments.length
       ? "请处理我上传的文件"
       : "";
@@ -4862,15 +5210,15 @@ const Workbench = () => {
         continue;
       }
       if (!isAgentComposerDocumentFile(file)) {
-        setRunToast({ message: `暂不支持上传 ${file.name}，请使用 csv/tsv/txt/md 或图片`, type: "error" });
+        setRunToast({ message: `暂不支持上传 ${file.name}，请使用 csv/tsv/txt/md/docx 或图片`, type: "error" });
         continue;
       }
       if (Number(file.size || 0) > AGENT_DOCUMENT_MAX_BYTES) {
-        setRunToast({ message: `${file.name} 超过 1MB，先精简脚本表再上传`, type: "error" });
+        setRunToast({ message: `${file.name} 超过 5MB，先精简脚本表再上传`, type: "error" });
         continue;
       }
       try {
-        const textContent = decodeStoryboardDocumentBuffer(await file.arrayBuffer());
+        const textContent = await readAgentDocumentText(file);
         if (!textContent) {
           setRunToast({ message: `${file.name} 内容为空`, type: "error" });
           continue;
@@ -4882,11 +5230,11 @@ const Workbench = () => {
           name: file.name,
           size: file.size,
           lastModified: file.lastModified,
-          mimeType: String(file.type || "").trim() || "text/plain",
+          mimeType: getAgentDocumentMimeType(file),
           textContent,
         });
-      } catch {
-        setRunToast({ message: `${file.name} 读取失败`, type: "error" });
+      } catch (error) {
+        setRunToast({ message: error?.message || `${file.name} 读取失败`, type: "error" });
       }
     }
     if (preparedItems.length) {
@@ -5292,9 +5640,161 @@ const Workbench = () => {
     });
   };
 
-  const updateNodeData = (id, d) => setNodes((p) => p.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...d } } : n)));
+  const updateNodeData = useCallback(
+    (id, d) => setNodes((p) => p.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...d } } : n))),
+    [setNodes],
+  );
 
+  const runStoryboardInputFromFiles = useCallback(
+    async (nodeId, files) => {
+      const sourceNode = nodesRef.current.find((node) => node.id === nodeId);
+      const fileList = Array.from(files || []).filter(Boolean);
+      if (!sourceNode || !fileList.length) return;
 
+      const documents = [];
+      const rejectedNames = [];
+      updateNodeData(nodeId, {
+        status: "running",
+        error: "",
+        summary: "",
+        progressLabel: "正在读取剧本文件",
+        scriptFileName: fileList.map((file) => file.name).filter(Boolean).join("，"),
+      });
+
+      try {
+        for (const file of fileList) {
+          if (!isAgentComposerDocumentFile(file)) {
+            rejectedNames.push(file.name || "未知文件");
+            continue;
+          }
+          if (Number(file.size || 0) > AGENT_DOCUMENT_MAX_BYTES) {
+            throw new Error(`${file.name} 超过 5MB，先精简剧本文件再上传`);
+          }
+          const textContent = await readAgentDocumentText(file);
+          if (!textContent) {
+            rejectedNames.push(file.name || "空文件");
+            continue;
+          }
+          documents.push({
+            name: file.name || "storyboard-script.txt",
+            mime_type: getAgentDocumentMimeType(file),
+            kind: "storyboard_script_table",
+            text_content: textContent,
+          });
+        }
+
+        if (!documents.length) {
+          throw new Error(rejectedNames.length ? `未读取到可用剧本文件：${rejectedNames.join("，")}` : "未读取到可用剧本文件");
+        }
+
+        updateNodeData(nodeId, { progressLabel: "正在提交故事板设计任务" });
+        const currentNodes = nodesRef.current || [];
+        const storyboardCount = currentNodes.filter((node) => node?.type === NODE_TYPES.STORYBOARD_PLAN).length;
+        const response = await sendAgentMessage(
+          {
+            message: `请将拖入的剧本文件生成可编辑故事板：${documents.map((item) => item.name).join("，")}`,
+            currentNodes: cloneDeep(currentNodes),
+            currentConnections: cloneDeep(connectionsRef.current || []),
+            canvasId,
+            threadId: canvasId,
+            uploadedDocuments: documents,
+            canvasNodeHints: { storyboard_count: storyboardCount },
+          },
+          apiFetch,
+          { intent: "STORYBOARD", product: "", sessionId: activeAgentSession?.id || "" },
+        );
+
+        if (!(response?.intent === "tool_call" && response?.async_task?.task_id)) {
+          throw new Error(String(response?.message || response?.error || "Agent 未返回故事板任务"));
+        }
+
+        updateNodeData(nodeId, { progressLabel: "AI 正在拆解场景和镜头" });
+        const taskResult = await pollStoryboardTask(String(response.async_task.task_id), apiFetch, (status) => {
+          if (status === "running") {
+            updateNodeData(nodeId, { progressLabel: "故事板设计中，正在组织镜头节奏" });
+          }
+        });
+
+        const rawPatch = Array.isArray(taskResult?.patch) ? taskResult.patch : [];
+        if (!rawPatch.length) {
+          throw new Error("故事板任务完成但没有返回画布节点");
+        }
+
+        const storyboardOp = rawPatch.find((op) => op?.op === "add_node" && op?.node?.type === NODE_TYPES.STORYBOARD_PLAN);
+        const targetX = Number(sourceNode.x || 0) + 440;
+        const targetY = Number(sourceNode.y || 0);
+        const dx = storyboardOp?.node ? targetX - Number(storyboardOp.node.x || 0) : 0;
+        const dy = storyboardOp?.node ? targetY - Number(storyboardOp.node.y || 0) : 0;
+        const storyboardNodeIds = [];
+        const positionedPatch = rawPatch.map((op) => {
+          if (op?.op !== "add_node" || !op?.node) return op;
+          const nextNode = {
+            ...op.node,
+            x: Number(op.node.x || 0) + dx,
+            y: Number(op.node.y || 0) + dy,
+          };
+          if (nextNode.type === NODE_TYPES.STORYBOARD_PLAN) {
+            storyboardNodeIds.push(String(nextNode.id || "").trim());
+            nextNode.data = {
+              ...(nextNode.data || {}),
+              source_storyboard_input_node_id: nodeId,
+            };
+          }
+          return { ...op, node: nextNode };
+        });
+
+        const firstStoryboardNodeId = storyboardNodeIds.find(Boolean) || "";
+        const workflowPatch = enhanceStoryboardPatchWithProductionWorkflow(positionedPatch, {
+          sourceNodeId: nodeId,
+          createSourceNode: false,
+        });
+
+        pushHistory();
+        const patchResult = _applyPatch(workflowPatch);
+        if (patchResult?.nodes && patchResult?.connections) {
+          upsertCanvasDraftSnapshot({
+            nodes: patchResult.nodes,
+            connections: patchResult.connections,
+            viewport: patchResult.viewport || viewportRef.current,
+          });
+        }
+
+        updateNodeData(nodeId, {
+          status: "success",
+          error: "",
+          progressLabel: "",
+          summary: String(taskResult?.summary || "已生成可编辑故事板").trim(),
+          generatedStoryboardNodeIds: storyboardNodeIds,
+        });
+        setRunToast({ message: String(taskResult?.summary || "故事板已生成").trim(), type: "info" });
+        window.setTimeout(() => setRunToast(null), 2200);
+        if (firstStoryboardNodeId) {
+          window.setTimeout(() => focusCanvasNode(firstStoryboardNodeId), 80);
+        }
+      } catch (error) {
+        updateNodeData(nodeId, {
+          status: "error",
+          error: error?.message || String(error || "故事板生成失败"),
+          progressLabel: "",
+        });
+        setRunToast({ message: error?.message || "故事板生成失败", type: "error" });
+      }
+    },
+    [
+      _applyPatch,
+      activeAgentSession?.id,
+      apiFetch,
+      canvasId,
+      connectionsRef,
+      focusCanvasNode,
+      nodesRef,
+      pushHistory,
+      setRunToast,
+      updateNodeData,
+      upsertCanvasDraftSnapshot,
+      viewportRef,
+    ],
+  );
 
   const startConnection = (e, nid) => {
     e.preventDefault();
@@ -6162,6 +6662,25 @@ const Workbench = () => {
                     delete resolvedParamPayload.ai_image_param_ratio_id;
                   }
                   const authorizationInfo = resolveMemberAuthorizationInfo();
+                  const apiRoot = (API_BASE || "").replace(/\/+$/, "");
+                  const resolvedInputImages = await Promise.all(
+                    inputImages.map(async (url) => {
+                      if (typeof url === "string" && url.startsWith("/main_assets/")) {
+                        try {
+                          const resp = await fetch(`${apiRoot}${url}`);
+                          const blob = await resp.blob();
+                          return await new Promise((resolve) => {
+                            const reader = new FileReader();
+                            reader.onload = () => resolve(reader.result);
+                            reader.readAsDataURL(blob);
+                          });
+                        } catch {
+                          return url;
+                        }
+                      }
+                      return url;
+                    })
+                  );
                   const proxyPayload = {
                     authorization: authorizationInfo?.value || "",
                     history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || "",
@@ -6170,7 +6689,7 @@ const Workbench = () => {
                     ai_chat_session_id: aiChatSessionIdRef.current || "",
                     ai_chat_model_id: modelId,
                     message: promptToUse,
-                    images: inputImages,
+                    images: resolvedInputImages,
                     ...resolvedParamPayload,
                   };
                   if (!proxyPayload.authorization) {
@@ -6753,7 +7272,7 @@ const Workbench = () => {
             id: "node_input",
             icon: Plus,
             label: "输入",
-            desc: "提示词 / 图像创作 / 视频创作",
+            desc: "提示词 / 故事板 / 图像创作 / 视频创作",
             color: "text-yellow-400",
             bg: "bg-yellow-500/10",
             onClick: () => {},
@@ -7288,6 +7807,51 @@ const Workbench = () => {
                                     <DramaMarkdownBlock value={turn.response?.text || ""} className="space-y-1.5" />
                                   </div>
                                 </div>
+                              ) : turn?.intent === "SCRIPT_EXTRACTION" ? (
+                                <div className="space-y-2">
+                                  <div className="text-slate-600">{turn.assistantText || "已从剧本中提取分镜信息，请确认后继续。"}</div>
+                                  <ScriptExtractionCard
+                                    data={turn.response}
+                                    confirmed={Boolean(turn.extractionConfirmed)}
+                                    onConfirm={() => {
+                                      updateAgentTurn(turn.id, { extractionConfirmed: true });
+                                      confirmScriptExtraction(turn.response);
+                                    }}
+                                  />
+                                </div>
+                              ) : turn?.intent === "ASSET_GEN_CONFIRM" ? (
+                                <div className="space-y-2">
+                                  <div className="text-slate-600">{turn.assistantText || "是否要生成角色与场景参考设定图？"}</div>
+                                  <AssetGenConfirmCard
+                                    data={turn.response}
+                                    confirmed={Boolean(turn.assetGenConfirmed)}
+                                    onConfirm={() => {
+                                      updateAgentTurn(turn.id, { assetGenConfirmed: true });
+                                      buildAssetCanvas(turn.response);
+                                    }}
+                                    onSkip={() => {
+                                      updateAgentTurn(turn.id, { assetGenConfirmed: true });
+                                      skipToShotWorkflow(turn.response);
+                                    }}
+                                  />
+                                </div>
+                              ) : turn?.intent === "ASSET_CANVAS_BUILT" ? (
+                                <div className="space-y-2">
+                                  <div className="text-slate-600">{turn.assistantText || turn.response?.summary || "已在画布上创建参考设定图组。"}</div>
+                                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] text-slate-500">
+                                    已创建 {turn.response?.char_count || 0} 个角色/道具组和 {turn.response?.scene_count || 0} 个场景组，点击运行即可生成参考图。
+                                  </div>
+                                </div>
+                              ) : turn?.intent === "SHOT_WORKFLOW" ? (
+                                <div className="space-y-2">
+                                  <div className="text-slate-600">{turn.assistantText || turn.response?.summary || "已搭建分镜出图工作流。"}</div>
+                                  {turn.response?.annotated_script ? (
+                                    <ShotAnnotatedScriptBlock script={turn.response.annotated_script} />
+                                  ) : null}
+                                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] text-slate-500">
+                                    已为 {(turn.response?.shots || []).length} 个分镜搭建出图节点，资产已自动绑定。
+                                  </div>
+                                </div>
                               ) : (
                                 <>
                                   <ScriptPlanSummary brief={normalizeScriptBrief(turn.scriptBrief || {})} />
@@ -7322,7 +7886,7 @@ const Workbench = () => {
                                   >
                                     定位故事板
                                   </button>
-                                ) : (
+                                ) : turn?.intent !== "SCRIPT_EXTRACTION" && turn?.intent !== "ASSET_GEN_CONFIRM" && turn?.intent !== "ASSET_CANVAS_BUILT" ? (
                                   <button
                                     type="button"
                                     onClick={() => focusAgentResultCard(turn.id)}
@@ -7330,8 +7894,8 @@ const Workbench = () => {
                                   >
                                     {relatedCard?.minimized ? "恢复结果卡片" : "定位结果卡片"}
                                   </button>
-                                )}
-                                {turn?.intent !== "STORYBOARD" && relatedCard && !relatedCard.minimized && (
+                                ) : null}
+                                {turn?.intent !== "STORYBOARD" && turn?.intent !== "SCRIPT_EXTRACTION" && turn?.intent !== "ASSET_GEN_CONFIRM" && turn?.intent !== "ASSET_CANVAS_BUILT" && relatedCard && !relatedCard.minimized && (
                                   <button
                                     type="button"
                                     onClick={() => minimizeAgentResultCard(relatedCard.id)}
@@ -8411,6 +8975,23 @@ const Workbench = () => {
                 type="button"
                 className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
                 onClick={() => {
+                  setActiveSidebarItemKey("node_storyboard_input");
+                  setSidebarNodeInputMenu(null);
+                  safeInvoke(() => addNode(NODE_TYPES.STORYBOARD_INPUT), "故事板输入");
+                }}
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#EEF7F6] text-[#0F766E]">
+                  <Clapperboard className="h-[18px] w-[18px]" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-medium text-slate-800">故事板输入</div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">拖入剧本文件，自动生成可编辑故事板</div>
+                </div>
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
+                onClick={() => {
                   setActiveSidebarItemKey("node_image_generate");
                   setSidebarNodeInputMenu(null);
                   safeInvoke(() => addNode(NODE_TYPES.PROCESSOR, "image_creation"), "图像创作");
@@ -8883,7 +9464,9 @@ const Workbench = () => {
 	              </div>
 	            ) : null}
 
-	            {nodes.map((n) => (
+	            {[...nodes].sort((a, b) =>
+              a.type === "group_container" ? -1 : b.type === "group_container" ? 1 : 0
+            ).map((n) => (
               <NodeComponent
                 key={n.id}
                 node={n}
@@ -8935,6 +9518,7 @@ const Workbench = () => {
                 onStoryboardMentionHover={openStoryboardAssetHoverCard}
                 onStoryboardMentionLeave={scheduleCloseStoryboardAssetHoverCard}
                 onShotChipClick={openStoryboardShotHoverCard}
+                onStoryboardScriptFiles={runStoryboardInputFromFiles}
                 setRunToast={setRunToast}
               />
             ))}

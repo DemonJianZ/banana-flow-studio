@@ -18,6 +18,9 @@ def _route_after_plan(state: dict) -> str:
 
 
 _STORYBOARD_TOOL_NAMES = {"storyboard.design", "agent_storyboard_design"}
+_SHOT_WORKFLOW_TOOL_NAMES = {"shot_workflow.compose", "agent_shot_workflow_compose"}
+_SCRIPT_EXTRACT_TOOL_NAMES = {"shot_workflow.extract"}
+_ASSET_CANVAS_TOOL_NAMES = {"shot_workflow.build_asset_canvas"}
 
 
 def _route_after_classify(state: dict) -> str:
@@ -29,8 +32,14 @@ def _route_after_classify(state: dict) -> str:
 
 
 def _route_after_tool(state: dict) -> str:
-    """Conditional edge: execute_tool_call → execute_storyboard OR build_response."""
+    """Conditional edge: execute_tool_call → specialist executor OR build_response."""
     tool_name = str(state.get("tool_name") or "").strip()
     if tool_name in _STORYBOARD_TOOL_NAMES:
         return "execute_storyboard"
+    if tool_name in _SHOT_WORKFLOW_TOOL_NAMES:
+        return "execute_shot_workflow"
+    if tool_name in _SCRIPT_EXTRACT_TOOL_NAMES:
+        return "execute_script_extract"
+    if tool_name in _ASSET_CANVAS_TOOL_NAMES:
+        return "execute_build_asset_canvas"
     return "build_response"

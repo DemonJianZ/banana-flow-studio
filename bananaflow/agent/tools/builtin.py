@@ -144,6 +144,14 @@ def _load_storyboard_components():
     return design_storyboard
 
 
+def _load_shot_workflow_components():
+    try:
+        from ...agent_v2.shot_workflow import compose_shot_workflow
+    except Exception:  # pragma: no cover
+        from agent_v2.shot_workflow import compose_shot_workflow
+    return compose_shot_workflow
+
+
 def _load_google_types():
     try:
         from google.genai import types
@@ -265,6 +273,49 @@ def _tool_specs() -> List[Tuple[AgentToolSpec, Any]]:
                 tags=["storyboard", "creative", "agent"],
             ),
             _handle_storyboard_design,
+        ),
+        (
+            AgentToolSpec(
+                name="agent_shot_workflow_compose",
+                description="Compose executable text-to-image or image-to-image canvas workflows for each screenplay shot. This builds shot image generation nodes, not a storyboard plan.",
+                aliases=["shot_workflow.compose"],
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "source_text": {"type": "string"},
+                        "source_documents": {"type": "array", "items": {"type": "object"}},
+                        "aspect_ratio": {"type": "string"},
+                        "mode_policy": {"type": "string"},
+                        "max_shots": {"type": "integer", "minimum": 1, "maximum": 24},
+                        "selected_artifact": {"type": "object"},
+                        "current_nodes": {"type": "array", "items": {"type": "object"}},
+                        "current_connections": {"type": "array", "items": {"type": "object"}},
+                    },
+                    "required": ["source_text"],
+                    "additionalProperties": False,
+                },
+                output_schema={
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "shots": {"type": "array", "items": {"type": "object"}},
+                        "patch": {"type": "array", "items": {"type": "object"}},
+                        "warnings": {"type": "array", "items": {"type": "string"}},
+                        "tool_version": {"type": "string"},
+                        "tool_hash": {"type": "string"},
+                    },
+                    "required": ["kind", "summary", "shots", "patch", "warnings", "tool_version", "tool_hash"],
+                    "additionalProperties": True,
+                },
+                annotations={"readOnlyHint": False, "idempotentHint": True, "destructiveHint": False},
+                category="canvas",
+                timeout_seconds=30.0,
+                retry={"max_attempts": 1},
+                cost_level="low",
+                tags=["shot", "workflow", "canvas", "text2img", "img2img"],
+            ),
+            _handle_shot_workflow_compose,
         ),
         (
             AgentToolSpec(
@@ -657,6 +708,11 @@ def _handle_retrieval_search_eval_cases(args: Dict[str, Any], context: AgentTool
         filters=dict(args.get("filters") or {}),
         eval_cases_path=(str(args.get("eval_cases_path") or "").strip() or None),
     )
+
+
+def _handle_shot_workflow_compose(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:
+    compose_shot_workflow = _load_shot_workflow_components()
+    return compose_shot_workflow(dict(args or {}))
 
 
 def _handle_storyboard_design(args: Dict[str, Any], context: AgentToolContext) -> Dict[str, Any]:

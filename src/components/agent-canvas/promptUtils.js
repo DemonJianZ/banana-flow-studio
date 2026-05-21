@@ -2,12 +2,6 @@ const PROMPT_MODES = new Set(["text2img", "local_text2img", "multi_image_generat
 const USER_PROMPT_MARKER = "补充画面提示词：";
 
 const cleanText = (value) => String(value ?? "").trim();
-const stripPromptPrefix = (value) =>
-  cleanText(value)
-    .replace(/^edit the input image:\s*/i, "")
-    .replace(/^refine the image:\s*/i, "")
-    .trim();
-
 const joinPromptParts = (parts) => parts.map(cleanText).filter(Boolean).join(", ");
 
 export const extractCanvasSupplementalPrompt = (userPrompt, supplementalPrompt = "") => {

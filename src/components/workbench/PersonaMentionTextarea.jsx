@@ -4,7 +4,7 @@ import { EMPTY_LIST } from "../../constants/workbench.jsx";
 
 const getActivePersonaMentionQuery = (text, caretIndex) => {
   const beforeCaret = String(text || "").slice(0, Math.max(0, Number(caretIndex) || 0));
-  const match = /(^|[\s，。,.!?;；：:（(【\[])\@([^\s@，。,.!?;；：:）)】\]]*)$/.exec(beforeCaret);
+  const match = /(^|[\s，。,.!?;；：:（(【]|\[)@([^\s@，。,.!?;；：:）)】\]]*)$/.exec(beforeCaret);
   if (!match) return null;
   return {
     start: beforeCaret.length - match[2].length - 1,
@@ -150,7 +150,8 @@ const PersonaMentionTextarea = React.forwardRef(({
   }, [mentionState, suggestions.length]);
 
   useEffect(() => {
-    updatePopupPosition();
+    const frame = window.requestAnimationFrame(() => updatePopupPosition());
+    return () => window.cancelAnimationFrame(frame);
   }, [updatePopupPosition, value]);
 
   useEffect(() => {

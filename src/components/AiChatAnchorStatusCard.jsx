@@ -39,8 +39,6 @@ export default function AiChatAnchorStatusCard() {
   const [visible, setVisible] = useState(() => readAgentDevMode());
 
   useEffect(() => {
-    setState(readAiChatAnchorDebugState());
-    setVisible(readAgentDevMode());
     const handleStorage = (event) => {
       if (!event.key || event.key === "bananaflow_ai_chat_anchor_debug_v1") {
         setState(readAiChatAnchorDebugState());

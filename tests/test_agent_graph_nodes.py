@@ -258,6 +258,13 @@ class TestRouter(unittest.TestCase):
             "build_response",
         )
 
+    def test_shot_workflow_tool_routes_to_shot_workflow(self):
+        from agent_v2.graph.router import _route_after_tool
+        self.assertEqual(
+            _route_after_tool({"tool_name": "shot_workflow.compose", "exec_data": {}}),
+            "execute_shot_workflow",
+        )
+
 
 class TestExecuteChitchat(unittest.TestCase):
     def test_calls_chitchat_tool_and_sets_response_text(self):
@@ -335,6 +342,46 @@ class TestExecuteToolCall(unittest.TestCase):
         ):
             result = execute_tool_call(state)
         self.assertEqual(result["exec_response_text"], "fallback response")
+
+    def test_delegates_storyboard_tool_to_storyboard_node(self):
+        from agent_v2.graph.nodes.execute_tool import execute_tool_call
+        from unittest import mock
+
+        state = {
+            "message": "生成故事板",
+            "tool_name": "storyboard.design",
+            "tool_args": {"brief": "剧本", "_existing_storyboard_count": 1},
+            "thread_id": "t1",
+            "member_authorization": "",
+            "trace": [],
+        }
+        with mock.patch("agent_v2.graph.nodes.execute_tool._run_tool") as run_tool:
+            result = execute_tool_call(state)
+
+        run_tool.assert_not_called()
+        self.assertEqual(result["exec_warnings"], [])
+        self.assertEqual(result["exec_data"], {})
+        self.assertEqual(result["trace"][-1]["delegated_to"], "execute_storyboard")
+
+    def test_delegates_shot_workflow_tool_to_shot_workflow_node(self):
+        from agent_v2.graph.nodes.execute_tool import execute_tool_call
+        from unittest import mock
+
+        state = {
+            "message": "搭建分镜出图工作流",
+            "tool_name": "shot_workflow.compose",
+            "tool_args": {"source_text": "剧本"},
+            "thread_id": "t1",
+            "member_authorization": "",
+            "trace": [],
+        }
+        with mock.patch("agent_v2.graph.nodes.execute_tool._run_tool") as run_tool:
+            result = execute_tool_call(state)
+
+        run_tool.assert_not_called()
+        self.assertEqual(result["exec_warnings"], [])
+        self.assertEqual(result["exec_data"], {})
+        self.assertEqual(result["trace"][-1]["delegated_to"], "execute_shot_workflow")
 
 
 class TestExecuteStoryboard(unittest.TestCase):

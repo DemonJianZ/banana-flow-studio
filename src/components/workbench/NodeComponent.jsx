@@ -58,6 +58,7 @@ import {
   checkNodeReady,
 } from "../../constants/workbench.jsx";
 import { polishCanvasPrompt } from "../../api/agentCanvas";
+import { downloadMedia } from "../../lib/downloadMedia";
 import { isVideoContent } from "../../lib/mediaType.js";
 import { buildRoleProfileStructuredOutput } from "../../lib/roleProfileStructurer.js";
 import { API_BASE } from "../../config";
@@ -127,6 +128,7 @@ const NodeComponent = ({
   onStoryboardMentionHover,
   onStoryboardMentionLeave,
   onShotChipClick,
+  onStoryboardScriptFiles,
   setRunToast,
 }) => {
   const [showCopied, setShowCopied] = useState(false);
@@ -158,8 +160,10 @@ const NodeComponent = ({
   const [inlineImageParamLoading, setInlineImageParamLoading] = useState(false);
   const [inlineImageParamError, setInlineImageParamError] = useState("");
   const [isUploadDropActive, setIsUploadDropActive] = useState(false);
+  const [storyboardDropActive, setStoryboardDropActive] = useState(false);
   const nodeRootRef = useRef(null);
   const simpleMediaUploadInputRef = useRef(null);
+  const storyboardScriptInputRef = useRef(null);
   const videoLastFrameInputRef = useRef(null);
 
   useEffect(() => {
@@ -174,6 +178,33 @@ const NodeComponent = ({
   const simpleMediaDropTitle = inputMediaKind === "image" ? "拖拽图片到此，或点击上传" : inputMediaKind === "video" ? "拖拽视频到此，或点击上传" : "拖拽媒体到此，或点击上传";
   const simpleMediaSupportHint = inputMediaKind === "image" ? "支持 JPG / PNG / WebP / GIF" : inputMediaKind === "video" ? "支持 MP4 / MOV / WebM" : "支持常见图片与视频格式";
   const readSimpleMediaUploadFiles = readFilesAsDataUrls;
+
+  const submitStoryboardScriptFiles = useCallback(
+    (files) => {
+      const list = Array.from(files || []).filter(Boolean);
+      if (!list.length || node.data.status === "running") return;
+      onStoryboardScriptFiles?.(node.id, list);
+    },
+    [node.data.status, node.id, onStoryboardScriptFiles],
+  );
+
+  const handleStoryboardScriptInputChange = useCallback(
+    (event) => {
+      submitStoryboardScriptFiles(event.target.files);
+      event.target.value = "";
+    },
+    [submitStoryboardScriptFiles],
+  );
+
+  const handleStoryboardScriptDrop = useCallback(
+    (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setStoryboardDropActive(false);
+      submitStoryboardScriptFiles(event.dataTransfer?.files);
+    },
+    [submitStoryboardScriptFiles],
+  );
 
   const handleFileUpload = (e) => {
     const files = Array.from(e.target.files || []).filter((file) => {
@@ -199,11 +230,6 @@ const NodeComponent = ({
     },
     [],
   );
-
-  const removeImage = (index) => {
-    const newImages = (node.data.images || []).filter((_, i) => i !== index);
-    updateData(node.id, { images: newImages });
-  };
 
   const downloadAll = () => {
     (node.data.images || []).forEach((img, i) => {
@@ -275,10 +301,12 @@ const NodeComponent = ({
   const isInput = node.type === NODE_TYPES.INPUT;
   const isOutput = node.type === NODE_TYPES.OUTPUT;
   const isTextInputNode = node.type === NODE_TYPES.TEXT_INPUT;
+  const isStoryboardInputNode = node.type === NODE_TYPES.STORYBOARD_INPUT;
   const isStoryboardPlanNode = node.type === NODE_TYPES.STORYBOARD_PLAN;
   const isLocalAssetImageNode = node.type === NODE_TYPES.LOCAL_ASSET_IMAGE;
   const isRoleInputNode = node.type === NODE_TYPES.ROLE_INPUT;
   const isRoleStructurerNode = node.type === NODE_TYPES.ROLE_STRUCTURER;
+  const isGroupContainer = node.type === NODE_TYPES.GROUP_CONTAINER;
   const isCompactInput = isInput && !!node.data.compact;
   const isSimpleMediaInputNode = isInput && !isCompactInput;
   const isInlineText2ImgNode = isProcessor && node.data.mode === "text2img";
@@ -293,6 +321,12 @@ const NodeComponent = ({
     node.data.model ||
     "";
   const fallbackVideoModelId = videoModelOptions[0]?.id || "";
+  const resolveAssetUrl = (url) => {
+    if (url && url.startsWith("/main_assets/")) {
+      return `${(API_BASE || "").replace(/\/+$/, "")}${url}`;
+    }
+    return url;
+  };
   const normalizedHoveredConnectHandle = normalizeConnectionTargetHandle(hoveredConnectTarget?.toHandle);
   const isMainInputTargetHighlighted =
     connecting &&
@@ -830,6 +864,7 @@ const NodeComponent = ({
   if (isPostProcessor) title = node.data.title || TOOL_CARDS[node.data.mode]?.name || "后期增强";
   if (isVideoGen) title = node.data.title || TOOL_CARDS[node.data.mode]?.name || "视频生成";
   if (isTextInputNode) title = "提示词";
+  if (isStoryboardInputNode) title = "故事板输入";
   if (isRoleStructurerNode) title = "角色结构化";
   if (isLocalAssetImageNode) title = String(node.data?.title || node.data?.character_name || "本地素材").trim();
 
@@ -957,13 +992,13 @@ const NodeComponent = ({
     ? "ring-1 ring-cyan-200/90 shadow-[0_28px_64px_rgba(6,182,212,0.12)]"
     : "";
   const showFloatingDeleteButton = Boolean(onDelete);
-  const showFloatingRetryButton = !isCompactInput && !isTextInputNode && !isRoleInputNode && !isRoleStructurerNode && !isSimpleMediaInputNode && !isInlineImageGenNode && !isOutput && node.data.status === "error";
+  const showFloatingRetryButton = !isCompactInput && !isTextInputNode && !isStoryboardInputNode && !isRoleInputNode && !isRoleStructurerNode && !isSimpleMediaInputNode && !isInlineImageGenNode && !isOutput && node.data.status === "error";
   const nodeZIndex = isVideoGen ? 120 : selected ? 20 : undefined;
   const nodeShellStyle = {
     left: node.x,
     top: node.y,
     zIndex: nodeZIndex,
-    ...(isStoryboardPlanNode ? { width: 1280, maxWidth: 1280 } : isLocalAssetImageNode ? { width: 200, maxWidth: 200 } : {}),
+    ...(isStoryboardPlanNode ? { width: 1280, maxWidth: 1280 } : isStoryboardInputNode ? { width: 380, maxWidth: 380 } : isLocalAssetImageNode ? { width: 200, maxWidth: 200 } : {}),
   };
   const handleStoryboardWheelCapture = isStoryboardPlanNode
     ? (event) => {
@@ -973,6 +1008,10 @@ const NodeComponent = ({
   const nodeShellClass = isTextInputNode
     ? `absolute w-[320px] overflow-visible rounded-[16px] border bg-white shadow-[0_18px_42px_rgba(15,23,42,0.08)] flex flex-col transition-colors duration-200 ${
         node.data.status === "error" ? "border-rose-300" : selected ? "border-cyan-300" : "border-slate-200"
+      } ${selectedNodeShellClass}`
+    : isStoryboardInputNode
+    ? `absolute w-[380px] overflow-visible rounded-[20px] border bg-white shadow-[0_20px_46px_rgba(15,23,42,0.10)] flex flex-col transition-colors duration-200 ${
+        node.data.status === "error" ? "border-rose-300" : node.data.status === "running" ? "border-cyan-300 ring-1 ring-cyan-100" : selected ? "border-cyan-300" : "border-slate-200"
       } ${selectedNodeShellClass}`
     : isRoleInputNode
     ? `absolute h-[76px] w-[76px] overflow-visible rounded-full border bg-white shadow-[0_16px_36px_rgba(15,23,42,0.12)] flex items-center justify-center transition-colors duration-200 ${
@@ -1003,6 +1042,37 @@ const NodeComponent = ({
         selected ? "border-cyan-300" : "border-[#E5E7EB]"
       } ${selectedNodeShellClass}`
     : `absolute ${isCompactInput ? "w-[292px] overflow-visible rounded-[16px] border-slate-200" : "w-[280px] overflow-visible rounded-[16px]"} border bg-white backdrop-blur-xl shadow-[0_24px_56px_rgba(15,23,42,0.12)] flex flex-col transition-colors transition-shadow duration-200 ${statusColor}`;
+
+  if (isGroupContainer) {
+    const gw = Number(node.data.width) || 800;
+    const gh = Number(node.data.height) || 400;
+    return (
+      <div
+        ref={nodeRootRef}
+        className="absolute"
+        style={{ left: node.x, top: node.y, width: gw, height: gh, zIndex: 0, userSelect: "none" }}
+        onMouseDown={onMouseDown}
+      >
+        <div
+          className="w-full h-full rounded-2xl"
+          style={{
+            background: "rgba(15, 23, 42, 0.72)",
+            border: selected ? "1.5px solid rgba(6,182,212,0.45)" : "1px solid rgba(51,65,85,0.55)",
+            boxShadow: selected ? "0 0 0 2px rgba(6,182,212,0.1)" : "inset 0 1px 0 rgba(255,255,255,0.03)",
+          }}
+        >
+          {node.data.title && (
+            <div
+              className="px-4 pt-3.5 text-[11px] font-semibold tracking-widest uppercase"
+              style={{ color: "rgba(148,163,184,0.9)", letterSpacing: "0.1em" }}
+            >
+              {node.data.title}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -1437,7 +1507,7 @@ const NodeComponent = ({
         </button>
       )}
 
-      <div className={`${isRoleInputNode ? "p-1.5" : isCompactInput ? "nodrag space-y-2 p-1.5" : isTextInputNode || isSimpleMediaInputNode ? "p-0" : isInlineImageGenNode ? "space-y-3 p-3" : "space-y-3 p-4"}`}>
+      <div className={`${isRoleInputNode ? "p-1.5" : isCompactInput ? "nodrag space-y-2 p-1.5" : isTextInputNode || isStoryboardInputNode || isSimpleMediaInputNode ? "p-0" : isInlineImageGenNode ? "space-y-3 p-3" : "space-y-3 p-4"}`}>
         {isRoleInputNode ? (
           <div className="flex h-16 w-16 items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-slate-100">
             {node.data.referenceImage ? (
@@ -1528,7 +1598,7 @@ const NodeComponent = ({
           </div>
         ) : null}
         {/* Error */}
-        {node.data.status === "error" && !isTextInputNode && !isRoleInputNode && !isRoleStructurerNode && !isSimpleMediaInputNode && (
+        {node.data.status === "error" && !isTextInputNode && !isStoryboardInputNode && !isRoleInputNode && !isRoleStructurerNode && !isSimpleMediaInputNode && (
           <div className="rounded-[22px] border border-rose-200 bg-rose-50 px-3 py-2.5 text-xs text-rose-700 flex flex-col gap-2 animate-in fade-in zoom-in-95">
             <div className="flex items-start gap-2">
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-500" />
@@ -2010,7 +2080,7 @@ const NodeComponent = ({
                               onMouseDown={(e) => e.stopPropagation()}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                onPreview?.(img);
+                                onPreview?.(resolveAssetUrl(img));
                               }}
                               title="预览视频"
                               aria-label="预览视频"
@@ -2019,7 +2089,7 @@ const NodeComponent = ({
                               <span>预览</span>
                             </button>
 	                          <video
-	                            src={img}
+	                            src={resolveAssetUrl(img)}
 	                            className="block h-auto max-h-[420px] w-full cursor-pointer bg-black object-contain"
                               draggable={false}
                               onDragStart={(e) => e.preventDefault()}
@@ -2057,7 +2127,7 @@ const NodeComponent = ({
                             onMouseDown={(e) => e.stopPropagation()}
                             onClick={(e) => {
                               e.stopPropagation();
-                              onPreview?.(img);
+                              onPreview?.(resolveAssetUrl(img));
                             }}
                             title="预览图片"
                             aria-label="预览图片"
@@ -2066,7 +2136,7 @@ const NodeComponent = ({
                             <span>预览</span>
                           </button>
                           <img
-                            src={img}
+                            src={resolveAssetUrl(img)}
                             className="block h-auto max-h-[420px] w-full cursor-pointer object-contain"
                             draggable={false}
                             onDragStart={(e) => e.preventDefault()}
@@ -2222,6 +2292,106 @@ const NodeComponent = ({
                 </div>
               )}
             </div>
+          </div>
+        )}
+
+        {isStoryboardInputNode && (
+          <div
+            className="nodrag p-3"
+            onMouseDown={(e) => e.stopPropagation()}
+            onDragEnter={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              if (node.data.status !== "running") setStoryboardDropActive(true);
+            }}
+            onDragOver={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              if (node.data.status !== "running") setStoryboardDropActive(true);
+            }}
+            onDragLeave={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              if (!event.currentTarget.contains(event.relatedTarget)) setStoryboardDropActive(false);
+            }}
+            onDrop={handleStoryboardScriptDrop}
+          >
+            <input
+              ref={storyboardScriptInputRef}
+              type="file"
+              multiple
+              accept=".csv,.tsv,.txt,.md,.markdown,.docx,.doc,text/csv,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword"
+              className="hidden"
+              onChange={handleStoryboardScriptInputChange}
+            />
+
+            {node.data.status === "running" ? (
+              <div className="relative min-h-[238px] overflow-hidden rounded-[16px] border border-cyan-200 bg-slate-950 px-4 py-4 text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]">
+                <div className="pointer-events-none absolute inset-0 opacity-45 [background-image:linear-gradient(rgba(34,211,238,0.13)_1px,transparent_1px),linear-gradient(90deg,rgba(34,211,238,0.13)_1px,transparent_1px)] [background-size:22px_22px]" />
+                <div className="pointer-events-none absolute left-0 top-0 h-full w-full animate-pulse bg-[linear-gradient(110deg,transparent_0%,rgba(34,211,238,0.10)_38%,rgba(16,185,129,0.16)_50%,rgba(251,191,36,0.10)_62%,transparent_100%)]" />
+                <div className="relative flex items-start gap-4">
+                  <div className="relative mt-1 h-16 w-16 shrink-0">
+                    <div className="absolute inset-0 animate-[spin_1.4s_linear_infinite] rounded-full bg-[conic-gradient(from_180deg,rgba(34,211,238,0.05),rgba(34,211,238,0.95),rgba(16,185,129,0.88),rgba(251,191,36,0.72),rgba(34,211,238,0.05))]" />
+                    <div className="absolute inset-[5px] rounded-full bg-slate-950" />
+                    <div className="absolute inset-[17px] rounded-full border border-cyan-300/60 bg-cyan-300/10" />
+                    <Sparkles className="absolute left-1/2 top-1/2 h-5 w-5 -translate-x-1/2 -translate-y-1/2 text-cyan-100" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13px] font-semibold text-cyan-50">故事板生成中</div>
+                    <div className="mt-1 text-[11px] leading-5 text-cyan-100/75">
+                      {node.data.progressLabel || "正在拆解剧本结构、场景节奏和镜头顺序"}
+                    </div>
+                    <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/10">
+                      <div className="h-full w-full animate-pulse rounded-full bg-[linear-gradient(90deg,#22d3ee,#10b981,#fbbf24,#22d3ee)]" />
+                    </div>
+                    <div className="mt-3 grid grid-cols-3 gap-1.5 text-[10px] text-cyan-100/70">
+                      <div className="rounded-[8px] border border-white/10 bg-white/[0.06] px-2 py-1.5">剧本解析</div>
+                      <div className="rounded-[8px] border border-white/10 bg-white/[0.06] px-2 py-1.5">场景规划</div>
+                      <div className="rounded-[8px] border border-white/10 bg-white/[0.06] px-2 py-1.5">镜头设计</div>
+                    </div>
+                  </div>
+                </div>
+                <div className="relative mt-4 rounded-[12px] border border-white/10 bg-white/[0.06] px-3 py-2 text-[10px] leading-5 text-cyan-50/75">
+                  {node.data.scriptFileName ? `输入文件：${node.data.scriptFileName}` : "等待剧本文件读取完成"}
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => storyboardScriptInputRef.current?.click()}
+                disabled={node.data.status === "running"}
+                className={`flex min-h-[238px] w-full flex-col items-center justify-center rounded-[16px] border border-dashed px-5 py-5 text-center transition-colors ${
+                  storyboardDropActive
+                    ? "border-cyan-300 bg-cyan-50 text-cyan-700"
+                    : node.data.status === "error"
+                    ? "border-rose-200 bg-rose-50 text-rose-700"
+                    : node.data.status === "success"
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                    : "border-slate-200 bg-slate-50 text-slate-600 hover:border-cyan-200 hover:bg-cyan-50/60"
+                }`}
+              >
+                <div className={`flex h-12 w-12 items-center justify-center rounded-full border bg-white ${
+                  node.data.status === "error" ? "border-rose-200 text-rose-500" : node.data.status === "success" ? "border-emerald-200 text-emerald-600" : "border-slate-200 text-cyan-600"
+                }`}>
+                  {node.data.status === "error" ? <AlertCircle className="h-5 w-5" /> : node.data.status === "success" ? <CheckCircle2 className="h-5 w-5" /> : <Upload className="h-5 w-5" />}
+                </div>
+                <div className="mt-3 text-[13px] font-semibold text-slate-800">
+                  {node.data.status === "success" ? "故事板已生成" : node.data.status === "error" ? "生成失败，点击重试上传" : "拖拽剧本文件到这里"}
+                </div>
+                <div className="mt-1.5 max-w-[280px] text-[11px] leading-5 text-slate-500">
+                  {node.data.status === "success"
+                    ? (node.data.summary || "已接入故事板制作流程，可在画布中继续编辑。")
+                    : node.data.status === "error"
+                    ? (node.data.error || "请检查文件内容后重新拖入。")
+                    : "支持 csv / tsv / txt / md / docx；拖入后自动解析剧本并生成可编辑故事板。"}
+                </div>
+                {node.data.scriptFileName ? (
+                  <div className="mt-3 max-w-full truncate rounded-full border border-slate-200 bg-white px-3 py-1 text-[10px] text-slate-500">
+                    {node.data.scriptFileName}
+                  </div>
+                ) : null}
+              </button>
+            )}
           </div>
         )}
 
@@ -2385,6 +2555,36 @@ const NodeComponent = ({
                 </div>
               ) : null}
 
+              {node.data?.workflow_mode === "storyboard_image_production" ? (
+                <div className="mt-3 rounded-[12px] border border-cyan-200 bg-cyan-50/80 px-3 py-2.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-cyan-800">
+                      <Sparkles className="h-3.5 w-3.5" />
+                      分镜图生产工作流
+                    </div>
+                    <span className="rounded-full border border-cyan-200 bg-white px-2 py-0.5 text-[10px] text-cyan-700">已就绪</span>
+                  </div>
+                  <div className="mt-2 grid grid-cols-4 gap-1.5">
+                    {(Array.isArray(node.data?.workflow_steps) ? node.data.workflow_steps : []).map((step, index) => {
+                      const status = String(step?.status || "ready").trim();
+                      const isDone = status === "success";
+                      return (
+                        <div key={step?.id || index} className="rounded-[9px] border border-white/70 bg-white px-2 py-1.5">
+                          <div className="flex items-center gap-1 text-[10px] font-medium text-slate-700">
+                            {isDone ? <CheckCircle2 className="h-3 w-3 text-emerald-500" /> : <ArrowRight className="h-3 w-3 text-cyan-500" />}
+                            <span className="truncate">{String(step?.label || `步骤 ${index + 1}`).trim()}</span>
+                          </div>
+                          {step?.count ? <div className="mt-0.5 text-[9px] text-slate-400">{step.count} 项</div> : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {String(node.data?.workflow_summary || "").trim() ? (
+                    <div className="mt-2 text-[10px] leading-5 text-cyan-800/80">{String(node.data.workflow_summary).trim()}</div>
+                  ) : null}
+                </div>
+              ) : null}
+
               <div className="mt-3 grid grid-cols-[240px_240px_minmax(0,1fr)] gap-3 items-start">
                 <div className="min-h-0 rounded-[12px] border border-slate-200 bg-white p-2.5">
                   <div className="text-[11px] font-semibold text-slate-700">角色与主体设定</div>
@@ -2497,9 +2697,6 @@ const NodeComponent = ({
                     {(() => {
                       const scenes = Array.isArray(node.data?.storyboard_plan?.scenes)
                         ? node.data.storyboard_plan.scenes
-                        : [];
-                      const locations = Array.isArray(node.data?.storyboard_plan?.entities?.locations)
-                        ? node.data.storyboard_plan.entities.locations
                         : [];
                       if (!scenes.length) {
                         return (
@@ -2841,7 +3038,7 @@ const NodeComponent = ({
 
       {/* Ports */}
       <div className="pointer-events-none absolute top-1/2 w-full -translate-y-1/2 flex justify-between px-0">
-        {node.type !== NODE_TYPES.INPUT && !isTextInputNode && !isStoryboardPlanNode && !isRoleInputNode && !isLocalAssetImageNode && (
+        {node.type !== NODE_TYPES.INPUT && !isTextInputNode && !isStoryboardInputNode && !isStoryboardPlanNode && !isRoleInputNode && !isLocalAssetImageNode && (
           <div className="pointer-events-auto relative -translate-x-1/2">
             <div
               onMouseEnter={() => onConnectTargetHover?.(VIDEO_GEN_INPUT_HANDLE_MAIN)}

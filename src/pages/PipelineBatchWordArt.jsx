@@ -477,7 +477,7 @@ const PipelineBatchWordArt = () => {
       const outputUrl = data.video || data.image || data.images?.[0];
       if (!outputUrl) throw new Error("未返回动图结果");
       updateResult(item.id, { videoStatus: "success", videoUrl: outputUrl, videoError: null });
-    } catch (err) {
+    } catch {
       updateResult(item.id, { videoStatus: "error", videoError: MOTION_FAILURE_MESSAGE });
     }
   }, [apiFetch, updateResult, videoResolution]);

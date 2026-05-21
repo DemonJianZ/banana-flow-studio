@@ -14,7 +14,6 @@ const toHeaderValue = (value) => {
     .trim();
   if (!raw) return "";
   try {
-    // eslint-disable-next-line no-new
     new Headers({ "x-check": raw });
     return raw;
   } catch {

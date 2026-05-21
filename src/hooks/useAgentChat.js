@@ -5,6 +5,8 @@ import {
   normalizePromptPolishVariants,
   getAgentResultCardWidth,
   AGENT_RUN_STEPS,
+  STORYBOARD_RUN_STEPS,
+  SHOT_WORKFLOW_RUN_STEPS,
   DRAMA_RUN_STEPS,
   normalizeScriptBrief,
   EMPTY_LIST,
@@ -208,7 +210,10 @@ export function useAgentChat({ apiFetch, onRunToastRef } = {}) {
           const turnsNext = (session.turns || []).map((turn) => {
             if (turn.status !== "running") return turn;
             hasRunning = true;
-            const stepCount = turn?.intent === "DRAMA" ? DRAMA_RUN_STEPS.length : AGENT_RUN_STEPS.length;
+            let stepCount = AGENT_RUN_STEPS.length;
+            if (turn?.intent === "DRAMA") stepCount = DRAMA_RUN_STEPS.length;
+            if (turn?.intent === "STORYBOARD") stepCount = STORYBOARD_RUN_STEPS.length;
+            if (turn?.intent === "SHOT_WORKFLOW") stepCount = SHOT_WORKFLOW_RUN_STEPS.length;
             return {
               ...turn,
               stepIndex: ((turn.stepIndex || 0) + 1) % stepCount,
@@ -233,6 +238,7 @@ export function useAgentChat({ apiFetch, onRunToastRef } = {}) {
     const resultTurns = agentTurns.filter(
       (turn) => ["done", "error"].includes(turn?.status) && turn?.intent !== "STORYBOARD",
     );
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- result cards are derived session state kept for drag/minimize UI state.
     setAgentResultCards((prev) => {
       const prevByTurnId = new Map(prev.map((item) => [item.turnId, item]));
       return resultTurns.map((turn, idx) => {

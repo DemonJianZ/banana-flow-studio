@@ -5,6 +5,7 @@ import json
 import re
 import uuid
 from typing import Any, Callable, Dict, Optional
+from urllib.parse import unquote
 
 from .prompts import (
     build_entity_design_prompt,
@@ -330,6 +331,74 @@ def build_storyboard_canvas_patch(
         ],
         "summary": f"已生成分镜方案：{plan_title}（{scene_count} 场景 {shot_count} 分镜）",
     }
+
+
+def build_character_asset_nodes(
+    plan: StoryboardPlan | Dict[str, Any] | None,
+    *,
+    storyboard_x: int = _STORYBOARD_NODE_X_ORIGIN,
+) -> list[Dict[str, Any]]:
+    """Build canvas add_node ops for bound character three-view assets."""
+    try:
+        if isinstance(plan, StoryboardPlan):
+            payload = plan.model_dump(mode="json")
+        elif isinstance(plan, dict):
+            payload = dict(plan or {})
+        else:
+            return []
+
+        bindings = payload.get("local_asset_bindings")
+        if not isinstance(bindings, dict):
+            return []
+
+        character_bindings = bindings.get("character_bindings")
+        if not isinstance(character_bindings, list):
+            return []
+
+        try:
+            base_x = max(0, int(storyboard_x))
+        except Exception:
+            base_x = _STORYBOARD_NODE_X_ORIGIN
+
+        ops: list[Dict[str, Any]] = []
+        for index, binding in enumerate(character_bindings):
+            if not isinstance(binding, dict):
+                continue
+            url = str(binding.get("three_view_url") or "").strip()
+            if not url:
+                continue
+
+            character_name = str(binding.get("character_name") or "").strip()
+            entity_name = str(binding.get("entity_name") or "").strip()
+            raw_name = str(url or binding.get("three_view_path") or "").replace("\\", "/")
+            asset_name = unquote(raw_name.rsplit("/", 1)[-1]).strip()
+            display_name = character_name or entity_name or asset_name or "角色"
+            title = f"{display_name} 三视图"
+
+            ops.append(
+                {
+                    "op": "add_node",
+                    "node": {
+                        "id": f"local_asset_image_{uuid.uuid4().hex[:10]}",
+                        "type": "local_asset_image",
+                        "x": base_x + index * 240,
+                        "y": 360,
+                        "data": {
+                            "title": title,
+                            "asset_type": "character_three_view",
+                            "character_name": character_name,
+                            "entity_name": entity_name,
+                            "asset_name": asset_name,
+                            "url": url,
+                            "source": "storyboard_local_asset_binding",
+                            "binding": binding,
+                        },
+                    },
+                }
+            )
+        return ops
+    except Exception:
+        return []
 
 
 def build_stage_input(state: Dict[str, Any]) -> Dict[str, Any]:

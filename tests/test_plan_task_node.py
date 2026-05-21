@@ -91,6 +91,32 @@ class TestPlanTaskNode(unittest.TestCase):
         tp = result["task_plan"]
         self.assertEqual(tp["target_agent"], "execute_chitchat")
 
+    def test_shot_workflow_plan_keeps_deterministic_task_type(self):
+        from agent_v2.graph.nodes.plan_task import plan_task
+        from unittest import mock
+
+        state = self._make_state(
+            intent="tool_call",
+            tool_name="shot_workflow.compose",
+            message="把剧本搭建成出图工作流",
+        )
+        stale_llm = {
+            "intent": "tool.storyboard",
+            "task_type": "generate_storyboard",
+            "user_goal": "生成故事板",
+            "action": "生成",
+            "expected_output": "async_task",
+        }
+        with mock.patch("agent_v2.graph.nodes.plan_task._call_planner_llm", return_value=stale_llm) as call_llm:
+            result = plan_task(state)
+
+        call_llm.assert_not_called()
+        tp = result["task_plan"]
+        self.assertEqual(tp["task_type"], "compose_shot_image_workflow")
+        self.assertEqual(tp["user_goal"], "把剧本搭建成出图工作流")
+        self.assertEqual(tp["action"], "搭建")
+        self.assertEqual(tp["expected_output"], "canvas_patch")
+
 
 class TestRouterAfterPlan(unittest.TestCase):
     def _plan_state(self, target_agent: str) -> dict:

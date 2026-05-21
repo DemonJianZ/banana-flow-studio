@@ -27,6 +27,22 @@ export const AGENT_RUN_STEPS = [
   "生成剪辑计划",
 ];
 
+export const STORYBOARD_RUN_STEPS = [
+  "读取剧本",
+  "拆分场景",
+  "设计镜头",
+  "匹配资产",
+  "搭建生产工作流",
+];
+
+export const SHOT_WORKFLOW_RUN_STEPS = [
+  "读取剧本",
+  "拆分镜头",
+  "判断文生图/图生图",
+  "生成镜头提示词",
+  "搭建出图工作流",
+];
+
 export const DRAMA_RUN_STEPS = [
   "理解需求",
   "创作短剧",
@@ -387,8 +403,15 @@ export const buildInitialScriptBrief = (missionText, product = "") => {
 // ==========================================
 export const getAgentResultCardWidth = () => AGENT_RESULT_CARD_WIDTH;
 
+export const getAgentTurnSteps = (turn) => {
+  if (turn?.intent === "DRAMA") return DRAMA_RUN_STEPS;
+  if (turn?.intent === "STORYBOARD") return STORYBOARD_RUN_STEPS;
+  if (turn?.intent === "SHOT_WORKFLOW") return SHOT_WORKFLOW_RUN_STEPS;
+  return AGENT_RUN_STEPS;
+};
+
 export const getAgentTurnStepLabel = (turn) => {
-  const steps = turn?.intent === "DRAMA" ? DRAMA_RUN_STEPS : AGENT_RUN_STEPS;
+  const steps = getAgentTurnSteps(turn);
   return steps[Math.min(turn?.stepIndex || 0, steps.length - 1)];
 };
 
@@ -398,6 +421,7 @@ export const getAgentTurnStepLabel = (turn) => {
 export const NODE_TYPES = {
   INPUT: "input",
   TEXT_INPUT: "text_input",
+  STORYBOARD_INPUT: "storyboard_input",
   STORYBOARD_PLAN: "storyboard_plan",
   LOCAL_ASSET_IMAGE: "local_asset_image",
   ROLE_INPUT: "role_input",
@@ -405,8 +429,8 @@ export const NODE_TYPES = {
   PROCESSOR: "processor",
   POST_PROCESSOR: "post_processor",
   VIDEO_GEN: "video_gen",
-  PANORAMA_VIEWER: "panorama_viewer",
   OUTPUT: "output",
+  GROUP_CONTAINER: "group_container",
 };
 
 export const HIDDEN_IMAGE_CONFIG_MODES = new Set([
@@ -923,6 +947,7 @@ export const normalizeVideoSplitSegments = (segments, durationSec = 0) => {
 export const checkNodeReady = (node, nodes, connections) => {
   if (node.type === NODE_TYPES.INPUT) return (node.data.images?.length || 0) > 0;
   if (node.type === NODE_TYPES.TEXT_INPUT) return (node.data.text?.length || 0) > 0;
+  if (node.type === NODE_TYPES.STORYBOARD_INPUT) return String(node.data?.status || "idle") === "success";
   if (node.type === NODE_TYPES.STORYBOARD_PLAN) return true;
   if (node.type === NODE_TYPES.ROLE_INPUT) return Boolean(node.data.personaId || node.data.referenceImage || node.data.text);
   if (node.type === NODE_TYPES.ROLE_STRUCTURER) {
@@ -932,12 +957,6 @@ export const checkNodeReady = (node, nodes, connections) => {
         String(node.data.relationshipNetwork || "").trim() ||
         String(node.data.worldviewBackground || "").trim()
     );
-  }
-  if (node.type === NODE_TYPES.PANORAMA_VIEWER) {
-    if (node.data.image) return true;
-    const inputConns = connections.filter((c) => c.to === node.id);
-    const sourceNodes = inputConns.map((c) => nodes.find((n) => n.id === c.from)).filter(Boolean);
-    return sourceNodes.some((n) => (n.data.images?.length || 0) > 0 || (n.data.uploadedImages?.length || 0) > 0);
   }
   if (node.type === NODE_TYPES.OUTPUT) return true;
 

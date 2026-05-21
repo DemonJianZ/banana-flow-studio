@@ -148,6 +148,10 @@ video_split_tasks: Dict[str, Dict[str, Any]] = {}
 video_split_tasks_lock = threading.Lock()
 _tracer = _otel_trace.get_tracer(__name__) if _otel_trace else None
 _AI_CHAT_TASK_RETRY_BACKOFFS = (2, 5, 10)
+try:
+    _STORYBOARD_SHOT_PROMPT_TIMEOUT_SEC = max(1.0, float(os.getenv("STORYBOARD_SHOT_PROMPT_TIMEOUT_SEC", "8")))
+except Exception:
+    _STORYBOARD_SHOT_PROMPT_TIMEOUT_SEC = 8.0
 init_ai_chat_tasks_store(AI_CHAT_TASK_DB_PATH)
 mark_stale_ai_chat_tasks(
     AI_CHAT_TASK_DB_PATH,
@@ -619,6 +623,13 @@ def _materialize_image_to_task_file(image_value: str, *, task_id: str, index: in
     if text.startswith("data:"):
         mime_type, image_bytes = parse_data_url(text)
         source = "data_url"
+    elif text.startswith("/main_assets/"):
+        rel = unquote(text[len("/main_assets/"):])
+        local_path = Path(__file__).parent.parent / "main_assets" / rel
+        with open(local_path, "rb") as f:
+            image_bytes = f.read()
+        mime_type = mimetypes.guess_type(str(local_path))[0] or "image/png"
+        source = "local_asset"
     else:
         with urllib.request.urlopen(text, timeout=20) as resp:
             image_bytes = resp.read()
@@ -1271,6 +1282,12 @@ def _materialize_image_to_temp_file(image_value: str, req_id: str, index: int) -
         raise ValueError(f"image[{index}] 为空")
     if text.startswith("data:"):
         mime_type, image_bytes = parse_data_url(text)
+    elif text.startswith("/main_assets/"):
+        rel = unquote(text[len("/main_assets/"):])
+        local_path = Path(__file__).parent.parent / "main_assets" / rel
+        with open(local_path, "rb") as f:
+            image_bytes = f.read()
+        mime_type = mimetypes.guess_type(str(local_path))[0] or "image/png"
     else:
         with urllib.request.urlopen(text, timeout=20) as resp:
             image_bytes = resp.read()
@@ -3008,6 +3025,17 @@ def _build_shot_prompt_context(req: _StoryboardShotGenerateRequest) -> str:
     return "\n".join(lines)
 
 
+def _fallback_shot_generation_prompt(req: _StoryboardShotGenerateRequest) -> tuple[str, list[str]]:
+    shot = req.shot or {}
+    plan = req.storyboard_plan or {}
+    style = str(plan.get("style") or "").strip()
+    vis = str(shot.get("visual_description") or "").strip()
+    parts = [p for p in [style, vis] if p]
+    fallback_prompt = ", ".join(parts) or "storyboard shot illustration"
+    fallback_urls = [str(img.url or "").strip() for img in req.reference_images if str(img.url or "").strip()][:4]
+    return fallback_prompt, fallback_urls
+
+
 def _write_shot_generation_prompt(
     req: _StoryboardShotGenerateRequest,
     req_id: str,
@@ -3045,16 +3073,43 @@ def _write_shot_generation_prompt(
             raise ValueError("empty prompt from LLM")
         resolved_urls = [url_by_name[n] for n in selected_names[:4] if n in url_by_name]
         return prompt_text, resolved_urls
-    except Exception:
-        shot = req.shot or {}
-        plan = req.storyboard_plan or {}
-        style = str(plan.get("style") or "").strip()
-        vis = str(shot.get("visual_description") or "").strip()
-        parts = [p for p in [style, vis] if p]
-        fallback_prompt = ", ".join(parts) or "storyboard shot illustration"
-        fallback_urls = [str(img.url or "").strip() for img in req.reference_images if str(img.url or "").strip()][:4]
-        return fallback_prompt, fallback_urls
+    except Exception as exc:
+        sys_logger.warning(
+            json.dumps(
+                {
+                    "event": "storyboard_shot_prompt_fallback",
+                    "req_id": req_id,
+                    "model": MODEL_AGENT_CHAT,
+                    "reason": str(exc)[:300],
+                },
+                ensure_ascii=False,
+            )
+        )
+        return _fallback_shot_generation_prompt(req)
 
+
+async def _write_shot_generation_prompt_bounded(
+    req: _StoryboardShotGenerateRequest,
+    req_id: str,
+) -> tuple[str, list[str]]:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_write_shot_generation_prompt, req, req_id),
+            timeout=_STORYBOARD_SHOT_PROMPT_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        sys_logger.warning(
+            json.dumps(
+                {
+                    "event": "storyboard_shot_prompt_timeout",
+                    "req_id": req_id,
+                    "model": MODEL_AGENT_CHAT,
+                    "timeout_sec": _STORYBOARD_SHOT_PROMPT_TIMEOUT_SEC,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return _fallback_shot_generation_prompt(req)
 
 @router.post("/api/storyboard/generate_shot", response_model=AIChatImageTaskSubmitResponse)
 async def storyboard_generate_shot(body: _StoryboardShotGenerateRequest, request: Request):
@@ -3068,9 +3123,7 @@ async def storyboard_generate_shot(body: _StoryboardShotGenerateRequest, request
 
     task_id = f"ai_chat_task_{uuid.uuid4().hex}"
 
-    prompt_text, resolved_image_urls = await asyncio.to_thread(
-        _write_shot_generation_prompt, body, req_id
-    )
+    prompt_text, resolved_image_urls = await _write_shot_generation_prompt_bounded(body, req_id)
 
     request_form: Dict[str, Any] = {
         "endpoint": AI_CHAT_DOWNSTREAM_URL,

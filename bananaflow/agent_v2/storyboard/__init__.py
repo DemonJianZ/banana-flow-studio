@@ -1,10 +1,14 @@
-from .designer import build_storyboard_canvas_patch, design_storyboard
+from .asset_binder import bind_local_assets_to_plan
+from .designer import build_character_asset_nodes, build_storyboard_canvas_patch, design_storyboard
 from .graph import StoryboardGraphState, run_storyboard_graph
 from .script_table import format_script_rows_for_prompt, looks_like_storyboard_script_table, parse_storyboard_script_table
 from .schemas import (
+    LocalCharacterBinding,
+    LocalSceneBinding,
     StoryboardDialogue,
     StoryboardEntity,
     StoryboardEntities,
+    StoryboardLocalAssetBindings,
     StoryboardPlan,
     StoryboardScene,
     StoryboardShot,
@@ -17,9 +21,14 @@ __all__ = [
     "StoryboardEntity",
     "StoryboardEntities",
     "StoryboardGraphState",
+    "StoryboardLocalAssetBindings",
     "StoryboardPlan",
     "StoryboardScene",
     "StoryboardShot",
+    "LocalCharacterBinding",
+    "LocalSceneBinding",
+    "bind_local_assets_to_plan",
+    "build_character_asset_nodes",
     "build_storyboard_canvas_patch",
     "design_storyboard",
     "format_script_rows_for_prompt",

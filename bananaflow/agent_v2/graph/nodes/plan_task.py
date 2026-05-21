@@ -28,6 +28,10 @@ def _deterministic_task_plan(state: dict) -> dict[str, Any]:
         task_type = "generate_storyboard"
         action = "生成"
         expected_output = "async_task"
+    elif tool_name in {"shot_workflow.compose", "agent_shot_workflow_compose"}:
+        task_type = "compose_shot_image_workflow"
+        action = "搭建"
+        expected_output = "canvas_patch"
     elif tool_name == "prompt.polish":
         task_type = "polish_prompt"
         action = "润色"
@@ -127,8 +131,10 @@ def _merge_llm_into_plan(base: dict[str, Any], llm: dict[str, Any]) -> dict[str,
         value = llm.get(field)
         if value is None:
             continue
-        # Protect async_task expected_output (e.g. storyboard) from LLM downgrade.
-        if field == "expected_output" and base.get("expected_output") == "async_task":
+        # Protect deterministic specialist outputs from LLM downgrade or stale labels.
+        if field == "expected_output" and base.get("expected_output") in {"async_task", "canvas_patch"}:
+            continue
+        if base.get("task_type") == "compose_shot_image_workflow" and field in {"intent", "task_type", "action", "user_goal"}:
             continue
         # Discard unrecognised intent values — they would corrupt trace routing.
         if field == "intent" and value not in _INTENT_TO_TARGET_AGENT:
@@ -142,12 +148,14 @@ def plan_task(state: dict) -> dict:
     trace = list(state.get("trace") or [])
 
     base_plan = _deterministic_task_plan(state)
-    llm_result = _call_planner_llm(state)
-
-    if llm_result is not None:
-        task_plan = _merge_llm_into_plan(base_plan, llm_result)
-    else:
+    if base_plan.get("task_type") == "compose_shot_image_workflow":
         task_plan = base_plan
+    else:
+        llm_result = _call_planner_llm(state)
+        if llm_result is not None:
+            task_plan = _merge_llm_into_plan(base_plan, llm_result)
+        else:
+            task_plan = base_plan
 
     trace_entry: dict[str, Any] = {
         "type": "PLAN_TASK",

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -75,6 +75,41 @@ class StoryboardEntities(BaseModel):
     locations: List[StoryboardEntity] = Field(default_factory=list)
 
 
+class LocalCharacterBinding(BaseModel):
+    entity_id: str = ""
+    entity_name: str = ""
+    character_name: str = ""
+    three_view_path: Optional[str] = None
+    three_view_url: Optional[str] = None
+    voice_path: Optional[str] = None
+    voice_url: Optional[str] = None
+    match_score: float = 0.0
+    match_reason: str = ""
+    confidence: float = 0.0
+    match_status: str = "matched"
+    reason_codes: List[str] = Field(default_factory=list)
+    alias_used: Optional[str] = None
+
+
+class LocalSceneBinding(BaseModel):
+    folder_name: str = ""
+    folder_path: str = ""
+    preview_paths: List[str] = Field(default_factory=list)
+    preview_urls: List[str] = Field(default_factory=list)
+    matched_from: str = ""
+    match_score: float = 0.0
+    match_reason: str = ""
+
+
+class StoryboardLocalAssetBindings(BaseModel):
+    character_bindings: List[LocalCharacterBinding] = Field(default_factory=list)
+    scene_bindings: List[LocalSceneBinding] = Field(default_factory=list)
+    missing_characters: List[str] = Field(default_factory=list)
+    missing_scenes: List[str] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    asset_root_used: str = ""
+
+
 class StoryboardPlan(BaseModel):
     title: str
     aspect_ratio: str = "16:9"
@@ -87,6 +122,7 @@ class StoryboardPlan(BaseModel):
     global_notes: List[str] = Field(default_factory=list)
     design_rationale: str = ""
     warnings: List[str] = Field(default_factory=list)
+    local_asset_bindings: Optional[StoryboardLocalAssetBindings] = None
 
 
 def storyboard_plan_json_schema() -> Dict[str, Any]:

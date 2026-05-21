@@ -6,6 +6,7 @@ from typing import Any
 
 
 _STORYBOARD_KEYWORDS = ("分镜", "故事板", "storyboard", "shot list", "镜头脚本", "镜头设计")
+_SHOT_WORKFLOW_KEYWORDS = ("文生图", "图生图", "出图", "生图", "图片生成", "工作流", "workflow", "画布", "节点")
 _PROMISE_MARKERS = ("我将", "我会", "为您生成", "为你生成", "调用", "分镜草稿", "故事板设计工具")
 
 
@@ -53,8 +54,10 @@ def _coordinator_system_prompt() -> str:
         "2.1 如果你判断应该调用工具，就直接输出 tool_call，不要只在 answer 里承诺“我将调用工具/我会生成/接下来为你设计”。\n"
         "3. 没有明显工具匹配时，不要硬选工具，输出 answer_only。\n"
         "4. tool_name 必须来自 capability catalog。\n"
-        "4.1 如果用户明确要分镜设计、故事板、shot list、镜头规划，优先使用 storyboard.design，而不是只做口头回复。\n"
-        "4.2 如果用户消息本身是一段分镜头脚本表、镜头表、shot table、csv/tsv 风格镜头清单，即使没有明确说“生成故事板”，也优先理解为要整理成 storyboard，并使用 storyboard.design。\n"
+        "4.1 如果用户明确要搭建每个分镜/镜头的文生图、图生图、出图、图片生成画布工作流，优先使用 shot_workflow.compose。\n"
+        "4.2 shot_workflow.compose 只搭建 text_input/input/processor/output 这类出图工作流节点，不生成 storyboard_plan。\n"
+        "4.3 如果用户明确要分镜设计、故事板、shot list、镜头规划，但没有要求搭建出图工作流，才使用 storyboard.design。\n"
+        "4.4 如果用户消息本身是一段剧本，并要求出图/生图/文生图/图生图/工作流/画布节点，使用 shot_workflow.compose。\n"
         "5. 只输出 JSON，不要输出解释。\n\n"
         "JSON 格式：{"
         "\"action\":\"answer_only|tool_call\","
@@ -159,6 +162,13 @@ def _looks_like_storyboard_request(state: dict) -> bool:
     return any(kw in text for kw in _STORYBOARD_KEYWORDS)
 
 
+def _looks_like_shot_workflow_request(state: dict) -> bool:
+    text = _collect_context_text(state).lower()
+    has_shot_context = any(kw in text for kw in _STORYBOARD_KEYWORDS) or any(kw in text for kw in ("剧本", "镜头"))
+    has_workflow_context = any(kw.lower() in text for kw in _SHOT_WORKFLOW_KEYWORDS)
+    return has_shot_context and has_workflow_context
+
+
 def _decision_is_promise_only(payload: dict) -> bool:
     if str(payload.get("action") or "") != "answer_only":
         return False
@@ -209,12 +219,24 @@ def classify_intent(state: dict) -> dict:
     tool_name = str(payload.get("tool_name") or "").strip()
     tool_args = dict(payload.get("tool_args") or {})
 
-    # Guard: storyboard promise → force tool_call
-    if _looks_like_storyboard_request(state) and _decision_is_promise_only(payload):
+    # Guard: workflow/storyboard promise → force tool_call
+    if _looks_like_shot_workflow_request(state) and _decision_is_promise_only(payload):
+        from agent_v2.graph.nodes.normalize import _extract_shot_workflow_args
+        action = "tool_call"
+        tool_name = "shot_workflow.compose"
+        tool_args = _extract_shot_workflow_args(state)
+        rule = "guard.shot_workflow_tool_call"
+    elif _looks_like_storyboard_request(state) and _decision_is_promise_only(payload):
         action = "tool_call"
         tool_name = "storyboard.design"
         tool_args = _extract_storyboard_args(state)
         rule = "guard.storyboard_tool_call"
+    elif action == "tool_call" and tool_name in {"shot_workflow.compose", "agent_shot_workflow_compose"}:
+        from agent_v2.graph.nodes.normalize import _extract_shot_workflow_args
+        args = _extract_shot_workflow_args(state)
+        args.update({k: v for k, v in tool_args.items() if v not in (None, "", [], {})})
+        tool_args = args
+        rule = "llm_coordinator"
     elif action == "tool_call" and tool_name in {"storyboard.design", "agent_storyboard_design"}:
         args = _extract_storyboard_args(state)
         args.update({k: v for k, v in tool_args.items() if v not in (None, "", [], {})})
