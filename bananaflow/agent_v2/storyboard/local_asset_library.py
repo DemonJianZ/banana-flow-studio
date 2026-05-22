@@ -62,10 +62,19 @@ class LocalSceneRecord:
 
 
 @dataclass
+class LocalPropRecord:
+    """One prop entry from 道具/ scan."""
+    name: str                              # e.g. "云影镜"
+    three_view_path: Optional[str] = None  # relative: "道具/云影镜三视图.png"
+    three_view_url: Optional[str] = None   # "/main_assets/道具/云影镜三视图.png"
+
+
+@dataclass
 class LocalAssetManifest:
     """Top-level manifest returned by scan_local_assets()."""
     characters: List[LocalCharacterRecord] = field(default_factory=list)
     scenes: List[LocalSceneRecord] = field(default_factory=list)
+    props: List[LocalPropRecord] = field(default_factory=list)
     root: str = ""       # the asset_root that was scanned
     warnings: List[str] = field(default_factory=list)
 
@@ -182,6 +191,31 @@ def _scan_voices(root: Path, records: dict, warnings: List[str]) -> None:
         rec.voice_url = _asset_url(rel)
 
 
+def _scan_props(root: Path, warnings: List[str]) -> List[LocalPropRecord]:
+    """Scan 道具/ for prop three-view images (same naming convention as 人物/)."""
+    prop_dir = root / "道具"
+    if not prop_dir.is_dir():
+        return []
+    props: List[LocalPropRecord] = []
+    for f in sorted(prop_dir.iterdir()):
+        if not f.is_file():
+            continue
+        if f.suffix.lower() not in _IMAGE_EXTS:
+            continue
+        if f.name in _SKIP_NAMES or f.name.startswith("."):
+            continue
+        name = _extract_name_three_view(f.stem) if "三视图" in f.stem else f.stem.strip()
+        if not name:
+            continue
+        rel = f"道具/{f.name}"
+        props.append(LocalPropRecord(
+            name=name,
+            three_view_path=rel,
+            three_view_url=_asset_url(rel),
+        ))
+    return props
+
+
 def _scan_scenes(root: Path, warnings: List[str]) -> List[LocalSceneRecord]:
     """Scan 场景/ for scene records.
 
@@ -283,10 +317,17 @@ def scan_local_assets(asset_root: "Path | str | None" = None) -> LocalAssetManif
     except Exception as exc:
         warnings.append(f"场景扫描失败: {exc}")
 
+    props: List[LocalPropRecord] = []
+    try:
+        props = _scan_props(root, warnings)
+    except Exception as exc:
+        warnings.append(f"道具扫描失败: {exc}")
+
     characters = sorted(records.values(), key=lambda r: r.name)
     return LocalAssetManifest(
         characters=characters,
         scenes=scenes,
+        props=props,
         root=str(root),
         warnings=warnings,
     )

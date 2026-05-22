@@ -111,7 +111,34 @@ def match_asset_entities(entities: list[dict]) -> dict:
         eid = str(entity.get("entity_id") or "").strip()
 
         if etype == "prop":
-            unmatched.append(dict(entity))
+            best_score, best_rec = 0.0, None
+            for rec in manifest.props:
+                s = _name_score(name, rec.name)
+                if s > best_score and rec.three_view_url:
+                    best_score = s
+                    best_rec = rec
+            if best_score >= 1.0 and best_rec:
+                matched.append({
+                    "entity_id": eid,
+                    "name": name,
+                    "entity_type": etype,
+                    "description": entity.get("description") or "",
+                    "asset_id": _make_asset_id(best_rec.three_view_path or best_rec.three_view_url or ""),
+                    "url": best_rec.three_view_url,
+                    "score": best_score,
+                })
+            elif best_score >= 0.5 and best_rec:
+                candidates.append({
+                    "entity_id": eid,
+                    "name": name,
+                    "entity_type": etype,
+                    "description": entity.get("description") or "",
+                    "url": best_rec.three_view_url,
+                    "score": best_score,
+                    "reason": "partial_name_match",
+                })
+            else:
+                unmatched.append(dict(entity))
             continue
 
         if etype == "character":
