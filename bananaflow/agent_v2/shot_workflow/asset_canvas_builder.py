@@ -145,16 +145,18 @@ def match_asset_entities(entities: list[dict]) -> dict:
             continue
 
         if etype == "scene":
-            active_chars: set[str] = set()
-            location_texts = [name]
-            best_score, best_rec, best_loc = 0.0, None, ""
-            for loc in location_texts:
-                for rec in manifest.scenes:
-                    s = _scene_score(loc, rec.folder_name, active_chars)
-                    if s > best_score:
-                        best_score = s
-                        best_rec = rec
-                        best_loc = loc
+            active_chars: set[str] = {
+                str(e.get("name") or "").strip()
+                for e in entities
+                if str(e.get("entity_type") or "").strip() == "character"
+                and str(e.get("name") or "").strip()
+            }
+            best_score, best_rec = 0.0, None
+            for rec in manifest.scenes:
+                s = _scene_score(name, rec.folder_name, active_chars)
+                if s > best_score:
+                    best_score = s
+                    best_rec = rec
             if best_score >= 1.0 and best_rec and best_rec.preview_urls:
                 matched.append({
                     "entity_id": eid,
