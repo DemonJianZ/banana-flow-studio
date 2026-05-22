@@ -1,12 +1,23 @@
 from __future__ import annotations
 
-from agent_v2.shot_workflow.asset_canvas_builder import (
-    build_asset_canvas_patch,
-    _build_placeholder_asset_patch,
-    make_entity_id,
-    match_asset_entities,
-)
-from agent_v2.shot_workflow.asset_design_prompter import generate_design_prompts
+import logging
+
+logger = logging.getLogger(__name__)
+
+try:
+    from agent_v2.shot_workflow.asset_canvas_builder import (
+        build_asset_canvas_patch,
+        _build_placeholder_asset_patch,
+        make_entity_id,
+        match_asset_entities,
+    )
+    from agent_v2.shot_workflow.asset_design_prompter import generate_design_prompts
+except ImportError:
+    build_asset_canvas_patch = None  # type: ignore[assignment]
+    _build_placeholder_asset_patch = None  # type: ignore[assignment]
+    make_entity_id = None  # type: ignore[assignment]
+    match_asset_entities = None  # type: ignore[assignment]
+    generate_design_prompts = None  # type: ignore[assignment]
 
 
 def _extract_entities(tool_args: dict) -> list[dict]:
@@ -109,7 +120,8 @@ def execute_build_asset_canvas(state: dict) -> dict:
     # 2. Batch match against asset library
     try:
         match_result = match_asset_entities(entities)
-    except Exception:
+    except Exception as exc:
+        logger.warning("match_asset_entities failed, treating all entities as unmatched: %s", exc)
         match_result = {"matched": [], "unmatched": list(entities), "candidates": []}
 
     # 3. Generate design prompts for unmatched + candidate entities
@@ -122,7 +134,8 @@ def execute_build_asset_canvas(state: dict) -> dict:
     # 5. Build canvas patch (with fallback)
     try:
         patch = build_asset_canvas_patch(enriched, current_nodes=current_nodes, mode_policy=mode_policy)
-    except Exception:
+    except Exception as exc:
+        logger.warning("build_asset_canvas_patch failed, using placeholder patch: %s", exc)
         patch = _build_placeholder_asset_patch(enriched, current_nodes)
 
     # 6. Compute summary counts
