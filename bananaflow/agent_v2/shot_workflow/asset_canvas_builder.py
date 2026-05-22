@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 import uuid
 from typing import Any
+
+from agent_v2.storyboard.local_asset_library import scan_local_assets
 
 
 def make_entity_id(entity_type: str, name: str, occurrence: int = 1) -> str:
@@ -45,6 +48,143 @@ def _name_score(query: str, target: str) -> float:
     return 0.0
 
 
+def _normalize_location(text: str) -> str:
+    return re.sub(r"(?<=[一-鿿㐀-䶿])的(?=[一-鿿㐀-䶿])", "", str(text or ""))
+
+
+def _cjk_tokens(text: str) -> set[str]:
+    chars = re.findall(r"[一-鿿㐀-䶿]", text)
+    tokens: set[str] = set()
+    for n in (2, 3):
+        for i in range(len(chars) - n + 1):
+            tokens.add("".join(chars[i: i + n]))
+    return tokens
+
+
+def _scene_score(location_text: str, folder_name: str, active_char_names: set[str]) -> float:
+    score = 0.0
+    f, loc = folder_name.strip(), location_text.strip()
+    if not f or not loc:
+        return 0.0
+    f_norm = _normalize_location(f)
+    loc_norm = _normalize_location(loc)
+    if f in loc or (f_norm and f_norm in loc_norm):
+        score += 3.0
+    elif loc in f or (loc_norm and loc_norm in f_norm):
+        score += 2.0
+    shared = _cjk_tokens(loc_norm) & _cjk_tokens(f_norm)
+    score += len(shared) * 1.0
+    for char_name in active_char_names:
+        if char_name and char_name in f:
+            score += 1.5
+            break
+    return score
+
+
+def _make_asset_id(relative_path: str) -> str:
+    return hashlib.md5(str(relative_path or "").encode()).hexdigest()[:12]
+
+
+def match_asset_entities(entities: list[dict]) -> dict:
+    """
+    Unified asset matching. Routes by entity_type:
+      character → name match against manifest.characters
+      scene     → folder match against manifest.scenes
+      prop      → Phase 0: always unmatched (no prop library)
+
+    Returns {"matched": [...], "unmatched": [...], "candidates": [...]}
+    Threshold: score >= 1.0 → matched, 0.5 <= score < 1.0 → candidate, else unmatched
+    """
+    try:
+        manifest = scan_local_assets()
+    except Exception:
+        return {"matched": [], "unmatched": list(entities), "candidates": []}
+
+    matched: list[dict] = []
+    unmatched: list[dict] = []
+    candidates: list[dict] = []
+
+    for entity in entities:
+        etype = str(entity.get("entity_type") or "").strip()
+        name = str(entity.get("name") or "").strip()
+        eid = str(entity.get("entity_id") or "").strip()
+
+        if etype == "prop":
+            unmatched.append(dict(entity))
+            continue
+
+        if etype == "character":
+            best_score, best_rec = 0.0, None
+            for rec in manifest.characters:
+                s = _name_score(name, rec.name)
+                if s > best_score and rec.three_view_url:
+                    best_score = s
+                    best_rec = rec
+            if best_score >= 1.0 and best_rec:
+                matched.append({
+                    "entity_id": eid,
+                    "name": name,
+                    "entity_type": etype,
+                    "description": entity.get("description") or "",
+                    "asset_id": _make_asset_id(best_rec.three_view_path or best_rec.three_view_url or ""),
+                    "url": best_rec.three_view_url,
+                    "score": best_score,
+                })
+            elif best_score >= 0.5 and best_rec:
+                candidates.append({
+                    "entity_id": eid,
+                    "name": name,
+                    "entity_type": etype,
+                    "description": entity.get("description") or "",
+                    "url": best_rec.three_view_url,
+                    "score": best_score,
+                    "reason": "partial_name_match",
+                })
+            else:
+                unmatched.append(dict(entity))
+            continue
+
+        if etype == "scene":
+            active_chars: set[str] = set()
+            location_texts = [name]
+            best_score, best_rec, best_loc = 0.0, None, ""
+            for loc in location_texts:
+                for rec in manifest.scenes:
+                    s = _scene_score(loc, rec.folder_name, active_chars)
+                    if s > best_score:
+                        best_score = s
+                        best_rec = rec
+                        best_loc = loc
+            if best_score >= 1.0 and best_rec and best_rec.preview_urls:
+                matched.append({
+                    "entity_id": eid,
+                    "name": name,
+                    "entity_type": etype,
+                    "description": entity.get("description") or "",
+                    "asset_id": _make_asset_id(best_rec.folder_path or ""),
+                    "url": best_rec.preview_urls[0],
+                    "score": best_score,
+                })
+            elif best_score >= 0.5 and best_rec and best_rec.preview_urls:
+                candidates.append({
+                    "entity_id": eid,
+                    "name": name,
+                    "entity_type": etype,
+                    "description": entity.get("description") or "",
+                    "url": best_rec.preview_urls[0],
+                    "score": best_score,
+                    "reason": "partial_scene_match",
+                })
+            else:
+                unmatched.append(dict(entity))
+            continue
+
+        # Unknown entity_type → unmatched
+        unmatched.append(dict(entity))
+
+    return {"matched": matched, "unmatched": unmatched, "candidates": candidates}
+
+
 def _match_assets(
     char_entities: list[dict[str, Any]],
     scene_entities: list[dict[str, Any]],
@@ -54,7 +194,6 @@ def _match_assets(
     Returns (char_urls, scene_urls) — each element is a URL string or None if not found.
     """
     try:
-        from agent_v2.storyboard.local_asset_library import scan_local_assets
         manifest = scan_local_assets()
     except Exception:
         return [None] * len(char_entities), [None] * len(scene_entities)
