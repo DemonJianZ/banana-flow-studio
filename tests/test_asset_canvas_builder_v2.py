@@ -122,3 +122,154 @@ class TestMatchAssetEntities(unittest.TestCase):
         self.assertIn("matched", result)
         self.assertIn("unmatched", result)
         self.assertIn("candidates", result)
+
+
+from agent_v2.shot_workflow.asset_canvas_builder import (
+    build_asset_canvas_patch,
+    _build_placeholder_asset_patch,
+)
+
+
+def _matched_entity(name="龙女", entity_type="character"):
+    return {
+        "entity_id": f"{entity_type}_{name}",
+        "name": name,
+        "entity_type": entity_type,
+        "description": "test description",
+        "asset_status": "matched",
+        "matched_url": f"/assets/{name}.png",
+        "asset_id": "abc123",
+        "design_prompt": None,
+        "design_prompt_source": "",
+        "design_prompt_warnings": [],
+    }
+
+
+def _missing_entity(name="辰辰", entity_type="character"):
+    return {
+        "entity_id": f"{entity_type}_{name}",
+        "name": name,
+        "entity_type": entity_type,
+        "description": "青色道袍",
+        "asset_status": "missing",
+        "matched_url": None,
+        "asset_id": None,
+        "design_prompt": "Three-view character design sheet of 辰辰",
+        "design_prompt_source": "llm",
+        "design_prompt_warnings": [],
+    }
+
+
+class TestBuildAssetCanvasPatch(unittest.TestCase):
+
+    def _get_add_node_ops(self, patch):
+        return [op for op in patch if op.get("op") == "add_node"]
+
+    def _get_connection_ops(self, patch):
+        return [op for op in patch if op.get("op") == "add_connection"]
+
+    def _get_nodes_by_type(self, patch, node_type):
+        return [
+            op["node"] for op in patch
+            if op.get("op") == "add_node" and op["node"].get("type") == node_type
+        ]
+
+    def test_matched_entity_creates_input_node(self):
+        entity = _matched_entity()
+        patch = build_asset_canvas_patch([entity])
+        input_nodes = self._get_nodes_by_type(patch, "input")
+        self.assertEqual(len(input_nodes), 1)
+        node = input_nodes[0]
+        self.assertEqual(node["data"]["url"], "/assets/龙女.png")
+        self.assertEqual(node["data"]["entity_id"], "character_龙女")
+
+    def test_missing_entity_creates_three_node_chain(self):
+        entity = _missing_entity()
+        patch = build_asset_canvas_patch([entity])
+        add_nodes = self._get_add_node_ops(patch)
+        node_types = [op["node"]["type"] for op in add_nodes]
+        self.assertIn("text_input", node_types)
+        self.assertIn("processor", node_types)
+        self.assertIn("output", node_types)
+        connections = self._get_connection_ops(patch)
+        self.assertEqual(len(connections), 2)
+
+    def test_missing_entity_processor_has_prompt(self):
+        entity = _missing_entity()
+        patch = build_asset_canvas_patch([entity])
+        processor_nodes = self._get_nodes_by_type(patch, "processor")
+        self.assertEqual(len(processor_nodes), 1)
+        self.assertTrue(processor_nodes[0]["data"]["prompt"])
+
+    def test_missing_entity_text_input_has_workflow_role(self):
+        entity = _missing_entity()
+        patch = build_asset_canvas_patch([entity])
+        text_input_nodes = self._get_nodes_by_type(patch, "text_input")
+        entity_text_inputs = [
+            n for n in text_input_nodes
+            if n["data"].get("workflow_role") == "asset_design_generation"
+        ]
+        self.assertGreater(len(entity_text_inputs), 0)
+
+    def test_mode_policy_multi_image_generate_downgrades(self):
+        entity = _missing_entity()
+        patch = build_asset_canvas_patch([entity], mode_policy="multi_image_generate")
+        processor_nodes = self._get_nodes_by_type(patch, "processor")
+        self.assertEqual(len(processor_nodes), 1)
+        self.assertEqual(processor_nodes[0]["data"]["mode"], "text2img")
+
+    def test_candidate_entity_treated_as_missing(self):
+        entity = {
+            "entity_id": "character_候选",
+            "name": "候选",
+            "entity_type": "character",
+            "description": "候选实体",
+            "asset_status": "candidate",
+            "matched_url": None,
+            "asset_id": None,
+            "design_prompt": "Candidate entity design",
+            "design_prompt_source": "fallback",
+            "design_prompt_warnings": [],
+        }
+        patch = build_asset_canvas_patch([entity])
+        node_types = [op["node"]["type"] for op in self._get_add_node_ops(patch)]
+        self.assertIn("text_input", node_types)
+        self.assertIn("processor", node_types)
+        self.assertIn("output", node_types)
+        connections = self._get_connection_ops(patch)
+        self.assertEqual(len(connections), 2)
+
+    def test_mixed_matched_and_missing(self):
+        entities = [_matched_entity(), _missing_entity()]
+        patch = build_asset_canvas_patch(entities)
+        input_nodes = self._get_nodes_by_type(patch, "input")
+        processor_nodes = self._get_nodes_by_type(patch, "processor")
+        output_nodes = self._get_nodes_by_type(patch, "output")
+        self.assertEqual(len(input_nodes), 1)
+        self.assertEqual(len(processor_nodes), 1)
+        self.assertEqual(len(output_nodes), 1)
+
+    def test_placeholder_patch_creates_bare_text_inputs(self):
+        entities = [_matched_entity(), _missing_entity()]
+        patch = _build_placeholder_asset_patch(entities)
+        add_node_ops = self._get_add_node_ops(patch)
+        self.assertEqual(len(add_node_ops), len(entities))
+        for op in add_node_ops:
+            self.assertEqual(op["node"]["type"], "text_input")
+
+    def test_group_container_created_per_entity_type(self):
+        entities = [
+            _matched_entity(name="龙女", entity_type="character"),
+            _missing_entity(name="庭院", entity_type="scene"),
+        ]
+        patch = build_asset_canvas_patch(entities)
+        group_nodes = self._get_nodes_by_type(patch, "group_container")
+        self.assertEqual(len(group_nodes), 2)
+
+    def test_empty_entities_returns_non_empty_patch_or_empty(self):
+        # Should not raise; returning empty list is acceptable
+        try:
+            patch = build_asset_canvas_patch([])
+            self.assertIsInstance(patch, list)
+        except Exception as e:
+            self.fail(f"build_asset_canvas_patch([]) raised an exception: {e}")
