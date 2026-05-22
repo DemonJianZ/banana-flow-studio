@@ -245,3 +245,32 @@ class TestExecuteBuildAssetCanvas:
         assert ed["missing_count"] == 1
         assert ed["candidate_count"] == 1
         assert ed["patch_count"] == len(FAKE_PATCH)
+
+    # -----------------------------------------------------------------------
+    # Entities sourced from confirmed_extraction (real call site structure)
+    # -----------------------------------------------------------------------
+    def test_entities_read_from_confirmed_extraction(self):
+        """tool_args uses confirmed_extraction, not top-level characters/scenes."""
+        state = {
+            "tool_args": {
+                "confirmed_extraction": {
+                    "characters": [{"name": "龙女", "type": "character", "description": "仙女"}],
+                    "scenes": [{"name": "仙境", "atmosphere": "云雾缭绕"}],
+                },
+                "current_nodes": [],
+            }
+        }
+        captured = {}
+
+        def fake_match(entities):
+            captured["entities"] = entities
+            return {"matched": [], "unmatched": entities, "candidates": []}
+
+        with patch(MOCK_TARGET_MATCH, side_effect=fake_match), \
+             patch(MOCK_TARGET_PROMPTS, return_value={}), \
+             patch(MOCK_TARGET_BUILD, return_value=[]):
+            execute_build_asset_canvas(state)
+
+        names = [e["name"] for e in captured.get("entities", [])]
+        assert "龙女" in names
+        assert "仙境" in names

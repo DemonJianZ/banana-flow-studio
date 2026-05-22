@@ -25,12 +25,19 @@ def _extract_entities(tool_args: dict) -> list[dict]:
 
     Generates stable entity_ids using make_entity_id().  Duplicate names
     within the same call receive an occurrence counter suffix (_2, _3, …).
+
+    Data lives under tool_args["confirmed_extraction"] (primary) or
+    directly under tool_args as a fallback.
     """
+    confirmed = dict(tool_args.get("confirmed_extraction") or {})
+    characters_raw = list(confirmed.get("characters") or tool_args.get("characters") or [])
+    scenes_raw = list(confirmed.get("scenes") or tool_args.get("scenes") or [])
+
     result = []
     name_count: dict[str, int] = {}
 
     # characters (includes props with type="prop")
-    for ch in (tool_args.get("characters") or []):
+    for ch in characters_raw:
         name = str(ch.get("name") or "").strip()
         if not name:
             continue
@@ -47,7 +54,7 @@ def _extract_entities(tool_args: dict) -> list[dict]:
         })
 
     # scenes
-    for sc in (tool_args.get("scenes") or []):
+    for sc in scenes_raw:
         name = str(sc.get("name") or "").strip()
         if not name:
             continue
@@ -112,7 +119,7 @@ def execute_build_asset_canvas(state: dict) -> dict:
     tool_args = state.get("tool_args") or {}
     authorization = state.get("authorization") or ""
     mode_policy = tool_args.get("mode_policy") or state.get("mode_policy") or "text2img"
-    current_nodes = tool_args.get("current_nodes") or []
+    current_nodes = tool_args.get("current_nodes") or state.get("current_nodes") or []
 
     # 1. Extract entities (characters + scenes + props) from tool_args
     entities = _extract_entities(tool_args)
