@@ -182,5 +182,45 @@ class TestGenerateDesignPrompts(unittest.TestCase):
         self.assertIn("盾", item["prompt"])
 
 
+class TestScriptContextInjection(unittest.TestCase):
+
+    def test_script_context_appears_in_llm_prompt(self):
+        """世界观参考段落应出现在发给 LLM 的 prompt 中。"""
+        entity = {
+            "entity_id": "prop_云影镜",
+            "name": "云影镜",
+            "entity_type": "prop",
+            "description": "古铜镜",
+        }
+        context = {
+            "summary": "仙侠少年闯荡江湖",
+            "atmospheres": ["白天桃花林", "夜晚宫殿"],
+            "matched_characters": [{"name": "龙女", "description": "青色仙袍"}],
+        }
+        captured = {}
+
+        def fake_llm(prompt, auth=""):
+            captured["prompt"] = prompt
+            return {"prop_云影镜": "Ancient bronze mirror, xianxia style"}
+
+        with mock.patch("agent_v2.shot_workflow.asset_design_prompter._call_llm", side_effect=fake_llm):
+            result = generate_design_prompts([entity], script_context=context)
+
+        self.assertIn("仙侠少年闯荡江湖", captured["prompt"])
+        self.assertIn("白天桃花林", captured["prompt"])
+        self.assertIn("龙女", captured["prompt"])
+        self.assertEqual(result["prop_云影镜"]["source"], "llm")
+
+    def test_no_context_does_not_crash(self):
+        """不传 script_context 时行为与之前一致。"""
+        entity = {"entity_id": "character_辰辰", "name": "辰辰", "entity_type": "character", "description": ""}
+        with mock.patch(
+            "agent_v2.shot_workflow.asset_design_prompter._call_llm",
+            return_value={"character_辰辰": "Three-view design sheet"},
+        ):
+            result = generate_design_prompts([entity])
+        self.assertEqual(result["character_辰辰"]["source"], "llm")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -114,6 +114,37 @@ def _enrich_entities(
     return enriched
 
 
+def _build_script_context(tool_args: dict, matched_entities: list[dict]) -> dict:
+    """Assemble world/style context for design prompt generation.
+
+    Sources:
+    - confirmed_extraction.summary  → overall story tone
+    - confirmed_extraction.scenes[].atmosphere → visual mood
+    - matched_entities (characters with descriptions) → established visual anchors
+    """
+    confirmed = dict(tool_args.get("confirmed_extraction") or {})
+
+    summary = str(confirmed.get("summary") or "").strip()
+
+    atmospheres = [
+        str(sc.get("atmosphere") or "").strip()
+        for sc in (confirmed.get("scenes") or [])
+        if str(sc.get("atmosphere") or "").strip()
+    ]
+
+    matched_characters = [
+        {"name": str(e.get("name") or "").strip(), "description": str(e.get("description") or "").strip()}
+        for e in matched_entities
+        if str(e.get("entity_type") or "") == "character" and str(e.get("name") or "").strip()
+    ]
+
+    return {
+        "summary": summary,
+        "atmospheres": atmospheres,
+        "matched_characters": matched_characters,
+    }
+
+
 def execute_build_asset_canvas(state: dict) -> dict:
     # --- Extract from state ---
     tool_args = state.get("tool_args") or {}
@@ -133,7 +164,12 @@ def execute_build_asset_canvas(state: dict) -> dict:
 
     # 3. Generate design prompts for unmatched + candidate entities
     entities_to_design = match_result["unmatched"] + match_result["candidates"]
-    design_prompts = generate_design_prompts(entities_to_design, authorization=authorization)
+    script_context = _build_script_context(tool_args, match_result["matched"])
+    design_prompts = generate_design_prompts(
+        entities_to_design,
+        authorization=authorization,
+        script_context=script_context,
+    )
 
     # 4. Merge match_result + design_prompts → enriched_entities
     enriched = _enrich_entities(entities, match_result, design_prompts)

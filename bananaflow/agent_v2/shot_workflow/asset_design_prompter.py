@@ -58,7 +58,37 @@ def _fallback_prompt(name: str, entity_type: str, description: str) -> str:
 # LLM prompt builder
 # ---------------------------------------------------------------------------
 
-def _build_design_prompt(entities: list[dict]) -> str:
+def _build_world_context_section(script_context: dict) -> str:
+    """Build a 世界观参考 paragraph from script_context, or return empty string."""
+    if not script_context:
+        return ""
+
+    lines: list[str] = []
+
+    summary = str(script_context.get("summary") or "").strip()
+    if summary:
+        lines.append(f"故事概要：{summary}")
+
+    atmospheres = [str(a).strip() for a in (script_context.get("atmospheres") or []) if str(a).strip()]
+    if atmospheres:
+        lines.append(f"场景氛围：{' / '.join(atmospheres)}")
+
+    matched_chars = script_context.get("matched_characters") or []
+    char_refs = []
+    for ch in matched_chars:
+        name = str(ch.get("name") or "").strip()
+        desc = str(ch.get("description") or "").strip()
+        if name:
+            char_refs.append(f"{name}（{desc}）" if desc else name)
+    if char_refs:
+        lines.append(f"已确立视觉参考角色：{' / '.join(char_refs[:4])}")
+
+    if not lines:
+        return ""
+    return "【世界观参考（生成提示词时须与此保持视觉风格一致）】\n" + "\n".join(lines)
+
+
+def _build_design_prompt(entities: list[dict], script_context: dict | None = None) -> str:
     entity_list = json.dumps(
         [
             {
@@ -71,10 +101,13 @@ def _build_design_prompt(entities: list[dict]) -> str:
         ],
         ensure_ascii=False,
     )
+    context_section = _build_world_context_section(script_context or {})
+    context_block = f"\n{context_section}\n" if context_section else ""
     return (
         "你是视觉创作提示词专家。为以下角色/道具/场景批量生成英文设定图提示词。\n"
         "严格输出 JSON，格式 {entity_id: \"english prompt\"}。\n"
-        "不要输出 markdown，不要解释，不要在 JSON 外添加任何文字。\n\n"
+        "不要输出 markdown，不要解释，不要在 JSON 外添加任何文字。\n"
+        f"{context_block}\n"
         f"实体列表：\n{entity_list}"
     )
 
@@ -86,6 +119,7 @@ def _build_design_prompt(entities: list[dict]) -> str:
 def generate_design_prompts(
     entities: list[dict],
     authorization: str = "",
+    script_context: dict | None = None,
 ) -> dict[str, dict]:
     """Generate design prompts for a list of unmatched entities.
 
@@ -93,6 +127,10 @@ def generate_design_prompts(
         entities: list of dicts with ``entity_id``, ``name``, ``entity_type``,
                   ``description``.
         authorization: optional bearer token forwarded to the LLM gateway.
+        script_context: optional world/style context injected into the LLM
+            prompt for visual coherence.  Expected keys (all optional):
+            ``summary`` (str), ``atmospheres`` (list[str]),
+            ``matched_characters`` (list[{name, description}]).
 
     Returns:
         Mapping of ``entity_id`` → result dict with keys
@@ -106,7 +144,7 @@ def generate_design_prompts(
     llm_data: dict[str, Any] = {}
     llm_ok = False
     try:
-        prompt = _build_design_prompt(entities)
+        prompt = _build_design_prompt(entities, script_context)
         llm_data = _call_llm(prompt, authorization)
         llm_ok = True
     except Exception:
