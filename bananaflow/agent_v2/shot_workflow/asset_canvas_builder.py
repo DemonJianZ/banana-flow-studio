@@ -407,8 +407,8 @@ def _build_group(
         })
 
         # Connections: text_input → processor → output
-        patch.append({"op": "add_connection", "from": ti_id, "to": proc_id})
-        patch.append({"op": "add_connection", "from": proc_id, "to": out_id})
+        patch.append({"op": "add_connection", "connection": {"id": _new_id(f"{pfx}_c1"), "from": ti_id, "to": proc_id}})
+        patch.append({"op": "add_connection", "connection": {"id": _new_id(f"{pfx}_c2"), "from": proc_id, "to": out_id}})
 
         selected_ids.append(ti_id)
 

@@ -193,6 +193,13 @@ class TestBuildAssetCanvasPatch(unittest.TestCase):
         self.assertIn("output", node_types)
         connections = self._get_connection_ops(patch)
         self.assertEqual(len(connections), 2)
+        # Also verify connection format matches frontend protocol
+        for conn_op in connections:
+            c = conn_op.get("connection")
+            self.assertIsNotNone(c, "connection op must have 'connection' key")
+            self.assertTrue(c.get("id"), "connection must have non-empty id")
+            self.assertTrue(c.get("from"), "connection must have 'from'")
+            self.assertTrue(c.get("to"), "connection must have 'to'")
 
     def test_missing_entity_processor_has_prompt(self):
         entity = _missing_entity()
