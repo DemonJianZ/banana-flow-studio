@@ -311,7 +311,8 @@ def _build_group(
                 "x": node_x,
                 "y": node_y,
                 "data": {
-                    "url": matched_url,
+                    "images": [matched_url] if matched_url else [],
+                    "mediaKind": "image",
                     "title": f"{name} 设定图",
                     "entity_id": entity_id,
                     "entity_name": name,

@@ -180,7 +180,8 @@ class TestBuildAssetCanvasPatch(unittest.TestCase):
         input_nodes = self._get_nodes_by_type(patch, "input")
         self.assertEqual(len(input_nodes), 1)
         node = input_nodes[0]
-        self.assertEqual(node["data"]["url"], "/assets/龙女.png")
+        self.assertEqual(node["data"]["images"], ["/assets/龙女.png"])
+        self.assertEqual(node["data"]["mediaKind"], "image")
         self.assertEqual(node["data"]["entity_id"], "character_龙女")
 
     def test_missing_entity_creates_three_node_chain(self):
