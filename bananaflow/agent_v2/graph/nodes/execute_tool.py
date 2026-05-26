@@ -5,6 +5,9 @@ from typing import Any
 
 _STORYBOARD_TOOL_NAMES = {"storyboard.design", "agent_storyboard_design"}
 _SHOT_WORKFLOW_TOOL_NAMES = {"shot_workflow.compose", "agent_shot_workflow_compose"}
+_SCRIPT_EXTRACT_TOOL_NAMES = {"shot_workflow.extract"}
+_ASSET_CANVAS_TOOL_NAMES = {"shot_workflow.build_asset_canvas"}
+_VIDEO_CANVAS_TOOL_NAMES = {"shot_workflow.build_video_canvas"}
 
 
 def _run_tool(
@@ -77,6 +80,30 @@ def execute_tool_call(state: dict) -> dict:
             "exec_warnings": [],
             "exec_data": {},
             "trace": trace + [{"type": "EXECUTE_TOOL_CALL", "tool": tool_name, "delegated_to": "execute_shot_workflow"}],
+        }
+    if tool_name in _SCRIPT_EXTRACT_TOOL_NAMES:
+        return {
+            "exec_response_text": "",
+            "exec_patches": [],
+            "exec_warnings": [],
+            "exec_data": {},
+            "trace": trace + [{"type": "EXECUTE_TOOL_CALL", "tool": tool_name, "delegated_to": "execute_script_extract"}],
+        }
+    if tool_name in _ASSET_CANVAS_TOOL_NAMES:
+        return {
+            "exec_response_text": "",
+            "exec_patches": [],
+            "exec_warnings": [],
+            "exec_data": {},
+            "trace": trace + [{"type": "EXECUTE_TOOL_CALL", "tool": tool_name, "delegated_to": "execute_build_asset_canvas"}],
+        }
+    if tool_name in _VIDEO_CANVAS_TOOL_NAMES:
+        return {
+            "exec_response_text": "",
+            "exec_patches": [],
+            "exec_warnings": [],
+            "exec_data": {},
+            "trace": trace + [{"type": "EXECUTE_TOOL_CALL", "tool": tool_name, "delegated_to": "execute_build_video_canvas"}],
         }
 
     # Verify tool exists before attempting execution

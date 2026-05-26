@@ -9,6 +9,7 @@ from agent_v2.storyboard.script_table import (
     format_script_rows_for_prompt,
 )
 
+_VIDEO_CANVAS_ACTIONS = {"shot_workflow.build_video_canvas"}
 _STORYBOARD_EDIT_MARKERS = (
     "改", "修改", "调整", "优化", "重写", "强化", "弱化",
     "增加", "补充", "删除", "细化", "丰富", "延长", "缩短",
@@ -16,8 +17,8 @@ _STORYBOARD_EDIT_MARKERS = (
 )
 
 _STORYBOARD_KEYWORDS = ("分镜", "故事板", "storyboard", "shot list", "镜头脚本", "镜头设计")
-_SHOT_WORKFLOW_ACTIONS = {"shot_workflow", "shot_workflow_design", "shot_workflow.compose"}
-_SCRIPT_EXTRACT_ACTIONS = {"shot_workflow.extract"}
+_SHOT_WORKFLOW_ACTIONS = {"shot_workflow", "shot_workflow.compose"}
+_SCRIPT_EXTRACT_ACTIONS = {"shot_workflow.extract", "shot_workflow_design"}
 _ASSET_CANVAS_ACTIONS = {"shot_workflow.build_asset_canvas"}
 _SHOT_WORKFLOW_MARKERS = ("文生图", "图生图", "出图", "生图", "图片生成", "工作流", "workflow", "画布", "节点")
 _SCREENPLAY_MARKERS = (
@@ -116,9 +117,14 @@ def _extract_asset_canvas_args(state: dict) -> dict:
 def _extract_script_extract_args(state: dict) -> dict:
     message = str(state.get("message") or "").strip()
     uploaded_documents = list(state.get("uploaded_documents") or [])
+    hints = dict(state.get("canvas_node_hints") or {})
+    existing_extraction = hints.get("existing_extraction") or None
+    edit_instruction = str(hints.get("edit_instruction") or "").strip()
     return {
         "source_text": message,
         "source_documents": uploaded_documents,
+        "existing_extraction": existing_extraction,
+        "edit_instruction": edit_instruction,
     }
 
 
@@ -179,42 +185,18 @@ def normalize_request(state: dict) -> dict:
 
     trace_entry: dict[str, Any] = {"type": "NORMALIZE_REQUEST"}
 
-    # 1. Uploaded storyboard script table
-    script_doc = _find_storyboard_script_document(uploaded_documents)
-    if script_doc and _looks_like_shot_workflow_request(message):
-        trace_entry["shortcut"] = "uploaded_shot_workflow_script_table"
-        return {
-            "intent": "tool_call",
-            "intent_confidence": 1.0,
-            "intent_reason": "uploaded_shot_workflow_script_table",
-            "tool_name": "shot_workflow.extract",
-            "tool_args": _extract_script_extract_args(state),
-            "trace": [trace_entry],
-        }
-    if script_doc:
-        trace_entry["shortcut"] = "uploaded_storyboard_script_table"
-        return {
-            "intent": "tool_call",
-            "intent_confidence": 1.0,
-            "intent_reason": "uploaded_storyboard_script_table",
-            "tool_name": "storyboard.design",
-            "tool_args": _extract_storyboard_args(state),
-            "trace": [trace_entry],
-        }
-
-    if _looks_like_pasted_screenplay(message) or _looks_like_shot_workflow_request(message):
-        trace_entry["shortcut"] = "pasted_screenplay_shot_workflow"
-        return {
-            "intent": "tool_call",
-            "intent_confidence": 0.95,
-            "intent_reason": "pasted_screenplay_shot_workflow",
-            "tool_name": "shot_workflow.extract",
-            "tool_args": _extract_script_extract_args(state),
-            "trace": [trace_entry],
-        }
-
-    # 2. force_action
+    # 1. force_action
     if force_action:
+        if force_action in _VIDEO_CANVAS_ACTIONS:
+            trace_entry["shortcut"] = f"force_action:{force_action}"
+            return {
+                "intent": "tool_call",
+                "intent_confidence": 1.0,
+                "intent_reason": "force_action_video_canvas",
+                "tool_name": "shot_workflow.build_video_canvas",
+                "tool_args": _extract_asset_canvas_args(state),
+                "trace": [trace_entry],
+            }
         if force_action in _ASSET_CANVAS_ACTIONS:
             trace_entry["shortcut"] = f"force_action:{force_action}"
             return {
@@ -272,6 +254,41 @@ def normalize_request(state: dict) -> dict:
             "intent_reason": "force_action",
             "tool_name": "",
             "tool_args": {},
+            "trace": [trace_entry],
+        }
+
+
+    # 2. Uploaded storyboard script table
+    script_doc = _find_storyboard_script_document(uploaded_documents)
+    if script_doc and _looks_like_shot_workflow_request(message):
+        trace_entry["shortcut"] = "uploaded_shot_workflow_script_table"
+        return {
+            "intent": "tool_call",
+            "intent_confidence": 1.0,
+            "intent_reason": "uploaded_shot_workflow_script_table",
+            "tool_name": "shot_workflow.extract",
+            "tool_args": _extract_script_extract_args(state),
+            "trace": [trace_entry],
+        }
+    if script_doc:
+        trace_entry["shortcut"] = "uploaded_storyboard_script_table"
+        return {
+            "intent": "tool_call",
+            "intent_confidence": 1.0,
+            "intent_reason": "uploaded_storyboard_script_table",
+            "tool_name": "storyboard.design",
+            "tool_args": _extract_storyboard_args(state),
+            "trace": [trace_entry],
+        }
+
+    if _looks_like_pasted_screenplay(message) or _looks_like_shot_workflow_request(message):
+        trace_entry["shortcut"] = "pasted_screenplay_shot_workflow"
+        return {
+            "intent": "tool_call",
+            "intent_confidence": 0.95,
+            "intent_reason": "pasted_screenplay_shot_workflow",
+            "tool_name": "shot_workflow.extract",
+            "tool_args": _extract_script_extract_args(state),
             "trace": [trace_entry],
         }
 

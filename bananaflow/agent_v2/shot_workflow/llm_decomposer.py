@@ -123,10 +123,14 @@ def _build_decompose_prompt(source_text: str, max_shots: int) -> str:
         "  shot_id (\"shot_01\", \"shot_02\"...), index (整数), title (简短标题),\n"
         "  scene (主要场景名), time (时间段，如白天/夜晚/黄昏),\n"
         "  characters (出现角色名列表), locations (地点/场景名列表), props (关键道具/物件列表),\n"
-        "  action (动作与画面描述), dialogue (台词，没有则为空字符串),\n"
+        "  visual_description (画面描述：主体、动作、构图、环境细节，必须可直接指导出图),\n"
+        "  audio_description (画面可添加的环境音、动作音、氛围音乐或特殊音效；不要写角色台词、对白内容、说话声),\n"
+        "  action (兼容字段，内容与 visual_description 保持一致或更简短),\n"
+        "  dialogue (主角之间的台词对话，只放角色说出的文字，保留说话人，如 \"辰辰：秋水，节奏跟上。\\n秋水：阿巳！快来管管师父！\"；无台词则为空字符串),\n"
         "  camera (镜头语言，如 close-up / medium shot / wide shot / cinematic medium shot),\n"
         "  mood (情绪氛围，如 dramatic / serene / tense / comedic),\n"
-        "  needs_reference_image (布尔值，若有具体角色/人物形象需保持一致则为 true)。\n\n"
+        "  needs_reference_image (布尔值，若有具体角色/人物形象需保持一致则为 true),\n"
+        "  duration (该镜头预计时长，整数秒；若剧本中有明确标注则取其值，否则根据动作/对话量估算，通常 3-8 秒)。\n\n"
         "annotated_script 是整个剧本的标注版本，在原文基础上用以下 token 标记关键实体：\n"
         "  角色：[[char:名字]]  场景/地点：[[scene:名字]]  道具：[[prop:名字]]\n"
         "  token 只标注实体名字本身，不嵌套，不改变原文其他内容。\n\n"
@@ -134,7 +138,6 @@ def _build_decompose_prompt(source_text: str, max_shots: int) -> str:
         "如果剧本较短，拆分真实存在的镜头，不要虚构。\n\n"
     )
     return system + f"剧本原文：\n{source_text}"
-
 
 # ---------------------------------------------------------------------------
 # LLM caller (mirrors storyboard/designer.py dual-path pattern)
@@ -193,6 +196,52 @@ def _call_llm(prompt: str, authorization: str = "") -> dict:
 # Shot normalizer: turn raw LLM dict into ShotSpec list
 # ---------------------------------------------------------------------------
 
+def _dialogue_to_text(value: Any) -> str:
+    if isinstance(value, list):
+        lines: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                speaker = str(item.get("speaker") or item.get("role") or item.get("name") or "").strip()
+                text = str(item.get("text") or item.get("line") or item.get("content") or "").strip()
+                if speaker and text:
+                    lines.append(f"{speaker}：{text}")
+                elif text:
+                    lines.append(text)
+            else:
+                text = str(item or "").strip()
+                if text:
+                    lines.append(text)
+        return "\n".join(lines).strip()
+    return str(value or "").strip()
+
+
+
+def _clean_audio_description(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    kept: list[str] = []
+    for chunk in re.split(r"[\n；;]+", text):
+        item = chunk.strip(" 。，,;；")
+        if not item:
+            continue
+
+        audio_label = re.match(r"^(环境音|环境声|音效|配乐|动作音|动作声|氛围音乐|特殊音效|声音)\s*[:：]\s*(.+)$", item, re.I)
+        if audio_label:
+            item = audio_label.group(2).strip(" 。，,;；")
+
+        if re.match(r"^(台词|对白|dialogue|lines?)\s*[:：]", item, re.I):
+            continue
+        if re.match(r"^[\u4e00-\u9fa5A-Za-z·]{1,12}\s*[:：]", item):
+            continue
+        if item in {"对白", "台词", "说话声", "角色台词", "角色对白"}:
+            continue
+        kept.append(item)
+
+    return "；".join(kept).strip()
+
+
 def _normalize_shot(raw: Any, idx: int) -> ShotSpec:
     d = dict(raw or {})
     shot_id = str(d.get("shot_id") or f"shot_{idx:02d}").strip()
@@ -205,6 +254,22 @@ def _normalize_shot(raw: Any, idx: int) -> ShotSpec:
             return [v.strip()]
         return []
 
+    visual = str(
+        d.get("visual_description")
+        or d.get("picture_description")
+        or d.get("screen_description")
+        or d.get("action")
+        or ""
+    ).strip()
+    audio = _clean_audio_description(
+        d.get("audio_description")
+        or d.get("sound_effect_description")
+        or d.get("sound_effect")
+        or d.get("sfx")
+        or ""
+    )
+    dialogue = _dialogue_to_text(d.get("dialogue") or d.get("dialogues") or d.get("lines") or "")
+
     return {
         "shot_id": shot_id,
         "index": index,
@@ -214,11 +279,14 @@ def _normalize_shot(raw: Any, idx: int) -> ShotSpec:
         "characters": _strlist(d.get("characters")),
         "locations": _strlist(d.get("locations")),
         "props": _strlist(d.get("props")),
-        "action": str(d.get("action") or "").strip(),
-        "dialogue": str(d.get("dialogue") or "").strip(),
+        "visual_description": visual,
+        "audio_description": audio,
+        "action": str(d.get("action") or visual).strip(),
+        "dialogue": dialogue,
         "camera": str(d.get("camera") or "cinematic medium shot").strip(),
         "mood": str(d.get("mood") or "cinematic, clean, coherent").strip(),
         "needs_reference_image": bool(d.get("needs_reference_image")),
+        "duration": int(d.get("duration") or 5),
     }
 
 

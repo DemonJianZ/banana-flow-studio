@@ -40,6 +40,7 @@ ARK_IMAGE_MODEL_ID = "ep-20251212110122-srwd7"
 ARK_VIDEO_MODEL_ID_NEW = "ep-20251225103241-gkccd"
 VIDEO_MODEL_1_0 = "Doubao-Seedance-1.0-pro"
 VIDEO_MODEL_1_5 = "Doubao-Seedance-1.5-pro"
+VIDEO_MODEL_2_0 = "Doubao-Seedance-2.0-pro"
 
 CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
 PACKAGE_DIR = os.path.dirname(CONFIG_DIR)

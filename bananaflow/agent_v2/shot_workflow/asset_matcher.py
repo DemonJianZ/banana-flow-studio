@@ -6,7 +6,7 @@ from typing import Any
 from agent_v2.storyboard.local_asset_library import LocalAssetManifest, scan_local_assets
 from .schemas import ShotSpec
 
-_ALLOWED_MODES = {"text2img", "local_text2img", "multi_image_generate"}
+_ALLOWED_MODES = {"text2img", "local_text2img", "multi_image_generate", "img2video"}
 
 
 # ---------------------------------------------------------------------------

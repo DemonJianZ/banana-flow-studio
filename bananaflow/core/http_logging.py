@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import time
@@ -190,6 +191,10 @@ class HttpTrafficLogMiddleware:
                 if request_replayed:
                     if disconnected:
                         return {"type": "http.disconnect"}
+                    # Yield to the event loop so concurrent streaming tasks can run.
+                    # Without this, Starlette's disconnect-watcher spins synchronously
+                    # and starves the body-sender task (spec_version 2.3 path).
+                    await asyncio.sleep(0.05)
                     return {"type": "http.request", "body": b"", "more_body": False}
                 request_replayed = True
                 return {"type": "http.request", "body": request_body, "more_body": False}

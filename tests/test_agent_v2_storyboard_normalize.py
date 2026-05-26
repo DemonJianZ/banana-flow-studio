@@ -15,7 +15,7 @@ from bananaflow.agent_v2.graph.nodes.normalize import normalize_request
 
 
 class AgentV2StoryboardNormalizeTests(unittest.TestCase):
-    def test_pasted_screenplay_routes_to_shot_workflow(self):
+    def test_pasted_screenplay_routes_to_script_extract(self):
         screenplay = """人物：辰辰、秋水
 场景：辰辰庭院
 时间：白天
@@ -29,15 +29,27 @@ class AgentV2StoryboardNormalizeTests(unittest.TestCase):
         out = normalize_request({"message": screenplay, "uploaded_documents": []})
 
         self.assertEqual(out["intent"], "tool_call")
-        self.assertEqual(out["tool_name"], "shot_workflow.compose")
+        self.assertEqual(out["tool_name"], "shot_workflow.extract")
         self.assertEqual(out["intent_reason"], "pasted_screenplay_shot_workflow")
         self.assertIn("辰辰", out["tool_args"]["source_text"])
 
 
-    def test_force_shot_workflow_design_routes_to_shot_workflow(self):
+    def test_force_shot_workflow_design_routes_to_script_extract(self):
         out = normalize_request({
             "message": "把这个剧本拆成每个镜头的文生图工作流",
             "force_action": "shot_workflow_design",
+            "current_nodes": [],
+        })
+
+        self.assertEqual(out["intent"], "tool_call")
+        self.assertEqual(out["tool_name"], "shot_workflow.extract")
+        self.assertIn("剧本", out["tool_args"]["source_text"])
+
+
+    def test_force_shot_workflow_compose_routes_to_shot_workflow(self):
+        out = normalize_request({
+            "message": "把这个剧本拆成每个镜头的文生图工作流",
+            "force_action": "shot_workflow.compose",
             "current_nodes": [],
         })
 

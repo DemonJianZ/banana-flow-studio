@@ -1,6 +1,7 @@
 import React, { useState, useRef, useMemo, useCallback, useEffect } from "react";
 import { createPortal } from "react-dom";
 import { EMPTY_LIST } from "../../constants/workbench.jsx";
+import { isAudioContent } from "../../lib/mediaType.js";
 
 const getActivePersonaMentionQuery = (text, caretIndex) => {
   const beforeCaret = String(text || "").slice(0, Math.max(0, Number(caretIndex) || 0));
@@ -42,6 +43,29 @@ const renderPersonaMentionText = (text, personaNames = EMPTY_LIST) => {
   return parts;
 };
 
+// ── Icon components ──────────────────────────────────────────────────────────
+
+const AudioIcon = () => (
+  <svg className="h-3.5 w-3.5 shrink-0 text-violet-500" viewBox="0 0 16 16" fill="currentColor">
+    <path d="M6 2a1 1 0 0 0-1 1v1H2a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h3v1a1 1 0 0 0 2 0V3a1 1 0 0 0-1-1zM9.5 4.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V5a.5.5 0 0 1 .5-.5zM12 6a.5.5 0 0 1 .5.5v3a.5.5 0 0 1-1 0v-3A.5.5 0 0 1 12 6z"/>
+  </svg>
+);
+
+const ImageIcon = () => (
+  <svg className="h-3.5 w-3.5 shrink-0 text-cyan-500" viewBox="0 0 16 16" fill="currentColor">
+    <path d="M6.002 5.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/>
+    <path d="M2.002 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2h-12zm12 1a1 1 0 0 1 1 1v6.5l-3.777-1.947a.5.5 0 0 0-.577.093l-3.71 3.71-2.66-1.772a.5.5 0 0 0-.63.062L1.002 12V3a1 1 0 0 1 1-1h12z"/>
+  </svg>
+);
+
+const PersonIcon = () => (
+  <svg className="h-3.5 w-3.5 shrink-0 text-slate-400" viewBox="0 0 16 16" fill="currentColor">
+    <path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0zm4 8c0 1-1 1-1 1H3s-1 0-1-1 1-4 6-4 6 3 6 4zm-1-.004c-.001-.246-.154-.986-.832-1.664C11.516 10.68 10.289 10 8 10c-2.29 0-3.516.68-4.168 1.332-.678.678-.83 1.418-.832 1.664h10z"/>
+  </svg>
+);
+
+// ── Main component ────────────────────────────────────────────────────────────
+
 const PersonaMentionTextarea = React.forwardRef(({
   value,
   onChange,
@@ -59,16 +83,34 @@ const PersonaMentionTextarea = React.forwardRef(({
   const [mentionState, setMentionState] = useState(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const [popupPosition, setPopupPosition] = useState(null);
+
+  // Build flat name list for overlay highlighting
   const personaNames = useMemo(
     () => Array.from(new Set((personas || []).map((item) => String(item?.name || item?.title || "").trim()).filter(Boolean))),
     [personas],
   );
+
+  // Full suggestion objects (not just names)
   const suggestions = useMemo(() => {
     if (!mentionState) return EMPTY_LIST;
     const query = String(mentionState.query || "").trim().toLowerCase();
-    const filtered = personaNames.filter((name) => !query || name.toLowerCase().includes(query));
-    return filtered.slice(0, 8);
-  }, [mentionState, personaNames]);
+    const filtered = (personas || []).filter((item) => {
+      const name = String(item?.name || item?.title || "").trim();
+      if (!name) return false;
+      return !query || name.toLowerCase().includes(query);
+    });
+    return filtered.slice(0, 12);
+  }, [mentionState, personas]);
+
+  // Group suggestions by kind
+  const groupedSuggestions = useMemo(() => {
+    const inputs = suggestions.filter((s) => s.kind === "connected_input");
+    const people = suggestions.filter((s) => s.kind !== "connected_input");
+    const groups = [];
+    if (inputs.length) groups.push({ label: "连接的输入", items: inputs, startIndex: 0 });
+    if (people.length) groups.push({ label: "人物", items: people, startIndex: inputs.length });
+    return groups;
+  }, [suggestions]);
 
   const setTextareaRef = useCallback(
     (element) => {
@@ -104,9 +146,10 @@ const PersonaMentionTextarea = React.forwardRef(({
   );
 
   const insertMention = useCallback(
-    (name) => {
+    (item) => {
+      const name = String(item?.name || item?.title || item || "").trim();
       const textarea = innerRef.current;
-      if (!textarea || !mentionState) return;
+      if (!textarea || !mentionState || !name) return;
       const safeValue = String(value || "");
       const selectionEnd = textarea.selectionEnd ?? safeValue.length;
       const nextText = `${safeValue.slice(0, mentionState.start)}@${name} ${safeValue.slice(selectionEnd)}`;
@@ -136,8 +179,8 @@ const PersonaMentionTextarea = React.forwardRef(({
       return;
     }
     const rect = textarea.getBoundingClientRect();
-    const width = Math.min(280, Math.max(180, rect.width || 220));
-    const estimatedHeight = Math.min(340, 34 + suggestions.length * 38);
+    const width = Math.min(300, Math.max(200, rect.width || 220));
+    const estimatedHeight = Math.min(400, 34 + suggestions.length * 46 + groupedSuggestions.length * 28);
     const gap = 8;
     const viewportWidth = window.innerWidth || 0;
     const viewportHeight = window.innerHeight || 0;
@@ -147,7 +190,7 @@ const PersonaMentionTextarea = React.forwardRef(({
       ? bottomTop
       : Math.max(12, rect.top - estimatedHeight - gap);
     setPopupPosition({ left, top, width });
-  }, [mentionState, suggestions.length]);
+  }, [mentionState, suggestions.length, groupedSuggestions.length]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => updatePopupPosition());
@@ -176,22 +219,70 @@ const PersonaMentionTextarea = React.forwardRef(({
               zIndex: 9999,
             }}
           >
-            <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-400">选择人物</div>
-            {suggestions.map((name, index) => (
-              <button
-                key={name}
-                type="button"
-                onMouseDown={(event) => {
-                  event.preventDefault();
-                  insertMention(name);
-                }}
-                className={`flex w-full items-center justify-between rounded-[12px] px-3 py-2 text-left text-[12px] transition-colors ${
-                  index === activeIndex ? "bg-cyan-50 text-cyan-700" : "text-slate-700 hover:bg-slate-50"
-                }`}
-              >
-                <span className="truncate">@{name}</span>
-                {index === activeIndex ? <span className="text-[10px] text-cyan-500">Enter</span> : null}
-              </button>
+            {groupedSuggestions.map((group) => (
+              <div key={group.label}>
+                <div className="px-2 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-400">
+                  {group.label}
+                </div>
+                {group.items.map((item, localIdx) => {
+                  const globalIdx = group.startIndex + localIdx;
+                  const name = String(item?.name || item?.title || "").trim();
+                  const isActive = globalIdx === activeIndex;
+                  const isInputItem = item.kind === "connected_input";
+                  const mediaKind = item.mediaKind || "image";
+                  const thumbnail = item.thumbnail || null;
+                  const isAudio = mediaKind === "audio" || (thumbnail && isAudioContent(thumbnail));
+
+                  return (
+                    <button
+                      key={name}
+                      type="button"
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        insertMention(item);
+                      }}
+                      className={`flex w-full items-center gap-2.5 rounded-[12px] px-2.5 py-1.5 text-left text-[12px] transition-colors ${
+                        isActive ? "bg-cyan-50 text-cyan-700" : "text-slate-700 hover:bg-slate-50"
+                      }`}
+                    >
+                      {/* Thumbnail / Icon */}
+                      {isInputItem ? (
+                        isAudio ? (
+                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[8px] bg-violet-50 ring-1 ring-violet-100">
+                            <AudioIcon />
+                          </div>
+                        ) : thumbnail ? (
+                          <img
+                            src={thumbnail}
+                            alt=""
+                            className="h-8 w-8 shrink-0 rounded-[8px] object-cover ring-1 ring-slate-200"
+                          />
+                        ) : (
+                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[8px] bg-cyan-50 ring-1 ring-cyan-100">
+                            <ImageIcon />
+                          </div>
+                        )
+                      ) : (
+                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[8px] bg-slate-50 ring-1 ring-slate-100">
+                          <PersonIcon />
+                        </div>
+                      )}
+
+                      {/* Name */}
+                      <span className="min-w-0 flex-1 truncate font-medium">@{name}</span>
+
+                      {/* Kind badge */}
+                      {isInputItem && (
+                        <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${isAudio ? "bg-violet-50 text-violet-600" : "bg-cyan-50 text-cyan-600"}`}>
+                          {isAudio ? "音频" : "图片"}
+                        </span>
+                      )}
+
+                      {isActive && <span className="ml-auto shrink-0 text-[10px] text-cyan-500">Enter</span>}
+                    </button>
+                  );
+                })}
+              </div>
             ))}
           </div>,
           document.body,

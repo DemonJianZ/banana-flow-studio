@@ -25,6 +25,8 @@ def _shot_context(shot: dict[str, Any]) -> dict[str, Any]:
         "locations": shot.get("locations") or [],
         "matched_scene_folder": scene_info.get("folder_name"),
         "props": shot.get("props") or [],
+        "visual_description": shot.get("visual_description") or shot.get("action"),
+        "audio_description": shot.get("audio_description"),
         "action": shot.get("action"),
         "dialogue": shot.get("dialogue"),
         "camera": shot.get("camera"),
@@ -35,23 +37,23 @@ def _shot_context(shot: dict[str, Any]) -> dict[str, Any]:
 
 def _build_optimize_prompt(shots: list[dict[str, Any]]) -> str:
     system = (
-        "你是专业图像提示词工程师，为每个分镜生成高质量的 Gemini/GPT image generation 风格英文提示词。\n"
+        "你是专业视频/图像提示词工程师，为每个分镜生成高质量的中文提示词，用于 AI 视频/图像生成模型。\n"
         "输出严格 JSON，顶层字段：prompts（数组）。\n"
         "不要输出 markdown，不要解释。\n\n"
         "prompts 数组中每个对象包含：\n"
-        "  shot_id（与输入对应）, prompt（英文自然语言描述，150-300词）\n\n"
+        "  shot_id（与输入对应）, prompt（中文自然语言描述，80-150字）\n\n"
         "提示词要求：\n"
-        "1. 用完整的自然语言句子描述，不要用逗号分隔的标签列表。\n"
-        "2. 按顺序描述：角色外貌与服装 → 场景环境与背景 → 动作与情绪 → 摄影机/构图 → 光线与氛围。\n"
-        "3. 如果 matched_characters 有值，说明有对应角色资产，提示词中强调角色需保持一致的视觉风格。\n"
-        "4. 如果 matched_scene_folder 有值，提示词中引用该场景的地点特征。\n"
-        "5. 不要在图片中渲染文字或字幕。\n"
-        "6. 结尾加：high quality, production-ready, no text, no watermark.\n\n"
+        "1. 用流畅的中文自然语言句子描述，不要用逗号分隔的标签列表。\n"
+        "2. 按顺序描述：画面主体（角色动作与表情）→ 场景环境与背景 → 摄影机运动/构图 → 光线与氛围。\n"
+        "3. visual_description 是画面核心，必须完整转写进提示词；audio_description 是环境/动作/氛围音效，不要写成字幕或台词；dialogue 是角色台词，不要把台词文字画到画面中。\n"
+        "4. 如果 matched_characters 有值，说明当前镜头有匹配的角色参考图，提示词中明确写出角色名以保持一致性（例如\"辰辰身着白色仙袍\"）。\n"
+        "5. 如果 matched_scene_folder 有值，在提示词中引用该场景的地点特征（例如\"辰辰庭院的桃花树下\"）。\n"
+        "6. 不要在画面中渲染文字、字幕或水印。\n"
+        "7. 结尾加：高质量，电影感，无字幕，无水印。\n\n"
         "输入分镜数据：\n"
         + json.dumps([_shot_context(s) for s in shots], ensure_ascii=False, indent=2)
     )
     return system
-
 
 # ---------------------------------------------------------------------------
 # Public API

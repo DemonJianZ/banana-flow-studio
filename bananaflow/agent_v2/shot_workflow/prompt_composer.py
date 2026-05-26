@@ -4,24 +4,29 @@ from .schemas import ShotSpec
 
 
 def compose_prompt(shot: ShotSpec, aspect_ratio: str = "16:9") -> str:
-    chars = ", ".join(shot.get("characters") or [])
-    parts = [
-        "Cinematic production still for one storyboard shot.",
-        f"Shot ID: {shot.get('shot_id', '')}.",
-    ]
-    if shot.get("scene"):
-        parts.append(f"Scene: {shot['scene']}.")
-    if shot.get("time"):
-        parts.append(f"Time: {shot['time']}.")
+    """中文兜底提示词，供 LLM 优化失败时使用。"""
+    parts: list[str] = []
+
+    chars = "、".join(shot.get("characters") or [])
     if chars:
-        parts.append(f"Characters: {chars}.")
-    if shot.get("action"):
-        parts.append(f"Action and composition: {shot['action']}.")
-    if shot.get("dialogue"):
-        parts.append(f"Dialogue context, do not render text in image: {shot['dialogue']}.")
-    parts.extend([
-        f"Camera: {shot.get('camera') or 'cinematic medium shot'}.",
-        f"Mood: {shot.get('mood') or 'cinematic, clean, coherent'}.",
-        f"Aspect ratio {aspect_ratio}, high quality, coherent character design, production-ready frame, no subtitles, no watermark.",
-    ])
-    return " ".join(part for part in parts if part).strip()
+        parts.append(f"角色：{chars}。")
+
+    if shot.get("scene"):
+        parts.append(f"场景：{shot['scene']}。")
+
+    if shot.get("time"):
+        parts.append(f"时间：{shot['time']}。")
+
+    visual = shot.get("visual_description") or shot.get("action") or ""
+    if visual:
+        parts.append(visual)
+
+    if shot.get("camera"):
+        parts.append(f"镜头：{shot['camera']}。")
+
+    if shot.get("mood"):
+        parts.append(f"氛围：{shot['mood']}。")
+
+    parts.append("高质量，电影感，无字幕，无水印。")
+
+    return " ".join(p for p in parts if p).strip()

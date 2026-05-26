@@ -14,6 +14,7 @@ from agent_v2.graph.nodes.execute_storyboard import execute_storyboard
 from agent_v2.graph.nodes.execute_shot_workflow import execute_shot_workflow
 from agent_v2.graph.nodes.execute_script_extract import execute_script_extract
 from agent_v2.graph.nodes.execute_build_asset_canvas import execute_build_asset_canvas
+from agent_v2.graph.nodes.execute_build_video_canvas import execute_build_video_canvas
 from agent_v2.graph.nodes.build_response import build_response
 
 
@@ -30,6 +31,7 @@ def build_agent_graph(checkpointer=None):
     builder.add_node("execute_shot_workflow", execute_shot_workflow)
     builder.add_node("execute_script_extract", execute_script_extract)
     builder.add_node("execute_build_asset_canvas", execute_build_asset_canvas)
+    builder.add_node("execute_build_video_canvas", execute_build_video_canvas)
     builder.add_node("build_response", build_response)
 
     builder.add_edge(START, "normalize_request")
@@ -50,11 +52,12 @@ def build_agent_graph(checkpointer=None):
         "execute_tool_call",
         _route_after_tool,
         {
-            "execute_storyboard":    "execute_storyboard",
-            "execute_shot_workflow": "execute_shot_workflow",
-            "execute_script_extract":    "execute_script_extract",
+            "execute_storyboard":         "execute_storyboard",
+            "execute_shot_workflow":      "execute_shot_workflow",
+            "execute_script_extract":     "execute_script_extract",
             "execute_build_asset_canvas": "execute_build_asset_canvas",
-            "build_response":            "build_response",
+            "execute_build_video_canvas": "execute_build_video_canvas",
+            "build_response":             "build_response",
         },
     )
 
@@ -63,6 +66,7 @@ def build_agent_graph(checkpointer=None):
     builder.add_edge("execute_shot_workflow", "build_response")
     builder.add_edge("execute_script_extract",     "build_response")
     builder.add_edge("execute_build_asset_canvas", "build_response")
+    builder.add_edge("execute_build_video_canvas", "build_response")
     builder.add_edge("build_response", END)
 
     return builder.compile(checkpointer=checkpointer)

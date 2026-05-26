@@ -21,6 +21,7 @@ _STORYBOARD_TOOL_NAMES = {"storyboard.design", "agent_storyboard_design"}
 _SHOT_WORKFLOW_TOOL_NAMES = {"shot_workflow.compose", "agent_shot_workflow_compose"}
 _SCRIPT_EXTRACT_TOOL_NAMES = {"shot_workflow.extract"}
 _ASSET_CANVAS_TOOL_NAMES = {"shot_workflow.build_asset_canvas"}
+_VIDEO_CANVAS_TOOL_NAMES = {"shot_workflow.build_video_canvas"}
 
 
 def _route_after_classify(state: dict) -> str:
@@ -42,4 +43,6 @@ def _route_after_tool(state: dict) -> str:
         return "execute_script_extract"
     if tool_name in _ASSET_CANVAS_TOOL_NAMES:
         return "execute_build_asset_canvas"
+    if tool_name in _VIDEO_CANVAS_TOOL_NAMES:
+        return "execute_build_video_canvas"
     return "build_response"

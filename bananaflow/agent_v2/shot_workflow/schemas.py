@@ -12,6 +12,8 @@ class ShotSpec(TypedDict, total=False):
     characters: list[str]
     locations: list[str]
     props: list[str]
+    visual_description: str
+    audio_description: str
     action: str
     dialogue: str
     camera: str
@@ -20,6 +22,7 @@ class ShotSpec(TypedDict, total=False):
     needs_reference_image: bool
     mode: str
     prompt: str
+    duration: int
     asset_bindings: dict[str, Any]
 
 

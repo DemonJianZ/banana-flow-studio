@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useEffect } from "react";
+import React, { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import {
   Upload,
   ImagePlus,
@@ -49,6 +49,7 @@ import {
   DEFAULT_VIDEO_SPLIT_OUTPUT_RESOLUTION,
   isImageFileLike,
   isVideoFileLike,
+  isAudioFileLike,
   isMediaFileLike,
   normalizeInputMediaKind,
   getReferenceNodeTitle,
@@ -59,7 +60,7 @@ import {
 } from "../../constants/workbench.jsx";
 import { polishCanvasPrompt } from "../../api/agentCanvas";
 import { downloadMedia } from "../../lib/downloadMedia";
-import { isVideoContent } from "../../lib/mediaType.js";
+import { isVideoContent, isAudioContent } from "../../lib/mediaType.js";
 import { buildRoleProfileStructuredOutput } from "../../lib/roleProfileStructurer.js";
 import { API_BASE } from "../../config";
 import InlineDropdown from "./InlineDropdown";
@@ -130,6 +131,7 @@ const NodeComponent = ({
   onShotChipClick,
   onStoryboardScriptFiles,
   setRunToast,
+  connectedInputNodes = EMPTY_LIST,
 }) => {
   const [showCopied, setShowCopied] = useState(false);
   const [compactActiveIndex, setCompactActiveIndex] = useState(0);
@@ -173,10 +175,10 @@ const NodeComponent = ({
     };
   }, [node.id, onNodeElementChange]);
   const inputMediaKind = normalizeInputMediaKind(node.data.mediaKind);
-  const simpleMediaInputAccept = inputMediaKind === "image" ? "image/*" : inputMediaKind === "video" ? "video/*" : "image/*,video/*";
-  const simpleMediaUploadLabel = inputMediaKind === "image" ? "上传图片" : inputMediaKind === "video" ? "上传视频" : "上传图片/视频";
-  const simpleMediaDropTitle = inputMediaKind === "image" ? "拖拽图片到此，或点击上传" : inputMediaKind === "video" ? "拖拽视频到此，或点击上传" : "拖拽媒体到此，或点击上传";
-  const simpleMediaSupportHint = inputMediaKind === "image" ? "支持 JPG / PNG / WebP / GIF" : inputMediaKind === "video" ? "支持 MP4 / MOV / WebM" : "支持常见图片与视频格式";
+  const simpleMediaInputAccept = inputMediaKind === "image" ? "image/*" : inputMediaKind === "video" ? "video/*" : inputMediaKind === "audio" ? "audio/*" : "image/*,video/*";
+  const simpleMediaUploadLabel = inputMediaKind === "image" ? "上传图片" : inputMediaKind === "video" ? "上传视频" : inputMediaKind === "audio" ? "上传音频" : "上传图片/视频";
+  const simpleMediaDropTitle = inputMediaKind === "image" ? "拖拽图片到此，或点击上传" : inputMediaKind === "video" ? "拖拽视频到此，或点击上传" : inputMediaKind === "audio" ? "拖拽音频到此，或点击上传" : "拖拽媒体到此，或点击上传";
+  const simpleMediaSupportHint = inputMediaKind === "image" ? "支持 JPG / PNG / WebP / GIF" : inputMediaKind === "video" ? "支持 MP4 / MOV / WebM" : inputMediaKind === "audio" ? "支持 MP3 / WAV / AAC / OGG" : "支持常见图片与视频格式";
   const readSimpleMediaUploadFiles = readFilesAsDataUrls;
 
   const submitStoryboardScriptFiles = useCallback(
@@ -210,6 +212,7 @@ const NodeComponent = ({
     const files = Array.from(e.target.files || []).filter((file) => {
       if (inputMediaKind === "image") return isImageFileLike(file);
       if (inputMediaKind === "video") return isVideoFileLike(file);
+      if (inputMediaKind === "audio") return isAudioFileLike(file);
       return isMediaFileLike(file);
     });
     if (!files.length) return;
@@ -313,6 +316,47 @@ const NodeComponent = ({
   const isInlineImg2ImgNode = isProcessor && node.data.mode === "multi_image_generate";
   const isInlineImageGenNode = isInlineText2ImgNode || isInlineImg2ImgNode;
   const isImageCreationNode = isProcessor && node.data.title === "图像创作";
+
+  // Build @mention options from connected sibling input nodes (for text_input node)
+  const connectedInputMentionOptions = useMemo(() => {
+    if (!isTextInputNode || !connectedInputNodes.length) return EMPTY_LIST;
+    const seen = new Set();
+    const result = [];
+    let imageCount = 0;
+    let audioCount = 0;
+    connectedInputNodes.forEach((inputNode) => {
+      const id = inputNode.id;
+      if (seen.has(id)) return;
+      seen.add(id);
+      const title = String(inputNode.data?.title || "").trim();
+      const mediaKind = inputNode.data?.mediaKind || "image";
+      const images = Array.isArray(inputNode.data?.images) ? inputNode.data.images : [];
+      const thumbnail = images[0] || null;
+      const isAudio = mediaKind === "audio";
+      if (isAudio) {
+        audioCount += 1;
+      } else {
+        imageCount += 1;
+      }
+      const defaultName = isAudio ? `音频${audioCount}` : `图片${imageCount}`;
+      result.push({
+        name: title || defaultName,
+        mediaKind,
+        thumbnail,
+        kind: "connected_input",
+        nodeId: id,
+      });
+    });
+    return result;
+  }, [isTextInputNode, connectedInputNodes]);
+
+  // Merge connected input mentions (first) with library persona mentions
+  const mergedMentionOptions = useMemo(() => {
+    if (!isTextInputNode) return personaMentionOptions;
+    if (!connectedInputMentionOptions.length) return personaMentionOptions;
+    return [...connectedInputMentionOptions, ...personaMentionOptions];
+  }, [isTextInputNode, connectedInputMentionOptions, personaMentionOptions]);
+
   const hideInlineAiResults =
     isInlineText2ImgNode || (isVideoGen && (node.data.mode === "img2video" || node.data.mode === "text2video"));
   const hasDedicatedLastFrameInput = false;
@@ -2047,14 +2091,15 @@ const NodeComponent = ({
             {node.data.images?.length > 0 ? (
               <div className="max-h-[520px] overflow-y-auto custom-scrollbar">
 	                {node.data.images.slice(0, MAX_RENDERED_MEDIA_ITEMS_PER_NODE).map((img, i) => {
+	                  const isAudioItem = inputMediaKind === "audio" || isAudioContent(img);
+	                  const isVideoItem = !isAudioItem && isVideoContent(img);
 	                  const isActive = isSameArtifactSelection(activeArtifact, {
                       url: img,
-                      kind: isVideoContent(img) ? "video" : "image",
+                      kind: isVideoItem ? "video" : "image",
                       fromNodeId: node.id,
                     });
-	                  const isVideoItem = isVideoContent(img);
 	                  const showVideoActions = isVideoItem && simpleMediaActionIndex === i;
-	                  const showImageActions = !isVideoItem && simpleMediaActionIndex === i;
+	                  const showImageActions = !isVideoItem && !isAudioItem && simpleMediaActionIndex === i;
 	                  const showVideoUpscaleOverlay = isVideoItem && compactVideoUpscalePending && simpleMediaActionIndex === i;
 	                  const showVideoRmbgOverlay = isVideoItem && videoRmbgPending && simpleMediaActionIndex === i;
 	                  const showVideoLineartOverlay = isVideoItem && videoLineartPending && simpleMediaActionIndex === i;
@@ -2072,7 +2117,16 @@ const NodeComponent = ({
                           : ""
 	                      }`}
 	                    >
-	                      {isVideoItem ? (
+	                      {isAudioItem ? (
+	                        <div className="flex flex-col items-center gap-2 p-3">
+	                          <audio
+	                            src={resolveAssetUrl(img)}
+	                            controls
+	                            className="w-full"
+	                            onMouseDown={(e) => e.stopPropagation()}
+	                          />
+	                        </div>
+	                      ) : isVideoItem ? (
 	                        <>
                             <button
                               type="button"
@@ -2210,6 +2264,7 @@ const NodeComponent = ({
                     const files = Array.from(e.dataTransfer?.files || []).filter((file) => {
                       if (inputMediaKind === "image") return isImageFileLike(file);
                       if (inputMediaKind === "video") return isVideoFileLike(file);
+                      if (inputMediaKind === "audio") return isAudioFileLike(file);
                       return isMediaFileLike(file);
                     });
                     if (!files.length) return;
@@ -2403,7 +2458,7 @@ const NodeComponent = ({
                 wrapperClassName="nodrag"
                 className="block min-h-[132px] w-full resize-none border-0 bg-transparent px-0 py-0 pb-12 text-[13px] leading-6 outline-none nodrag placeholder:text-slate-400"
                 overlayClassName="px-0 py-0 pb-12 text-[13px] leading-6"
-                personas={personaMentionOptions}
+                personas={mergedMentionOptions}
                 rows={5}
                 placeholder="例如：一只戴宇航头盔的橘猫站在雨夜霓虹街头，电影感打光，低机位，浅景深。"
                 value={node.data.text || ""}

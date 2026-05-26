@@ -9,6 +9,7 @@ const PipelineBatchVideo = lazy(() => import("./pages/PipelineBatchVideo"));
 const PipelineFeatureExtract = lazy(() => import("./pages/PipelineFeatureExtract"));
 const PipelineBatchWordArt = lazy(() => import("./pages/PipelineBatchWordArt"));
 const PipelineRmbg = lazy(() => import("./pages/PipelineRmbg"));
+const GeminiChat = lazy(() => import("./pages/GeminiChat"));
 
 
 const LoadingScreen = () => (
@@ -102,6 +103,14 @@ export default function App() {
               element={
                 <ProtectedRoute>
                   <PipelineBatchWordArt />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/app/gemini"
+              element={
+                <ProtectedRoute>
+                  <GeminiChat />
                 </ProtectedRoute>
               }
             />

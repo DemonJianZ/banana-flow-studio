@@ -84,7 +84,22 @@ function ShotsSection({ shots }) {
               )}
             </div>
             {sh.visual_description && (
-              <p className="text-[11px] leading-5 text-slate-600 line-clamp-2">{sh.visual_description}</p>
+              <div className="mt-1 rounded-md bg-slate-50 px-2 py-1.5">
+                <div className="mb-0.5 text-[10px] font-medium text-slate-400">画面</div>
+                <p className="text-[11px] leading-5 text-slate-600 line-clamp-3">{sh.visual_description}</p>
+              </div>
+            )}
+            {sh.audio_description && (
+              <div className="mt-1 rounded-md bg-amber-50 px-2 py-1.5">
+                <div className="mb-0.5 text-[10px] font-medium text-amber-500">音效</div>
+                <p className="text-[11px] leading-5 text-amber-700 line-clamp-2">{sh.audio_description}</p>
+              </div>
+            )}
+            {sh.dialogue && (
+              <div className="mt-1 rounded-md bg-indigo-50 px-2 py-1.5">
+                <div className="mb-0.5 text-[10px] font-medium text-indigo-500">台词</div>
+                <p className="whitespace-pre-wrap text-[11px] leading-5 text-indigo-700 line-clamp-4">{sh.dialogue}</p>
+              </div>
             )}
             {(sh.characters || []).length > 0 && (
               <div className="mt-1 flex flex-wrap gap-1">
@@ -100,7 +115,7 @@ function ShotsSection({ shots }) {
   );
 }
 
-export default function ScriptExtractionCard({ data, onConfirm, confirmed = false }) {
+export default function ScriptExtractionCard({ data, onConfirm, confirmed = false, superseded = false }) {
   const [loading, setLoading] = useState(false);
 
   const characters = data?.characters || [];
@@ -136,7 +151,11 @@ export default function ScriptExtractionCard({ data, onConfirm, confirmed = fals
         <span className="text-[10px] text-slate-400">
           {characters.length} 个角色 · {scenes.length} 个场景 · {shots.length} 个分镜
         </span>
-        {confirmed ? (
+        {superseded ? (
+          <span className="rounded-full bg-slate-100 border border-slate-300 px-3 py-1 text-[11px] text-slate-500 font-medium">
+            已更新
+          </span>
+        ) : confirmed ? (
           <span className="rounded-full bg-green-50 border border-green-200 px-3 py-1 text-[11px] text-green-700 font-medium">
             已确认
           </span>

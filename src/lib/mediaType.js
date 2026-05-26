@@ -1,3 +1,4 @@
+const AUDIO_EXTENSION_PATTERN = /\.(mp3|wav|aac|ogg|flac|m4a|opus|wma)(?:$|[?#])/i;
 const VIDEO_EXTENSION_PATTERN = /\.(mp4|webm|mov|m4v|avi|mkv|m3u8)(?:$|[?#])/i;
 const BINARY_VIDEO_PATTERN = /\.(bin)(?:$|[?#])/i;
 const VIDEO_URL_HINT_PATTERN = /\/video\b|output_video|play_url|m3u8|mime=video|content_type=video|hdai_chat/i;
@@ -11,6 +12,14 @@ const getInspectableUrlText = (value) => {
   } catch {
     return text.toLowerCase();
   }
+};
+
+export const isAudioContent = (value) => {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  if (lower.startsWith("data:audio/")) return true;
+  return AUDIO_EXTENSION_PATTERN.test(text);
 };
 
 export const isVideoContent = (value) => {

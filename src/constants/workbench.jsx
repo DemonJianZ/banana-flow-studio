@@ -843,9 +843,16 @@ export const isVideoFileLike = (file) => {
   return VIDEO_FILE_EXT_PATTERN.test(name);
 };
 
+export const isAudioFileLike = (file) => {
+  const mime = String(file?.type || "").trim().toLowerCase();
+  if (mime.startsWith("audio/")) return true;
+  const name = String(file?.name || "").trim().toLowerCase();
+  return /\.(mp3|wav|aac|ogg|flac|m4a|opus|wma)$/.test(name);
+};
+
 export const isMediaFileLike = (file) => isImageFileLike(file) || isVideoFileLike(file);
 
-export const normalizeInputMediaKind = (value) => (value === "image" || value === "video" ? value : "mixed");
+export const normalizeInputMediaKind = (value) => (value === "image" || value === "video" || value === "audio" ? value : "mixed");
 
 export const getReferenceNodeTitle = (mediaKind = "mixed") => {
   const normalizedMediaKind = normalizeInputMediaKind(mediaKind);

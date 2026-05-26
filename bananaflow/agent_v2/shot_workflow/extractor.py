@@ -82,6 +82,7 @@ def extract_shots_from_text(source: str, max_shots: int = 12) -> list[ShotSpec]:
             if speaker not in local_chars:
                 local_chars.append(speaker)
         title = action[:28] or dialogue[:28] or f"镜头 {idx}"
+        audio_description = _infer_audio_description(block)
         shots.append({
             "shot_id": f"shot_{idx:02d}",
             "index": idx,
@@ -89,6 +90,8 @@ def extract_shots_from_text(source: str, max_shots: int = 12) -> list[ShotSpec]:
             "scene": scene_default,
             "time": time_default,
             "characters": local_chars,
+            "visual_description": action,
+            "audio_description": audio_description,
             "action": action,
             "dialogue": dialogue,
             "camera": _infer_camera(block),
@@ -96,6 +99,22 @@ def extract_shots_from_text(source: str, max_shots: int = 12) -> list[ShotSpec]:
             "reference_hint": _infer_reference_hint(block),
         })
     return shots
+
+
+def _infer_audio_description(text: str) -> str:
+    source = str(text or "")
+    cues: list[str] = []
+    if any(word in source for word in ("风", "风声", "树叶", "桃花", "庭院", "鸟鸣")):
+        cues.append("轻微风声、树叶摩擦和庭院环境声")
+    if any(word in source for word in ("脚步", "跑", "跳", "手势舞", "打斗", "碰撞", "摔")):
+        cues.append("动作声与衣料摩擦声")
+    if any(word in source for word in ("哭", "笑")):
+        cues.append("人物非语言情绪声效")
+    if any(word in source for word in ("法力", "魔法", "光", "能量", "控制")):
+        cues.append("轻微能量流动音效")
+    if not cues:
+        cues.append("轻微环境声与低频氛围音乐")
+    return "；".join(cues)
 
 
 def _infer_camera(text: str) -> str:

@@ -59,10 +59,6 @@ import {
 } from "lucide-react";
 import { useAuth } from "../auth/AuthProvider";
 import { useNavigate } from "../router";
-import TopicCards from "../components/agent-canvas/TopicCards";
-import ScriptBriefCard from "../components/agent-canvas/ScriptBriefCard";
-import ScriptExecutionPlan from "../components/agent-canvas/ScriptExecutionPlan";
-import ScriptPlanSummary from "../components/agent-canvas/ScriptPlanSummary";
 import PreferenceSuggestionCard from "../components/agent-canvas/PreferenceSuggestionCard";
 import DramaMarkdownBlock from "../components/workbench/DramaMarkdownBlock";
 import ShotAnnotatedScriptBlock from "../components/workbench/ShotAnnotatedScriptBlock";
@@ -86,7 +82,6 @@ import {
   writeAiChatAnchorDebugState,
 } from "../lib/aiChatAnchorDebug";
 import {
-  extractProductKeyword,
   polishCanvasPrompt,
   runVideoSplitTask,
   runVideoLineartTask,
@@ -125,20 +120,12 @@ import { isVideoContent } from "../lib/mediaType.js";
 import { buildRoleProfileStructuredOutput } from "../lib/roleProfileStructurer.js";
 import {
   EMPTY_LIST,
-  AGENT_RUN_STEPS,
   STORYBOARD_RUN_STEPS,
   SHOT_WORKFLOW_RUN_STEPS,
-  DRAMA_RUN_STEPS,
   AGENT_RESULT_CARD_WIDTH,
-  SCRIPT_PLATFORM_OPTIONS,
-  SCRIPT_PRICE_BAND_OPTIONS,
-  SCRIPT_CONVERSION_GOAL_OPTIONS,
-  SCRIPT_AUDIENCE_OPTIONS,
-  normalizeScriptBrief,
   isPreviewableArtifact,
   matchesSceneBinding,
   stripStoryboardDisplayIds,
-  buildInitialScriptBrief,
   getAgentTurnStepLabel,
   NODE_TYPES,
   HIDDEN_IMAGE_CONFIG_MODES,
@@ -176,10 +163,11 @@ import {
 } from "../constants/workbench.jsx";
 import { useAssetLibrary, cloneAssetLibrarySnapshot, buildSnapshotDigest, normalizeAssetLibraryStore, buildAssetLibraryAssetsFromSnapshot, mergeAssetLibraryAssets, normalizeAssetLibraryPersona } from "../hooks/useAssetLibrary";
 import { useCanvas, cloneCanvasNodeLight } from "../hooks/useCanvas";
-import { useAgentChat, makeAgentId, shortenSessionTitle, HITL_FEEDBACK_REASON_OPTIONS } from "../hooks/useAgentChat";
+import { useAgentChat, makeAgentId, HITL_FEEDBACK_REASON_OPTIONS } from "../hooks/useAgentChat";
 import { useWorkbenchRun } from "../hooks/useWorkbenchRun";
 
 const PreferencesPanel = React.lazy(() => import("../components/agent-canvas/PreferencesPanel"));
+
 
 // ==========================================
 // Config & Constants
@@ -192,37 +180,16 @@ const AGENT_DOCUMENT_MAX_BYTES = 5 * 1024 * 1024;
 const WORD_DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 const WORD_LEGACY_DOC_MIME_TYPE = "application/msword";
 const AGENT_QUICK_ACTIONS = [
-  { id: "script", label: "生成爆款脚本" },
-  { id: "drama", label: "创作短剧" },
+  { id: "shot_workflow", label: "剧本工作流" },
   { id: "canvas", label: "搭建画布" },
 ];
-const AGENT_DEFAULT_QUICK_ACTION_IDS = ["script", "drama", "canvas"];
-const AGENT_DRAMA_QUICK_PROMPT = "帮我创作一个竖屏短剧大纲";
-const AGENT_SCRIPT_EXAMPLES = [
-  "帮我写一个洗面奶的爆款口播脚本，主打温和清洁和控油",
-  "帮我写一个防晒霜的小红书种草脚本，突出清爽不搓泥",
-  "帮我写一个眼霜的直播带货脚本，突出淡纹和保湿",
-  "帮我写一个面膜的15秒短视频脚本，强调急救补水",
-  "帮我写一个洗发水的对比型爆款脚本，突出去屑控油",
-];
+const AGENT_SHOT_WORKFLOW_QUICK_PROMPT = "请为我上传或粘贴的剧本搭建每个镜头的文生图/图生图工作流";
 const AGENT_CANVAS_EXAMPLES = [
   "帮我搭一个文生图接图生视频流程",
   "帮我搭一个上传图片后去背景再输出",
   "帮我搭一个本地文生图流程",
   "帮我搭一个上传商品图后做多角度镜头",
   "帮我搭一个上传图片后做特征提取再输出",
-];
-const AGENT_PRODUCT_CHIPS = [
-  "洗面奶",
-  "防晒",
-  "眼霜",
-  "面膜",
-  "精华",
-  "粉底",
-  "卸妆",
-  "身体乳",
-  "洗发水",
-  "益生菌",
 ];
 const CHAT_PANEL_COLLAPSED_HEIGHT = 50;
 const CHAT_PANEL_COLLAPSED_WIDTH = 168;
@@ -1132,16 +1099,8 @@ const isDeprecatedImageModel = (item) => {
 const filterDeprecatedImageModels = (items = EMPTY_LIST) =>
   (Array.isArray(items) ? items : EMPTY_LIST).filter((item) => !isDeprecatedImageModel(item));
 
-const getDefaultLanguageModelId = (options) => {
-  const list = Array.isArray(options) ? options : EMPTY_LIST;
-  if (!list.length) return "";
-  const preferred = list.find((item) => {
-    const id = String(item?.id || "").trim().toLowerCase();
-    const name = String(item?.name || "").trim().toLowerCase();
-    return name.includes("gemini-3-flash") || id.includes("gemini-3-flash");
-  });
-  return preferred?.id || list[0]?.id || "";
-};
+
+
 const getDefaultVideoModelId = (options) => {
   if (!Array.isArray(options) || options.length === 0) return DEFAULT_VIDEO_MODEL_ID;
   return options[0]?.id || DEFAULT_VIDEO_MODEL_ID;
@@ -1345,9 +1304,6 @@ const getNodeAnchorPosition = (node, nodeElement, direction = "output", handle =
 
 
 
-
-
-
 const Workbench = () => {
   const { user, apiFetch } = useAuth();
   const navigate = useNavigate();
@@ -1450,7 +1406,6 @@ const Workbench = () => {
     agentPromptPolishError, setAgentPromptPolishError,
     promptPolishDialog,
     activeComposerActionId, setActiveComposerActionId,
-    showScriptExamples, setShowScriptExamples,
     showCanvasExamples, setShowCanvasExamples,
     agentComposerFiles, setAgentComposerFiles,
     agentDevMode, setAgentDevMode,
@@ -1496,7 +1451,6 @@ const Workbench = () => {
     clearPendingTaskForActiveSession,
     refreshMemoryPreferences,
     updateSuggestionStatus,
-    ensureAgentResultCard,
     focusAgentResultCard,
     toggleAgentResultCardCollapsed,
     minimizeAgentResultCard,
@@ -1642,10 +1596,6 @@ const Workbench = () => {
     return () => document.removeEventListener("mousedown", handlePointerDown);
   }, [sidebarVideoCreateMenu]);
 
-  const languageModelOptions = useMemo(
-    () => (Array.isArray(aiChatModels.language) && aiChatModels.language.length ? aiChatModels.language : EMPTY_LIST),
-    [aiChatModels.language],
-  );
   const imageModelRecords = useMemo(
     () => filterDeprecatedImageModels(Array.isArray(aiChatModels.image) && aiChatModels.image.length ? aiChatModels.image : EMPTY_LIST),
     [aiChatModels.image],
@@ -1658,7 +1608,6 @@ const Workbench = () => {
     const source = Array.isArray(aiChatModels.video) && aiChatModels.video.length ? aiChatModels.video : DEFAULT_VIDEO_MODELS;
     return source.filter((item) => !DEPRECATED_VIDEO_MODEL_IDS.has(String(item?.id || "").trim()));
   }, [aiChatModels.video]);
-  const defaultLanguageModelId = useMemo(() => getDefaultLanguageModelId(languageModelOptions), [languageModelOptions]);
   const defaultImageModelId = useMemo(() => getDefaultImageModelId(imageModelRecords), [imageModelRecords]);
   const threeViewImageModelId = useMemo(() => {
     const preferred = String(AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2 || "").trim();
@@ -1666,6 +1615,46 @@ const Workbench = () => {
     return findAIChatModelIdByKeywords(imageModelRecords) || defaultImageModelId;
   }, [defaultImageModelId, imageModelRecords]);
   const defaultVideoModelId = useMemo(() => getDefaultVideoModelId(videoModelOptions), [videoModelOptions]);
+
+  // For each text_input node: find sibling input nodes connected to the same downstream node
+  const connectedInputsByNodeId = useMemo(() => {
+    const map = new Map();
+    const nodeById = new Map(nodes.map((n) => [n.id, n]));
+    // Build downstream map: nodeId → Set of downstream nodeIds
+    const downstreamOf = new Map();
+    connections.forEach((c) => {
+      if (!c.from || !c.to) return;
+      if (!downstreamOf.has(c.from)) downstreamOf.set(c.from, new Set());
+      downstreamOf.get(c.from).add(c.to);
+    });
+    // Build upstream map: nodeId → Set of upstream nodeIds
+    const upstreamOf = new Map();
+    connections.forEach((c) => {
+      if (!c.from || !c.to) return;
+      if (!upstreamOf.has(c.to)) upstreamOf.set(c.to, new Set());
+      upstreamOf.get(c.to).add(c.from);
+    });
+    nodes.forEach((n) => {
+      if (n.type !== "text_input") return;
+      const downstreamIds = downstreamOf.get(n.id) || new Set();
+      const siblingInputNodes = [];
+      const seen = new Set();
+      downstreamIds.forEach((downId) => {
+        const upstreamIds = upstreamOf.get(downId) || new Set();
+        upstreamIds.forEach((sibId) => {
+          if (sibId === n.id || seen.has(sibId)) return;
+          const sib = nodeById.get(sibId);
+          if (sib && sib.type === "input") {
+            seen.add(sibId);
+            siblingInputNodes.push(sib);
+          }
+        });
+      });
+      map.set(n.id, siblingInputNodes);
+    });
+    return map;
+  }, [nodes, connections]);
+
   const updateApiDebugStatus = useCallback((key, next) => {
     if (key === "aiChatAnchor") {
       const current = readAiChatAnchorDebugState();
@@ -3913,120 +3902,6 @@ const Workbench = () => {
     window.addEventListener("mouseup", onMouseUp);
   };
 
-  const sendAIChatLanguageStream = useCallback(
-    async (userText, route = null) => {
-      const message = String(userText || "").trim();
-      if (!message) return { ok: false, error: "消息为空" };
-      if (!defaultLanguageModelId) {
-        updateApiDebugStatus("aiChatLang", { status: "error", message: "缺少语言模型ID" });
-        setRunToast({ message: "AI Chat 失败：缺少语言模型ID", type: "error" });
-        return { ok: false, error: "缺少语言模型ID" };
-      }
-
-      const turnId = `turn_${makeAgentId()}`;
-      updateApiDebugStatus("aiChatLang", { status: "loading", message: "POST /ai/aiChat part=1" });
-      updateActiveAgentSession((session) => ({
-        ...session,
-        title: session.title === "新会话" ? shortenSessionTitle(message) : session.title,
-        turns: [
-          ...(session.turns || []),
-          {
-            id: turnId,
-            userText: message,
-            extractedProduct: "",
-            status: "assistant",
-            assistantText: "",
-            quickActions: [],
-            productChips: [],
-            routeDebug: buildRouteDebug(route || { intent: "CHITCHAT", reason: "ai_chat_stream", product: "" }, true),
-            createdAt: Date.now(),
-            stepIndex: 0,
-          },
-        ],
-      }));
-
-      let fullText = "";
-      try {
-        updateApiDebugStatus("aiChatLang", {
-          status: "loading",
-          message: `POST /ai/viewAIChatModelParams id=${defaultLanguageModelId}`,
-        });
-        await Promise.race([
-          resolveModelParamsForId(defaultLanguageModelId),
-          new Promise((_, reject) =>
-            window.setTimeout(() => reject(new Error("语言模型参数请求超时(4s)")), 4000),
-          ),
-        ]).catch((error) => {
-          pushApiDebugDetail("aiChatLang", {
-            type: "warning",
-            path: "/ai/viewAIChatModelParams",
-            message: error instanceof Error ? error.message : String(error),
-          });
-        });
-        const authorizationInfo = resolveMemberAuthorizationInfo();
-        updateApiDebugStatus("aiChatLang", { status: "loading", message: "POST /api/ai_chat_stream_via_curl" });
-        await aiChatStream(
-          apiFetch,
-          {
-            history_ai_chat_record_id: aiChatHistoryRecordIdRef.current || undefined,
-            module_enum: "1",
-            part_enum: String(AI_CHAT_PART_ENUM_1),
-            ai_chat_session_id: aiChatSessionIdRef.current || undefined,
-            ai_chat_model_id: defaultLanguageModelId,
-            message,
-          },
-          {
-            authorization: authorizationInfo?.value || "",
-            preferApiFetchFirst: true,
-            useBackendCurlProxy: true,
-            onDebug: (event) => pushApiDebugDetail("aiChatLang", event),
-            onChunk: (chunk) => {
-              const delta = String(chunk || "");
-              if (!delta) return;
-              fullText += delta;
-              updateActiveAgentSession((session) => ({
-                ...session,
-                turns: (session.turns || []).map((turn) =>
-                  turn.id === turnId ? { ...turn, assistantText: fullText } : turn,
-                ),
-              }));
-            },
-            onMeta: (meta) => {
-              if (meta?.aiChatSessionId) aiChatSessionIdRef.current = meta.aiChatSessionId;
-              if (meta?.historyAiChatRecordId) aiChatHistoryRecordIdRef.current = meta.historyAiChatRecordId;
-            },
-          },
-        );
-
-        if (!fullText) fullText = "已收到响应，但内容为空。";
-        updateApiDebugStatus("aiChatLang", {
-          status: "success",
-          message: `ok model=${defaultLanguageModelId}`,
-        });
-        return { ok: true, error: "" };
-      } catch (error) {
-        const messageText = formatAIChatErrorMessage(error);
-        updateApiDebugStatus("aiChatLang", {
-          status: "error",
-          message: messageText,
-        });
-        updateActiveAgentSession((session) => ({
-          ...session,
-          turns: (session.turns || []).map((turn) =>
-            turn.id === turnId
-              ? {
-                  ...turn,
-                  assistantText: fullText || `请求失败：${messageText}`,
-                }
-              : turn,
-          ),
-        }));
-        setRunToast({ message: `AI Chat 失败：${messageText}`, type: "error" });
-        return { ok: false, error: messageText };
-      }
-    },
-    [apiFetch, defaultLanguageModelId, pushApiDebugDetail, resolveModelParamsForId, updateActiveAgentSession, updateApiDebugStatus],
-  );
 
 
   const getRecentAgentUploadedDocuments = useCallback(() => {
@@ -4090,180 +3965,7 @@ const Workbench = () => {
     [activeAgentSession?.id, activeArtifact, apiFetch, canvasId, getRecentAgentUploadedDocuments, shouldReuseRecentUploadedDocuments],
   );
 
-  const runMissionOnTurn = useCallback(
-    async (turnId, userText, extractedProduct, routeMeta = {}, scriptBrief = null) => {
-      try {
-        const normalizedBrief = normalizeScriptBrief(
-          scriptBrief || { product: extractedProduct },
-        );
-        const agentResponse = await runAgentConversation(
-          userText,
-          routeMeta,
-          {
-            product: normalizedBrief.product || extractedProduct || "",
-            audience: normalizedBrief.audience || "",
-            priceBand: normalizedBrief.priceBand || "",
-            conversionGoal: normalizedBrief.conversionGoal || "",
-            primaryPlatform: normalizedBrief.primaryPlatform || "",
-            secondaryPlatform: normalizedBrief.secondaryPlatform || "",
-            selectedAngle: normalizedBrief.selectedAngle || "",
-          },
-        );
-        // Backend may route to storyboard.design even when called from the script flow.
-        if (agentResponse?.intent === "tool_call" && agentResponse?.async_task?.task_id) {
-          const storyboardTaskId = String(agentResponse.async_task.task_id);
-          updateActiveAgentSession((session) => ({
-            ...session,
-            turns: (session.turns || []).map((turn) =>
-              turn.id === turnId
-                ? { ...turn, status: "running", assistantText: "分镜方案生成中...", intent: "STORYBOARD" }
-                : turn,
-            ),
-          }));
-          const taskResult = await pollStoryboardTask(storyboardTaskId, apiFetch, (s) => {
-            if (s === "running") {
-              updateActiveAgentSession((session) => ({
-                ...session,
-                turns: (session.turns || []).map((turn) =>
-                  turn.id === turnId
-                    ? { ...turn, assistantText: "分镜方案生成中（AI 正在思考）..." }
-                    : turn,
-                ),
-              }));
-            }
-          });
-          const rawSbPatch = Array.isArray(taskResult?.patch) ? taskResult.patch : [];
-          const sbPatch = enhanceStoryboardPatchWithProductionWorkflow(rawSbPatch, {
-            sourceText: userText,
-            sourceTitle: "对话输入剧本",
-            createSourceNode: true,
-          });
-          const sbNodeIds = sbPatch
-            .filter((op) => op?.op === "add_node" && op?.node?.type === "storyboard_plan")
-            .map((op) => String(op?.node?.id || "").trim())
-            .filter(Boolean);
-          if (sbPatch.length) {
-            pushHistory();
-            const pr = _applyPatch(sbPatch);
-            if (pr?.nodes && pr?.connections) {
-              upsertCanvasDraftSnapshot({ nodes: pr.nodes, connections: pr.connections, viewport: pr.viewport || viewportRef.current });
-            }
-          }
-          updateActiveAgentSession((session) => ({
-            ...session,
-            turns: (session.turns || []).map((turn) =>
-              turn.id === turnId
-                ? {
-                    ...turn,
-                    status: "done",
-                    stepIndex: STORYBOARD_RUN_STEPS.length - 1,
-                    assistantText: String(taskResult?.summary || "已生成可编辑分镜方案。").trim(),
-                    response: { storyboardNodeIds: sbNodeIds, summary: String(taskResult?.summary || "").trim() },
-                    intent: "STORYBOARD",
-                    intentReason: "storyboard_from_script_flow",
-                  }
-                : turn,
-            ),
-          }));
-          ensureAgentResultCard(turnId);
-          return;
-        }
 
-        if (!(agentResponse?.intent === "tool_call" && Array.isArray(agentResponse?.tool_result?.topics))) {
-          throw new Error("Agent 未返回脚本结果");
-        }
-        const response = agentResponse.tool_result;
-        updateActiveAgentSession((session) => {
-          const turnsNext = (session.turns || []).map((turn) =>
-            turn.id === turnId
-              ? {
-                  ...turn,
-                  status: "done",
-                  stepIndex: AGENT_RUN_STEPS.length - 1,
-                  response,
-                  exports: turn.exports || {},
-                  scriptBrief: normalizedBrief,
-                  scriptBriefDraft: null,
-                }
-              : turn,
-          );
-          return { ...session, turns: turnsNext };
-        });
-        ensureAgentResultCard(turnId);
-      } catch (error) {
-        updateActiveAgentSession((session) => ({
-          ...session,
-          turns: (session.turns || []).map((turn) =>
-            turn.id === turnId
-              ? {
-                  ...turn,
-                  status: "error",
-                  error: error?.message || String(error) || "请求失败",
-                }
-              : turn,
-          ),
-        }));
-        ensureAgentResultCard(turnId);
-        setRunToast({ message: error?.message || "Idea Script 生成失败", type: "error" });
-      }
-    },
-    [ensureAgentResultCard, runAgentConversation, updateActiveAgentSession, apiFetch, pushHistory, _applyPatch, upsertCanvasDraftSnapshot, viewportRef],
-  );
-
-  const runDramaMissionOnTurn = useCallback(
-    async (turnId, dramaPayload, routeMeta = {}) => {
-      try {
-        const payload = dramaPayload && typeof dramaPayload === "object"
-          ? dramaPayload
-          : { prompt: String(dramaPayload || "").trim() };
-        const agentResponse = await runAgentConversation(
-          String(payload?.prompt || "").trim(),
-          routeMeta,
-          {
-            taskMode: payload?.taskMode || payload?.task_mode || "",
-            episodeCount: payload?.episodeCount ?? payload?.episode_count,
-            existingScript: payload?.existingScript || payload?.existing_script || "",
-          },
-        );
-        if (!(agentResponse?.intent === "tool_call" && typeof agentResponse?.tool_result?.text === "string")) {
-          throw new Error("Agent 未返回短剧结果");
-        }
-        const response = agentResponse.tool_result;
-        updateActiveAgentSession((session) => ({
-          ...session,
-          turns: (session.turns || []).map((turn) =>
-            turn.id === turnId
-              ? {
-                  ...turn,
-                  status: "done",
-                  stepIndex: DRAMA_RUN_STEPS.length - 1,
-                  response,
-                  exports: turn.exports || {},
-                  dramaPayload: payload,
-                }
-              : turn,
-          ),
-        }));
-        ensureAgentResultCard(turnId);
-      } catch (error) {
-        updateActiveAgentSession((session) => ({
-          ...session,
-          turns: (session.turns || []).map((turn) =>
-            turn.id === turnId
-              ? {
-                  ...turn,
-                  status: "error",
-                  error: error?.message || String(error) || "请求失败",
-                }
-              : turn,
-          ),
-        }));
-        ensureAgentResultCard(turnId);
-        setRunToast({ message: error?.message || "短剧创作失败", type: "error" });
-      }
-    },
-    [ensureAgentResultCard, runAgentConversation, updateActiveAgentSession],
-  );
 
   const runCanvasPlanMission = useCallback(
     async (userText, routeMeta = {}, requestOptions = {}) => {
@@ -4362,129 +4064,7 @@ const Workbench = () => {
     return [text];
   }, []);
 
-  const resolvePendingProductCandidate = useCallback((text) => {
-    const raw = String(text || "").trim();
-    if (!raw) return "";
-    const byExtractor = extractProductKeyword(raw);
-    if (byExtractor) return byExtractor;
-    if (raw.length <= 24 && !/[，。,.;；\s]/.test(raw)) {
-      if (!/(脚本|导出|渲染|帮助|怎么|你好|谢谢)/.test(raw)) {
-        return raw;
-      }
-    }
-    return "";
-  }, []);
 
-  const updateScriptBriefDraft = useCallback((turnId, nextBrief) => {
-    updateActiveAgentSession((session) => ({
-      ...session,
-      turns: (session.turns || []).map((turn) =>
-        turn.id === turnId
-          ? {
-              ...turn,
-              scriptBriefDraft: normalizeScriptBrief(nextBrief),
-            }
-          : turn,
-      ),
-    }));
-  }, [updateActiveAgentSession]);
-
-  const selectScriptAngleForTurn = useCallback((turnId, angle) => {
-    updateActiveAgentSession((session) => ({
-      ...session,
-      turns: (session.turns || []).map((turn) => {
-        if (turn.id !== turnId) return turn;
-        const baseBrief = normalizeScriptBrief(turn.scriptBrief || turn.scriptBriefDraft || {});
-        return {
-          ...turn,
-          scriptBrief: {
-            ...baseBrief,
-            selectedAngle: angle,
-          },
-        };
-      }),
-    }));
-  }, [updateActiveAgentSession]);
-
-  const cancelScriptBriefTurn = useCallback((turnId) => {
-    updateActiveAgentSession((session) => ({
-      ...session,
-      turns: (session.turns || []).map((turn) =>
-        turn.id === turnId
-          ? {
-              ...turn,
-              status: "assistant",
-              assistantText: "已取消这次脚本设定。",
-              scriptBriefDraft: null,
-            }
-          : turn,
-      ),
-    }));
-  }, [updateActiveAgentSession]);
-
-  const submitScriptBriefTurn = useCallback((turnId, { useDefaults = false } = {}) => {
-    const turn = (activeAgentSession?.turns || []).find((item) => item.id === turnId);
-    if (!turn) return;
-    const fallbackBrief = buildInitialScriptBrief(turn.userText || "", turn.extractedProduct || "");
-    const currentBrief = normalizeScriptBrief(turn.scriptBriefDraft || turn.scriptBrief || fallbackBrief);
-    const nextBrief = normalizeScriptBrief(
-      useDefaults
-        ? {
-            ...fallbackBrief,
-            ...currentBrief,
-            product: currentBrief.product || fallbackBrief.product,
-            primaryPlatform: currentBrief.primaryPlatform || fallbackBrief.primaryPlatform || "抖音",
-            conversionGoal: currentBrief.conversionGoal || fallbackBrief.conversionGoal || "点击商品详情",
-          }
-        : currentBrief,
-    );
-
-    if (!nextBrief.product) {
-      setRunToast({ message: "请先填写产品 / 服务", type: "error" });
-      return;
-    }
-    if (!nextBrief.primaryPlatform) {
-      setRunToast({ message: "请至少选择一个主平台", type: "error" });
-      return;
-    }
-
-    updateActiveAgentSession((session) => ({
-      ...session,
-      turns: (session.turns || []).map((item) =>
-        item.id === turnId
-          ? {
-              ...item,
-              status: "running",
-              error: "",
-              stepIndex: 0,
-              extractedProduct: nextBrief.product,
-              scriptBrief: nextBrief,
-              scriptBriefDraft: nextBrief,
-              routeDebug: buildRouteDebug(
-                {
-                  intent: "SCRIPT",
-                  product: nextBrief.product,
-                  reason: useDefaults ? "script_brief_submit_defaults" : "script_brief_submit",
-                },
-                true,
-              ),
-            }
-          : item,
-      ),
-    }));
-    ensureAgentResultCard(turnId);
-    runMissionOnTurn(
-      turnId,
-      turn.userText || "",
-      nextBrief.product,
-      {
-        intent: "SCRIPT",
-        product: nextBrief.product,
-        sessionId: activeAgentSession?.id || "",
-      },
-      nextBrief,
-    );
-  }, [activeAgentSession?.id, activeAgentSession?.turns, ensureAgentResultCard, runMissionOnTurn, setRunToast, updateActiveAgentSession]);
 
   const openPreferencesPanelWithSuggestion = useCallback((suggestion) => {
     if (!suggestion) return;
@@ -4635,38 +4215,6 @@ const Workbench = () => {
         return;
       }
 
-      if (pendingTask?.intent === "SCRIPT" && (pendingTask?.missing || []).includes("product")) {
-        const filledProduct = resolvePendingProductCandidate(missionText);
-        if (filledProduct) {
-          const turnId = `turn_${makeAgentId()}`;
-          const initialBrief = buildInitialScriptBrief(pendingTask.rawText || missionText, filledProduct);
-          updateActiveAgentSession((session) => ({
-            ...session,
-            turns: [
-              ...(session.turns || []),
-              {
-                id: turnId,
-                userText: pendingTask.rawText || missionText,
-                extractedProduct: filledProduct,
-                status: "clarify",
-                assistantText: `已识别产品「${filledProduct}」，请确认这次脚本设定。`,
-                createdAt: Date.now(),
-                stepIndex: 0,
-                exports: {},
-                intent: "SCRIPT",
-                intentReason: "pending_task_filled",
-                routeDebug: buildRouteDebug(
-                  { intent: "SCRIPT", reason: "pending_task_filled", product: filledProduct },
-                  false,
-                ),
-                scriptBriefDraft: initialBrief,
-              },
-            ],
-            pendingTask: null,
-          }));
-          return;
-        }
-      }
 
       if (pendingTask?.intent === "CANVAS" && (pendingTask?.missing || []).includes("prompt")) {
         const supplementedPrompt = String(missionText || "").trim();
@@ -4734,6 +4282,51 @@ const Workbench = () => {
           }
           return;
         }
+      }
+
+      // If there is an unconfirmed script extraction, treat the message as an edit instruction.
+      const pendingExtractionTurn = agentTurns
+        .filter((t) => t?.intent === "SCRIPT_EXTRACTION" && t?.status === "done" && !t?.extractionConfirmed && !t?.superseded)
+        .at(-1);
+      if (pendingExtractionTurn) {
+        updateAgentTurn(pendingExtractionTurn.id, { superseded: true });
+        const editTurnId = appendAgentTurn({
+          userText: missionText,
+          status: "running",
+          assistantText: "",
+          routeDebug: buildRouteDebug({ intent: "SCRIPT_EXTRACTION", reason: "script_edit_from_message", product: "" }, true),
+          uploadedDocuments,
+        });
+        try {
+          const editResponse = await runAgentConversation(missionText, { intent: "SCRIPT_EXTRACTION", reason: "script_edit_from_message", product: "" }, {
+            forceAction: "shot_workflow.extract",
+            canvasNodeHints: {
+              existing_extraction: { ...pendingExtractionTurn.response, source_text: pendingExtractionTurn.response?.source_text || "" },
+              edit_instruction: missionText,
+            },
+          });
+          const editResponseText = String(editResponse?.message || "").trim();
+          const editRouteDebug = buildRouteDebug({ intent: "SCRIPT_EXTRACTION", reason: "script_edit_from_message", product: "" }, true, editResponse);
+          if (editResponse?.intent === "tool_call" && editResponse?.tool_result?.kind === "script_extraction") {
+            updateAgentTurn(editTurnId, {
+              status: "done",
+              assistantText: editResponseText || "已根据您的要求更新了剧本解析结果，如有调整需求可以随时告诉我，如满意，将继续为您生成主体图及场景图。",
+              routeDebug: editRouteDebug,
+              response: editResponse.tool_result,
+              intent: "SCRIPT_EXTRACTION",
+              intentReason: editRouteDebug.reason,
+            });
+          } else {
+            updateAgentTurn(editTurnId, {
+              status: "assistant",
+              assistantText: editResponseText || "已处理您的修改请求。",
+              routeDebug: editRouteDebug,
+            });
+          }
+        } catch (editError) {
+          updateAgentTurn(editTurnId, { status: "error", assistantText: editError?.message || "修改失败，请稍后重试。" });
+        }
+        return;
       }
 
       const isShotWorkflowMission = looksLikeShotWorkflowScriptText(missionText, uploadedDocuments);
@@ -4918,54 +4511,18 @@ const Workbench = () => {
           return;
         }
 
-        if (response?.intent === "tool_call" && Array.isArray(response?.tool_result?.topics)) {
-          const product = String(
-            response?.tool_result?.audience_context?.product ||
-              extractProductKeyword(missionText) ||
-              "",
-          ).trim();
-          updateAgentTurn(pendingTurnId, {
-            extractedProduct: product,
-            status: "done",
-            stepIndex: AGENT_RUN_STEPS.length - 1,
-            exports: {},
-            intent: "SCRIPT",
-            intentReason: routeDebug.reason,
-            routeDebug,
-            response: response.tool_result,
-            scriptBrief: normalizeScriptBrief({ product }),
-            scriptBriefDraft: null,
-          });
-          return;
-        }
 
-        if (
-          response?.intent === "tool_call" &&
-          typeof response?.tool_result?.text === "string" &&
-          (Object.prototype.hasOwnProperty.call(response?.tool_result || {}, "summary") ||
-            Object.prototype.hasOwnProperty.call(response?.tool_result || {}, "mode"))
-        ) {
-          const dramaPayload = {
-            prompt: missionText,
-            taskMode: String(response?.tool_result?.mode || "").trim() || "episode_script",
-          };
-          updateAgentTurn(pendingTurnId, {
-            extractedProduct: "",
-            status: "done",
-            stepIndex: DRAMA_RUN_STEPS.length - 1,
-            exports: {},
-            intent: "DRAMA",
-            intentReason: routeDebug.reason,
-            routeDebug,
-            response: response.tool_result,
-            dramaPayload,
-          });
-          return;
-        }
 
+        const genericToolText = String(
+          response?.tool_result?.summary ||
+            response?.tool_result?.text ||
+            response?.tool_result?.answer ||
+            response?.summary ||
+            ""
+        ).trim();
         updateAgentTurn(pendingTurnId, {
           status: response?.intent === "clarify" ? "clarify" : "assistant",
-          assistantText: responseText || "我在。",
+          assistantText: responseText || genericToolText || "任务已处理。",
           routeDebug,
         });
       } catch (error) {
@@ -4980,15 +4537,11 @@ const Workbench = () => {
     [
       activeAgentSession?.id,
       activeAgentSession?.pendingTask,
-      activeAgentSession?.turns,
+      agentTurns,
       appendAssistantTurn,
       appendAgentTurn,
       clearPendingTaskForActiveSession,
-      resolvePendingProductCandidate,
       runAgentConversation,
-      runDramaMissionOnTurn,
-      runMissionOnTurn,
-      sendAIChatLanguageStream,
       apiFetch,
       runCanvasPlanMission,
       setPendingTaskForActiveSession,
@@ -5001,14 +4554,16 @@ const Workbench = () => {
   // After extraction confirmed: show the asset gen ask card (client-side, no backend call)
   const confirmScriptExtraction = useCallback(
     (extractionData) => {
-      appendAssistantTurn("", "已确认剧本提取内容，接下来是否要生成角色与场景的参考设定图？", {
+      appendAgentTurn({
+        userText: "",
+        assistantText: "已确认剧本提取内容，接下来是否要生成角色与场景的参考设定图？",
+        status: "done",
         intent: "ASSET_GEN_CONFIRM",
         response: extractionData,
         routeDebug: buildRouteDebug({ intent: "ASSET_GEN_CONFIRM", reason: "script_extraction_confirmed", product: "" }, false),
-        status: "done",
       });
     },
-    [appendAssistantTurn],
+    [appendAgentTurn],
   );
 
   // Build asset canvas groups
@@ -5023,7 +4578,7 @@ const Workbench = () => {
       });
       try {
         const response = await runAgentConversation(
-          "",
+          "生成角色与场景参考设定图",
           { intent: "ASSET_CANVAS_BUILT", reason: "asset_gen_confirmed", product: "" },
           { forceAction: "shot_workflow.build_asset_canvas", canvasNodeHints: { confirmed_extraction: extractionData } },
         );
@@ -5044,6 +4599,7 @@ const Workbench = () => {
           response: response?.tool_result || {},
           intent: "ASSET_CANVAS_BUILT",
           intentReason: routeDebug.reason,
+          extractionData: extractionData,
         });
       } catch (error) {
         updateAgentTurn(pendingTurnId, {
@@ -5107,6 +4663,51 @@ const Workbench = () => {
     [appendAgentTurn, runAgentConversation, updateAgentTurn, upsertCanvasDraftSnapshot, _applyPatch, pushHistory],
   );
 
+  const buildDirectVideoCanvas = useCallback(
+    async (extractionData) => {
+      const sourceText = String(extractionData?.source_text || "").trim();
+      const pendingTurnId = appendAgentTurn({
+        userText: "直接参考主体和场景生成视频",
+        status: "running",
+        assistantText: "",
+        routeDebug: buildRouteDebug({ intent: "VIDEO_CANVAS_BUILT", reason: "direct_video_chosen", product: "" }, true),
+        uploadedDocuments: [],
+      });
+      try {
+        const response = await runAgentConversation(
+          sourceText,
+          { intent: "VIDEO_CANVAS_BUILT", reason: "direct_video_chosen", product: "" },
+          { forceAction: "shot_workflow.build_video_canvas", canvasNodeHints: { confirmed_extraction: extractionData } },
+        );
+        const responseText = String(response?.message || "").trim();
+        const routeDebug = buildRouteDebug({ intent: "VIDEO_CANVAS_BUILT", reason: "direct_video_chosen" }, true, response);
+        const patch = Array.isArray(response?.patches) ? response.patches : [];
+        if (patch.length) {
+          pushHistory();
+          const patchResult = _applyPatch(patch);
+          if (patchResult?.nodes && patchResult?.connections) {
+            upsertCanvasDraftSnapshot({ nodes: patchResult.nodes, connections: patchResult.connections, viewport: patchResult.viewport || viewportRef.current });
+          }
+        }
+        updateAgentTurn(pendingTurnId, {
+          status: "done",
+          assistantText: responseText || String(response?.tool_result?.summary || "已搭建图生视频工作流。").trim(),
+          routeDebug,
+          response: response?.tool_result || {},
+          intent: "VIDEO_CANVAS_BUILT",
+          intentReason: routeDebug.reason,
+        });
+      } catch (error) {
+        updateAgentTurn(pendingTurnId, {
+          status: "error",
+          error: error?.message || "请求失败，请稍后重试。",
+          routeDebug: buildRouteDebug({ intent: "VIDEO_CANVAS_BUILT", reason: "direct_video_error" }, true),
+        });
+      }
+    },
+    [appendAgentTurn, runAgentConversation, updateAgentTurn, upsertCanvasDraftSnapshot, _applyPatch, pushHistory],
+  );
+
   const sendAgentMission = () => {
     const text = String(agentInput || "").trim();
     const documentAttachments = agentComposerFiles
@@ -5140,7 +4741,6 @@ const Workbench = () => {
       : "";
     setAgentInput("");
     setActiveComposerActionId("");
-    setShowScriptExamples(false);
     setShowCanvasExamples(false);
     setAgentComposerFiles((prev) => {
       prev.forEach((item) => {
@@ -5255,20 +4855,10 @@ const Workbench = () => {
 
   const handleAgentQuickAction = useCallback(
     (actionId) => {
-      if (actionId === "script") {
-        const shouldClose = activeComposerActionId === "script" || showScriptExamples;
-        setActiveComposerActionId((prev) => (prev === "script" ? "" : "script"));
+      if (actionId === "shot_workflow") {
+        setActiveComposerActionId((prev) => (prev === "shot_workflow" ? "" : "shot_workflow"));
         setShowCanvasExamples(false);
-        setShowScriptExamples(!shouldClose);
-        setAgentInputFocused(true);
-        agentInputRef.current?.focus();
-        return;
-      }
-      if (actionId === "drama") {
-        setActiveComposerActionId("drama");
-        setShowCanvasExamples(false);
-        setShowScriptExamples(false);
-        setAgentInput((prev) => (String(prev || "").trim() ? prev : AGENT_DRAMA_QUICK_PROMPT));
+        setAgentInput((prev) => (String(prev || "").trim() ? prev : AGENT_SHOT_WORKFLOW_QUICK_PROMPT));
         setAgentInputFocused(true);
         agentInputRef.current?.focus();
         return;
@@ -5276,7 +4866,6 @@ const Workbench = () => {
       if (actionId === "canvas") {
         const shouldClose = activeComposerActionId === "canvas" || showCanvasExamples;
         setActiveComposerActionId((prev) => (prev === "canvas" ? "" : "canvas"));
-        setShowScriptExamples(false);
         setShowCanvasExamples(!shouldClose);
         setAgentInputFocused(true);
         agentInputRef.current?.focus();
@@ -5291,7 +4880,6 @@ const Workbench = () => {
             false,
           ),
         });
-        return;
       }
     },
     [
@@ -5299,23 +4887,7 @@ const Workbench = () => {
       appendAssistantTurn,
       clearPendingTaskForActiveSession,
       showCanvasExamples,
-      showScriptExamples,
     ],
-  );
-
-  const handleAgentProductChip = useCallback(
-    (product) => {
-      const pendingTask = activeAgentSession?.pendingTask || null;
-      if (pendingTask?.intent === "SCRIPT" && (pendingTask?.missing || []).includes("product")) {
-        setAgentInput(product);
-        void sendAgentMissionFromText(product);
-        return;
-      }
-      const nextText = `帮我设计一个${product}的爆款脚本`;
-      setAgentInput(nextText);
-      void sendAgentMissionFromText(nextText);
-    },
-    [activeAgentSession?.pendingTask, sendAgentMissionFromText],
   );
 
   const insertCanvasPromptExample = useCallback((text) => {
@@ -5326,30 +4898,11 @@ const Workbench = () => {
     agentInputRef.current?.focus();
   }, []);
 
-  const insertPreferenceQuickExample = useCallback((text) => {
-    const nextText = String(text || "帮我用小红书语气设计洗面奶爆款脚本").trim();
-    if (!nextText) return;
-    setAgentInput(nextText);
-    agentInputRef.current?.focus();
-  }, []);
-
   const handleCanvasExamplePick = useCallback((text) => {
     const nextText = String(text || "").trim();
     if (!nextText) return;
     setActiveComposerActionId("canvas");
-    setShowScriptExamples(false);
     setShowCanvasExamples(false);
-    setAgentInput(nextText);
-    setAgentInputFocused(true);
-    agentInputRef.current?.focus();
-  }, []);
-
-  const handleScriptExamplePick = useCallback((text) => {
-    const nextText = String(text || "").trim();
-    if (!nextText) return;
-    setActiveComposerActionId("script");
-    setShowCanvasExamples(false);
-    setShowScriptExamples(false);
     setAgentInput(nextText);
     setAgentInputFocused(true);
     agentInputRef.current?.focus();
@@ -5545,89 +5098,19 @@ const Workbench = () => {
   const retryAgentTurn = (turnId) => {
     const turn = (activeAgentSession?.turns || []).find((item) => item.id === turnId);
     if (!turn) return;
-    if (turn?.intent === "DRAMA") {
-      const dramaPayload =
-        turn?.dramaPayload && typeof turn.dramaPayload === "object"
-          ? turn.dramaPayload
-          : { prompt: String(turn?.userText || "").trim() };
-      if (!String(dramaPayload?.prompt || "").trim()) {
-        setRunToast({ message: "缺少短剧创作内容", type: "error" });
-        return;
-      }
-      updateActiveAgentSession((session) => ({
-        ...session,
-        turns: (session.turns || []).map((item) =>
-          item.id === turnId
-            ? {
-                ...item,
-                status: "running",
-                error: "",
-                stepIndex: 0,
-                dramaPayload,
-                routeDebug: buildRouteDebug(
-                  { intent: "DRAMA", product: "", reason: "retry" },
-                  true,
-                ),
-              }
-            : item,
-        ),
-      }));
-      runDramaMissionOnTurn(turnId, dramaPayload, {
-        intent: "DRAMA",
-        product: "",
-        sessionId: activeAgentSession?.id || "",
-      });
-      return;
-    }
-    if (turn?.intent === "STORYBOARD") {
-      updateActiveAgentSession((session) => ({
-        ...session,
-        turns: (session.turns || []).map((item) =>
-          item.id === turnId
-            ? { ...item, status: "running", error: "", stepIndex: 0 }
-            : item,
-        ),
-      }));
-      void sendAgentMissionFromText(turn.userText || "", {});
-      return;
-    }
-    const brief = normalizeScriptBrief(turn.scriptBrief || turn.scriptBriefDraft || {});
-    const product = brief.product || turn.extractedProduct || extractProductKeyword(turn.userText || "");
-    if (!product) {
-      setRunToast({ message: "请先说明产品/品类", type: "error" });
-      return;
-    }
     updateActiveAgentSession((session) => ({
       ...session,
       turns: (session.turns || []).map((item) =>
         item.id === turnId
-          ? {
-              ...item,
-              status: "running",
-              error: "",
-              stepIndex: 0,
-              extractedProduct: product,
-              scriptBrief: {
-                ...brief,
-                product,
-              },
-              routeDebug: buildRouteDebug(
-                { intent: "SCRIPT", product, reason: "retry" },
-                true,
-              ),
-            }
+          ? { ...item, status: "running", error: "", stepIndex: 0 }
           : item,
       ),
     }));
-    runMissionOnTurn(turnId, turn.userText || "", product, {
-      intent: "SCRIPT",
-      product,
-      sessionId: activeAgentSession?.id || "",
-    }, {
-      ...brief,
-      product,
+    void sendAgentMissionFromText(turn.userText || "", {
+      uploadedDocuments: Array.isArray(turn.uploadedDocuments) ? turn.uploadedDocuments : [],
     });
   };
+
 
   const deleteNode = (id) => {
     pushHistory();
@@ -7638,10 +7121,10 @@ const Workbench = () => {
                       <div className="flex flex-wrap gap-1.5">
                         <button
                           type="button"
-                          onClick={() => void sendAgentMissionFromText("帮我设计一个洗面奶的爆款脚本")}
+                          onClick={() => void sendAgentMissionFromText(AGENT_SHOT_WORKFLOW_QUICK_PROMPT)}
                           className="rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] text-slate-600 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
                         >
-                          发送任务示例
+                          发送剧本工作流示例
                         </button>
                         <button
                           type="button"
@@ -7656,7 +7139,6 @@ const Workbench = () => {
                   {agentTurns.map((turn) => {
                     const relatedCard = agentResultCards.find((item) => item.turnId === turn.id);
                     const quickActions = Array.isArray(turn.quickActions) ? turn.quickActions : [];
-                    const productChips = Array.isArray(turn.productChips) ? turn.productChips : [];
                     const memorySuggestions = Array.isArray(turn.memorySuggestions) ? turn.memorySuggestions : [];
                     const routeDebug = turn.routeDebug || null;
                     return (
@@ -7733,33 +7215,6 @@ const Workbench = () => {
                                   取消
                                 </button>
                               )}
-                              {turn.scriptBriefDraft ? (
-                                <ScriptBriefCard
-                                  draft={normalizeScriptBrief(turn.scriptBriefDraft)}
-                                  audienceOptions={SCRIPT_AUDIENCE_OPTIONS}
-                                  priceBandOptions={SCRIPT_PRICE_BAND_OPTIONS}
-                                  conversionGoalOptions={SCRIPT_CONVERSION_GOAL_OPTIONS}
-                                  platformOptions={SCRIPT_PLATFORM_OPTIONS}
-                                  onChange={(nextBrief) => updateScriptBriefDraft(turn.id, nextBrief)}
-                                  onSubmit={() => submitScriptBriefTurn(turn.id)}
-                                  onSubmitDefaults={() => submitScriptBriefTurn(turn.id, { useDefaults: true })}
-                                  onCancel={() => cancelScriptBriefTurn(turn.id)}
-                                />
-                              ) : null}
-                              {productChips.length > 0 && (
-                                <div className="flex flex-wrap gap-1">
-                                  {productChips.map((product) => (
-                                    <button
-                                      key={`${turn.id}_product_${product}`}
-                                      type="button"
-                                      onClick={() => handleAgentProductChip(product)}
-                                      className="rounded-full border border-cyan-400/25 bg-cyan-400/10 px-2.5 py-1.5 text-[10px] text-cyan-50 hover:bg-cyan-400/15"
-                                    >
-                                      {product}
-                                    </button>
-                                  ))}
-                                </div>
-                              )}
                             </div>
                           )}
                           {turn.status === "error" && (
@@ -7813,6 +7268,7 @@ const Workbench = () => {
                                   <ScriptExtractionCard
                                     data={turn.response}
                                     confirmed={Boolean(turn.extractionConfirmed)}
+                                    superseded={Boolean(turn.superseded)}
                                     onConfirm={() => {
                                       updateAgentTurn(turn.id, { extractionConfirmed: true });
                                       confirmScriptExtraction(turn.response);
@@ -7841,6 +7297,43 @@ const Workbench = () => {
                                   <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] text-slate-500">
                                     已创建 {turn.response?.char_count || 0} 个角色/道具组和 {turn.response?.scene_count || 0} 个场景组，点击运行即可生成参考图。
                                   </div>
+                                  {Array.isArray(turn.response?.next_choices) && turn.response.next_choices.length > 0 && (
+                                    <div className="space-y-1.5 pt-1">
+                                      <div className="text-[11px] text-slate-500">接下来以哪种方式生成？</div>
+                                      <div className="flex flex-wrap gap-2">
+                                        {turn.response.next_choices.map((choice) => (
+                                          <button
+                                            key={choice.id}
+                                            type="button"
+                                            disabled={Boolean(turn.workflowChoiceSelected)}
+                                            onClick={() => {
+                                              updateAgentTurn(turn.id, { workflowChoiceSelected: choice.id });
+                                              if (choice.id === "direct_video") {
+                                                buildDirectVideoCanvas(turn.extractionData || turn.response);
+                                              }
+                                              // storyboard_first: TODO
+                                            }}
+                                            className={`rounded-full border px-3 py-1.5 text-[11px] transition-colors ${
+                                              turn.workflowChoiceSelected === choice.id
+                                                ? "border-blue-400 bg-blue-50 text-blue-700"
+                                                : turn.workflowChoiceSelected
+                                                ? "border-slate-200 bg-white text-slate-400 cursor-not-allowed opacity-50"
+                                                : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 cursor-pointer"
+                                            }`}
+                                          >
+                                            {choice.label}
+                                          </button>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              ) : turn?.intent === "VIDEO_CANVAS_BUILT" ? (
+                                <div className="space-y-2">
+                                  <div className="text-slate-600">{turn.assistantText || turn.response?.summary || "已搭建图生视频工作流。"}</div>
+                                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] text-slate-500">
+                                    已为 {(turn.response?.shots || []).length} 个镜头搭建图生视频节点，点击运行即可生成视频。
+                                  </div>
                                 </div>
                               ) : turn?.intent === "SHOT_WORKFLOW" ? (
                                 <div className="space-y-2">
@@ -7853,24 +7346,9 @@ const Workbench = () => {
                                   </div>
                                 </div>
                               ) : (
-                                <>
-                                  <ScriptPlanSummary brief={normalizeScriptBrief(turn.scriptBrief || {})} />
-                                  <div className="text-slate-600">已生成 {(turn.response?.topics || []).length} 个主题</div>
-                                  {(turn.response?.topics || []).length > 0 ? (
-                                    <div className="space-y-2">
-                                      <TopicCards
-                                        topics={turn.response?.topics || []}
-                                        selectedAngle={normalizeScriptBrief(turn.scriptBrief || {}).selectedAngle || ""}
-                                        onSelectAngle={(angle) => selectScriptAngleForTurn(turn.id, angle)}
-                                      />
-                                      <ScriptExecutionPlan
-                                        brief={normalizeScriptBrief(turn.scriptBrief || {})}
-                                        topics={turn.response?.topics || []}
-                                        response={turn.response || null}
-                                      />
-                                    </div>
-                                  ) : null}
-                                </>
+                                <div className="space-y-2">
+                                  <div className="text-slate-600">{turn.assistantText || turn.response?.summary || "任务已处理。"}</div>
+                                </div>
                               )}
                               <div className="flex gap-1.5">
                                 {turn?.intent === "STORYBOARD" ? (
@@ -7886,7 +7364,7 @@ const Workbench = () => {
                                   >
                                     定位故事板
                                   </button>
-                                ) : turn?.intent !== "SCRIPT_EXTRACTION" && turn?.intent !== "ASSET_GEN_CONFIRM" && turn?.intent !== "ASSET_CANVAS_BUILT" ? (
+                                ) : turn?.intent !== "SCRIPT_EXTRACTION" && turn?.intent !== "ASSET_GEN_CONFIRM" && turn?.intent !== "ASSET_CANVAS_BUILT" && turn?.intent !== "VIDEO_CANVAS_BUILT" && turn?.intent !== "SHOT_WORKFLOW" ? (
                                   <button
                                     type="button"
                                     onClick={() => focusAgentResultCard(turn.id)}
@@ -7895,7 +7373,7 @@ const Workbench = () => {
                                     {relatedCard?.minimized ? "恢复结果卡片" : "定位结果卡片"}
                                   </button>
                                 ) : null}
-                                {turn?.intent !== "STORYBOARD" && turn?.intent !== "SCRIPT_EXTRACTION" && turn?.intent !== "ASSET_GEN_CONFIRM" && turn?.intent !== "ASSET_CANVAS_BUILT" && relatedCard && !relatedCard.minimized && (
+                                {turn?.intent !== "STORYBOARD" && turn?.intent !== "SCRIPT_EXTRACTION" && turn?.intent !== "ASSET_GEN_CONFIRM" && turn?.intent !== "ASSET_CANVAS_BUILT" && turn?.intent !== "VIDEO_CANVAS_BUILT" && turn?.intent !== "SHOT_WORKFLOW" && relatedCard && !relatedCard.minimized && (
                                   <button
                                     type="button"
                                     onClick={() => minimizeAgentResultCard(relatedCard.id)}
@@ -9130,6 +8608,22 @@ const Workbench = () => {
                   <div className="mt-0.5 text-[11px] text-slate-500">批量添加花字文案</div>
                 </div>
               </button>
+              <button
+                type="button"
+                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
+                onClick={() => {
+                  setSidebarWorkflowMenu(null);
+                  navigate("/app/gemini");
+                }}
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#EEF2FF] text-[#6366F1]">
+                  <Sparkles className="h-[18px] w-[18px]" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-medium text-slate-800">AI 小禹智能体</div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">图片 / 视频 / 分镜创作助手</div>
+                </div>
+              </button>
             </div>
           </div>
         ) : null}
@@ -9479,6 +8973,7 @@ const Workbench = () => {
                 videoModelOptions={videoModelOptions}
                 resolveModelParamsForId={resolveModelParamsForId}
                 personaMentionOptions={personaMentionOptions}
+                connectedInputNodes={connectedInputsByNodeId.get(n.id) || []}
                 onDelete={() => deleteNode(n.id)}
                 onConnectStart={(e) => {
                   e.stopPropagation();
@@ -9612,11 +9107,6 @@ const Workbench = () => {
                       <AgentResultCardContent
                         turn={turn}
                         onRetry={retryAgentTurn}
-                        onBriefChange={updateScriptBriefDraft}
-                        onBriefSubmit={(turnId) => submitScriptBriefTurn(turnId)}
-                        onBriefSubmitDefaults={(turnId) => submitScriptBriefTurn(turnId, { useDefaults: true })}
-                        onBriefCancel={cancelScriptBriefTurn}
-                        onSelectAngle={selectScriptAngleForTurn}
                       />
                     </div>
                   )}
@@ -9640,39 +9130,36 @@ const Workbench = () => {
             onMouseDown={(e) => e.stopPropagation()}
             onWheel={(e) => e.stopPropagation()}
           >
-            {showScriptExamples || showCanvasExamples ? (
+            {showCanvasExamples ? (
               <div className="absolute bottom-[calc(100%+1rem)] left-1/2 z-30 w-[min(92vw,760px)] -translate-x-1/2">
                 <div className="relative overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_24px_64px_rgba(15,23,42,0.1)]">
                   <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.84)_52%,rgba(255,255,255,0.72))]" />
                   <div className="relative border-b border-slate-200 px-5 py-4">
                     <div className="flex items-start justify-between gap-3">
                       <div>
-                        <div className="text-[15px] font-semibold text-slate-800">{showScriptExamples ? "生成脚本案例" : "画布编排案例"}</div>
+                        <div className="text-[15px] font-semibold text-slate-800">画布编排案例</div>
                         <div className="mt-1 text-[12px] leading-5 text-slate-500">
-                          {showScriptExamples
-                            ? "选择一条常用脚本需求，直接填入 Agent 输入框继续生成脚本。"
-                            : "选择一条常用案例，直接填入 Agent 输入框继续生成画布。"}
+                          选择一条常用案例，直接填入 Agent 输入框继续生成画布。
                         </div>
                       </div>
                       <button
                         type="button"
                         onClick={() => {
-                          setShowScriptExamples(false);
-                          setShowCanvasExamples(false);
+                                                setShowCanvasExamples(false);
                         }}
                         className="rounded-full p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-900"
-                        aria-label={showScriptExamples ? "关闭生成脚本案例" : "关闭画布编排案例"}
+                        aria-label="关闭画布编排案例"
                       >
                         <X className="h-4 w-4" />
                       </button>
                     </div>
                   </div>
                   <div className="relative grid gap-3 p-4 md:grid-cols-2">
-                    {(showScriptExamples ? AGENT_SCRIPT_EXAMPLES : AGENT_CANVAS_EXAMPLES).map((example, index) => (
+                    {AGENT_CANVAS_EXAMPLES.map((example, index) => (
                       <button
                         key={example}
                         type="button"
-                        onClick={() => (showScriptExamples ? handleScriptExamplePick(example) : handleCanvasExamplePick(example))}
+                        onClick={() => handleCanvasExamplePick(example)}
                         className="flex min-h-[84px] items-start gap-3 rounded-[22px] border border-slate-200 bg-white px-4 py-3 text-left transition-colors hover:border-slate-300 hover:bg-slate-50"
                       >
                         <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[11px] font-semibold text-slate-700">
@@ -9775,9 +9262,9 @@ const Workbench = () => {
                     placeholder={
                       isCanvasPromptPending
                         ? "请在这里补一句画面提示词，例如：一瓶极简风洗面奶产品图，白底，棚拍光，高清细节。"
-                        : activeComposerActionId === "drama"
-                        ? "请输入短剧需求，发送后会直接进入短剧创作流程。"
-                        : "输入你的需求，Agent 会先理解你的目标，再决定是直接回答、调用工具还是规划画布。"
+                        : activeComposerActionId === "shot_workflow"
+                        ? "粘贴剧本，或点击左侧 + 上传 txt/md/docx/csv 分镜脚本。"
+                        : "输入需求，Agent 会先理解目标，再决定是直接回答、调用工具还是规划画布。"
                     }
                     className={`w-full resize-none overflow-y-auto bg-transparent text-[15px] leading-7 outline-none placeholder:text-slate-400 ${
                       agentInputFocused || agentInput.trim() ? "min-h-[120px]" : "h-9 min-h-9 pt-[2px] text-[14px] leading-8"
@@ -9873,47 +9360,21 @@ const Workbench = () => {
                 <div className="relative">
                   <button
                     type="button"
-                    onClick={() => {
-                      const shouldClose = activeComposerActionId === "script" || showScriptExamples;
-                      setActiveComposerActionId((prev) => (prev === "script" ? "" : "script"));
-                      setShowCanvasExamples(false);
-                      setShowScriptExamples(!shouldClose);
-                      setAgentInputFocused(true);
-                    }}
+                    onClick={() => handleAgentQuickAction("shot_workflow")}
                     className={`inline-flex items-center gap-2 rounded-full border px-3.5 py-2 text-[12px] transition-all ${
-                      activeComposerActionId === "script" || showScriptExamples
+                      activeComposerActionId === "shot_workflow"
                         ? "border-cyan-200 bg-cyan-50 text-cyan-700 shadow-[0_8px_20px_rgba(15,23,42,0.06)]"
                         : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
                     }`}
                   >
                     <Sparkles className="h-3.5 w-3.5" />
-                    生成脚本
+                    剧本工作流
                   </button>
                 </div>
                 <div className="relative">
                   <button
                     type="button"
-                    onClick={() => handleAgentQuickAction("drama")}
-                    className={`inline-flex items-center gap-2 rounded-full border px-3.5 py-2 text-[12px] transition-all ${
-                      activeComposerActionId === "drama"
-                        ? "border-cyan-200 bg-cyan-50 text-cyan-700 shadow-[0_8px_20px_rgba(15,23,42,0.06)]"
-                        : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                    }`}
-                  >
-                    <Clapperboard className="h-3.5 w-3.5" />
-                    短剧创作
-                  </button>
-                </div>
-                <div className="relative">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const shouldClose = activeComposerActionId === "canvas" || showCanvasExamples;
-                      setActiveComposerActionId((prev) => (prev === "canvas" ? "" : "canvas"));
-                      setShowScriptExamples(false);
-                      setShowCanvasExamples(!shouldClose);
-                      setAgentInputFocused(true);
-                    }}
+                    onClick={() => handleAgentQuickAction("canvas")}
                     className={`inline-flex items-center gap-2 rounded-full border px-3.5 py-2 text-[12px] transition-all ${
                       activeComposerActionId === "canvas" || showCanvasExamples
                         ? "border-cyan-200 bg-cyan-50 text-cyan-700 shadow-[0_8px_20px_rgba(15,23,42,0.06)]"
@@ -10244,7 +9705,7 @@ const Workbench = () => {
               setPreferencesPanelPrefill(null);
             }}
             apiFetch={apiFetch}
-            onQuickExample={insertPreferenceQuickExample}
+            onQuickExample={insertCanvasPromptExample}
             onPreferenceSaved={handlePreferenceSavedFromPanel}
             prefill={preferencesPanelPrefill}
           />

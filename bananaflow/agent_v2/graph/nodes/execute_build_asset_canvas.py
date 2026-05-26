@@ -195,6 +195,18 @@ def execute_build_asset_canvas(state: dict) -> dict:
         "fallback_prompt_count": fallback_prompt_count,
         "patch_count": len(patch),
         "entities": enriched,
+        "next_choices": [
+            {
+                "id": "direct_video",
+                "label": "直接生成视频",
+                "description": "按剧本镜头直接参考主体和场景生成视频",
+            },
+            {
+                "id": "storyboard_first",
+                "label": "先生成分镜图",
+                "description": "先生成视觉分镜帧，再基于分镜图生成视频",
+            },
+        ],
     }
 
     return {

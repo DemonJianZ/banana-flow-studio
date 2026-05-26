@@ -234,9 +234,10 @@ export function useAgentChat({ apiFetch, onRunToastRef } = {}) {
   }, [agentTurns]);
 
   // Sync agentResultCards with agentTurns
+  // Only SCRIPT and DRAMA turns get floating overlay cards; everything else is shown inline in the chat panel.
   useEffect(() => {
     const resultTurns = agentTurns.filter(
-      (turn) => ["done", "error"].includes(turn?.status) && turn?.intent !== "STORYBOARD",
+      (turn) => ["done", "error"].includes(turn?.status) && (turn?.intent === "SCRIPT" || turn?.intent === "DRAMA"),
     );
     // eslint-disable-next-line react-hooks/set-state-in-effect -- result cards are derived session state kept for drag/minimize UI state.
     setAgentResultCards((prev) => {

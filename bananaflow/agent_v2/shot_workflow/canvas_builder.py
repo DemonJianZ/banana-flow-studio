@@ -3,10 +3,13 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from core.config import MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO
+try:
+    from core.config import MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO, VIDEO_MODEL_2_0
+except ImportError:
+    from bananaflow.core.config import MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO, VIDEO_MODEL_2_0
 from .schemas import ShotSpec
 
-_ALLOWED_IMAGE_MODES = {"text2img", "local_text2img", "multi_image_generate"}
+_ALLOWED_IMAGE_MODES = {"text2img", "local_text2img", "multi_image_generate", "img2video"}
 
 _INPUT_NODE_SPACING = 120   # vertical gap between consecutive input nodes
 _MIN_ROW_HEIGHT = 280       # minimum vertical space per shot row
@@ -65,16 +68,18 @@ def build_canvas_patch(
     selected_ids: list[str] = []
     current_y = base_y
 
-    # url → node_id: shared input nodes across shots with the same reference image
+    # url → node_id / label: shared input nodes across shots with the same reference image
     ref_url_to_node_id: dict[str, str] = {}
+    ref_url_to_label: dict[str, str] = {}
 
     for row, shot in enumerate(shots):
         mode = str(shot.get("mode") or "text2img").strip()
         if mode not in _ALLOWED_IMAGE_MODES:
             mode = "text2img"
+        is_video = mode == "img2video"
 
         ref_items: list[tuple[str, str]] = []
-        if mode == "multi_image_generate":
+        if mode in {"multi_image_generate", "img2video"}:
             ref_items = _collect_reference_items(shot, selected_artifact)
 
         # Split into new refs (need a node) vs reused refs (node already exists)
@@ -86,16 +91,54 @@ def build_canvas_patch(
             else:
                 new_ref_items.append((url, label))
 
-        # Row height is driven only by *new* input nodes in this row
+        # Pre-count audio nodes and collect audio labels
+        audio_count = 0
+        audio_mention_labels: list[str] = []
+        if is_video:
+            _bindings_pre = dict((shot.get("asset_bindings") or {}))
+            _char_bindings_pre = list(_bindings_pre.get("character_bindings") or [])
+            _seen_voices: set[str] = set()
+            for _cb in _char_bindings_pre:
+                _v = str((_cb or {}).get("voice_url") or "").strip()
+                _cn = str((_cb or {}).get("name") or (_cb or {}).get("query_name") or "").strip()
+                if _v and _v not in _seen_voices:
+                    _seen_voices.add(_v)
+                    audio_count += 1
+                    audio_mention_labels.append(f"{_cn} 音色" if _cn else "角色音色")
+
+        # Build @mention prefix for text_input from all connected input nodes this shot
+        mention_labels: list[str] = []
+        for url, label in ref_items:
+            lbl = str(label or "").strip()
+            if lbl and lbl not in ("参考图",):
+                mention_labels.append(lbl)
+        mention_labels.extend(audio_mention_labels)
+        # Deduplicate while preserving order
+        seen_labels: set[str] = set()
+        unique_mention_labels: list[str] = []
+        for lbl in mention_labels:
+            if lbl not in seen_labels:
+                seen_labels.add(lbl)
+                unique_mention_labels.append(lbl)
+        mentions_prefix = " ".join(f"@{lbl}" for lbl in unique_mention_labels)
+
+        # Base prompt text (no @mentions — used for video_gen note)
+        base_prompt_text = str(shot.get("prompt") or shot.get("visual_description") or shot.get("action") or "").strip()
+
+        # text_input shows @mentions + prompt; video_gen note uses clean prompt
+        text_input_text = f"{mentions_prefix}\n{base_prompt_text}".strip() if mentions_prefix else base_prompt_text
+
+        # Row height accounts for new ref input nodes + audio nodes
         new_count = len(new_ref_items)
-        row_height = max(_MIN_ROW_HEIGHT, 120 + new_count * _INPUT_NODE_SPACING)
+        total_left_nodes = new_count + audio_count
+        row_height = max(_MIN_ROW_HEIGHT, 120 + total_left_nodes * _INPUT_NODE_SPACING)
 
         # Processor centered on the new input block (or at row top when all reused)
         input_block_height = new_count * _INPUT_NODE_SPACING
         proc_y = current_y + max(0, (input_block_height - 80) // 2)
 
-        # --- text_input node ---
-        text_id = _new_id(f"shot{row + 1}_text")
+        # --- text_input node (all modes, including video) ---
+        text_id: str | None = _new_id(f"shot{row + 1}_text")
         patch.append({
             "op": "add_node",
             "node": {
@@ -104,9 +147,12 @@ def build_canvas_patch(
                 "x": base_x,
                 "y": current_y,
                 "data": {
-                    "text": shot.get("prompt") or "",
+                    "text": text_input_text,
                     "shot_id": shot.get("shot_id"),
                     "title": shot.get("title") or f"镜头 {row + 1}",
+                    "visual_description": shot.get("visual_description") or shot.get("action") or "",
+                    "audio_description": shot.get("audio_description") or "",
+                    "dialogue": shot.get("dialogue") or "",
                 },
             },
         })
@@ -117,6 +163,7 @@ def build_canvas_patch(
         for j, (url, label) in enumerate(new_ref_items):
             inp_id = _new_id(f"shot{row + 1}_ref{j + 1}")
             ref_url_to_node_id[url] = inp_id
+            ref_url_to_label[url] = label
             patch.append({
                 "op": "add_node",
                 "node": {
@@ -130,26 +177,60 @@ def build_canvas_patch(
             input_ids.append(inp_id)
             selected_ids.append(inp_id)
 
-        # --- processor node ---
+        # --- processor node (image) / video_gen node (video) ---
         proc_id = _new_id(f"shot{row + 1}_gen")
-        if mode == "multi_image_generate":
-            templates: dict[str, Any] = {"size": "1k", "note": ""}
+        if is_video:
+            shot_camera = str(shot.get("camera") or "").strip()
+            shot_duration = int(shot.get("duration") or 5)
+            data: dict[str, Any] = {
+                "mode": "img2video",
+                "prompt": "",
+                "templates": {
+                    "motion": "",
+                    "camera": shot_camera,
+                    "duration": shot_duration,
+                    "resolution": "720p",
+                    "ratio": aspect_ratio,
+                    "note": base_prompt_text,
+                    "generate_audio_new": True,
+                    "imageType": "4",
+                },
+                "omniReferenceOnly": True,
+                "batchSize": 1,
+                "status": "idle",
+                "refImage": None,
+                "model": VIDEO_MODEL_2_0,
+                "shot_id": shot.get("shot_id"),
+                "shot_title": shot.get("title"),
+                "visual_description": shot.get("visual_description") or shot.get("action") or "",
+                "audio_description": shot.get("audio_description") or "",
+                "dialogue": shot.get("dialogue") or "",
+                "workflow_role": "shot_video_generation",
+            }
+            node_type = "video_gen"
         else:
-            templates = {"size": "1k", "aspect_ratio": aspect_ratio}
-        data: dict[str, Any] = {
-            "mode": mode,
-            "prompt": shot.get("prompt") or "",
-            "templates": templates,
-            "batchSize": 1,
-            "status": "idle",
-            "shot_id": shot.get("shot_id"),
-            "shot_title": shot.get("title"),
-            "workflow_role": "shot_image_generation",
-            "model": MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO if mode == "local_text2img" else "",
-        }
+            if mode == "multi_image_generate":
+                templates: dict[str, Any] = {"size": "1k", "note": ""}
+            else:
+                templates = {"size": "1k", "aspect_ratio": aspect_ratio}
+            data = {
+                "mode": mode,
+                "prompt": shot.get("prompt") or "",
+                "templates": templates,
+                "batchSize": 1,
+                "status": "idle",
+                "shot_id": shot.get("shot_id"),
+                "shot_title": shot.get("title"),
+                "visual_description": shot.get("visual_description") or shot.get("action") or "",
+                "audio_description": shot.get("audio_description") or "",
+                "dialogue": shot.get("dialogue") or "",
+                "workflow_role": "shot_image_generation",
+                "model": MODEL_COMFYUI_IMAGE_Z_IMAGE_TURBO if mode == "local_text2img" else "",
+            }
+            node_type = "processor"
         patch.append({
             "op": "add_node",
-            "node": {"id": proc_id, "type": "processor", "x": base_x + 360, "y": proc_y, "data": data},
+            "node": {"id": proc_id, "type": node_type, "x": base_x + 360, "y": proc_y, "data": data},
         })
         selected_ids.append(proc_id)
 
@@ -167,10 +248,44 @@ def build_canvas_patch(
         })
         selected_ids.append(out_id)
 
+        # --- audio input nodes (video mode only, one per character voice_url) ---
+        audio_ids: list[str] = []
+        if is_video:
+            bindings = dict((shot.get("asset_bindings") or {}))
+            char_bindings = list(bindings.get("character_bindings") or [])
+            audio_y_offset = 120 + max(len(new_ref_items), 0) * _INPUT_NODE_SPACING
+            seen_voice_urls: set[str] = set()
+            for k, binding in enumerate(char_bindings):
+                voice_url = str((binding or {}).get("voice_url") or "").strip()
+                char_name = str((binding or {}).get("name") or (binding or {}).get("query_name") or "").strip()
+                if not voice_url or voice_url in seen_voice_urls:
+                    continue
+                seen_voice_urls.add(voice_url)
+                audio_id = _new_id(f"shot{row + 1}_audio{k + 1}")
+                patch.append({
+                    "op": "add_node",
+                    "node": {
+                        "id": audio_id,
+                        "type": "input",
+                        "x": base_x,
+                        "y": current_y + audio_y_offset + k * _INPUT_NODE_SPACING,
+                        "data": {
+                            "images": [voice_url],
+                            "mediaKind": "audio",
+                            "title": f"{char_name} 音色" if char_name else "角色音色",
+                        },
+                    },
+                })
+                audio_ids.append(audio_id)
+                selected_ids.append(audio_id)
+
         # --- connections ---
-        patch.append({"op": "add_connection", "connection": {"id": _new_id("c"), "from": text_id, "to": proc_id}})
+        if text_id:
+            patch.append({"op": "add_connection", "connection": {"id": _new_id("c"), "from": text_id, "to": proc_id}})
         for inp_id in input_ids:
             patch.append({"op": "add_connection", "connection": {"id": _new_id("c"), "from": inp_id, "to": proc_id}})
+        for audio_id in audio_ids:
+            patch.append({"op": "add_connection", "connection": {"id": _new_id("c"), "from": audio_id, "to": proc_id}})
         patch.append({"op": "add_connection", "connection": {"id": _new_id("c"), "from": proc_id, "to": out_id}})
 
         current_y += row_height

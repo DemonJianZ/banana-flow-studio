@@ -82,6 +82,12 @@ def create_app() -> FastAPI:
     from api.health_routes import health_router
     app.include_router(health_router)
 
+    from api.gemini_chat_routes import gemini_chat_router
+    app.include_router(gemini_chat_router)
+
+    from api.screenplay_routes import screenplay_router
+    app.include_router(screenplay_router)
+
     init_auth_db()
     init_usage_db()
     init_asset_library_store()
