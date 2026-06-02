@@ -368,6 +368,85 @@ export const THREE_VIEW_DEFAULT_TEMPLATES = {
   note: "",
 };
 
+// ─── Modes that skip app-level auth (use skipAuth: true on apiFetch) ─────────
+
+export const MODES_WITHOUT_APP_AUTH = new Set([
+  "bg_replace",
+  "gesture_swap",
+  "product_swap",
+  "local_text2img",
+  "rmbg",
+  "feature_extract",
+  "multi_angleshots",
+]);
+
+// ─── Abort error detection ────────────────────────────────────────────────────
+
+export const isAbortLikeError = (error) => {
+  const name = String(error?.name || "").toLowerCase();
+  const message = String(error?.message || error || "").toLowerCase();
+  return name === "aborterror" || message.includes("aborted") || message.includes("已取消");
+};
+
+// ─── Multi-angle output variants ─────────────────────────────────────────────
+
+export const MULTI_ANGLE_VARIANTS = [
+  { key: "close_up",    label: "特写",   prompt: "Turn the camera to a close-up.",                    seed: "304838848282290",  filename_prefix: "ComfyUI-close_up" },
+  { key: "wide_shot",   label: "广角",   prompt: "Turn the camera to a wide-angle lens.",              seed: "171478573572619",  filename_prefix: "ComfyUI-wide_shot" },
+  { key: "45_right",   label: "右 45°", prompt: "Rotate the camera 45 degrees to the right.",        seed: "1085411248135824", filename_prefix: "ComfyUI-45_right" },
+  { key: "90_right",   label: "右 90°", prompt: "Rotate the camera 90 degrees to the right.",        seed: "1055668484280226", filename_prefix: "ComfyUI-90_right" },
+  { key: "aerial_view", label: "俯视",   prompt: "Turn the camera to an aerial view.",                seed: "1118480615401224", filename_prefix: "ComfyUI-aerial_view" },
+  { key: "low_angle",  label: "低角度", prompt: "Turn the camera to a low-angle view.",               seed: "490672281762243",  filename_prefix: "ComfyUI-low_angle" },
+  { key: "45_left",    label: "左 45°", prompt: "Rotate the camera 45 degrees to the left.",         seed: "850991843243451",  filename_prefix: "ComfyUI-45_left" },
+  { key: "90_left",    label: "左 90°", prompt: "Rotate the camera 90 degrees to the left.",         seed: "1039279712437261", filename_prefix: "ComfyUI-90_left" },
+];
+
+// ─── AI Chat error formatting ────────────────────────────────────────────────
+
+export const formatAIChatErrorMessage = (error) => {
+  const messageCandidates = [
+    error?.message,
+    error?.data?.message,
+    error?.data?.detail,
+    error?.data?.errMsg,
+    error?.data?.data?.message,
+  ];
+  const baseMessage = messageCandidates.find((v) => typeof v === "string" && v.trim());
+  const parts = [];
+  if (baseMessage) parts.push(baseMessage.trim());
+  if (error?.status !== undefined && error?.status !== null) parts.push(`status=${error.status}`);
+  if (error?.errNo !== undefined && error?.errNo !== null) parts.push(`err_no=${error.errNo}`);
+  if (error?.source) parts.push(`source=${error.source}`);
+  if (error?.path) parts.push(`path=${error.path}`);
+  if (parts.length > 0) return parts.join(" | ");
+  return "未知错误（无错误信息）";
+};
+
+// ─── Video gen first/last frame reference detection ──────────────────────────
+
+const normalizeImageTypeOptionText = (value) =>
+  String(value || "").trim().toLowerCase().replace(/\s+/g, "");
+
+export const isFirstLastFrameReferenceSelection = (selectedValue, options = EMPTY_LIST) => {
+  const normalizedSelected = normalizeImageTypeOptionText(selectedValue);
+  if (!normalizedSelected) return false;
+  if (normalizedSelected === "2" || normalizedSelected.includes("首尾帧")) return true;
+  const matchedOption = (Array.isArray(options) ? options : []).find((item) => {
+    const optionValue = normalizeImageTypeOptionText(item?.value);
+    const optionLabel = normalizeImageTypeOptionText(item?.label);
+    return optionValue === normalizedSelected || optionLabel === normalizedSelected;
+  });
+  const descriptors = [selectedValue, matchedOption?.label, matchedOption?.value]
+    .map(normalizeImageTypeOptionText).filter(Boolean);
+  return descriptors.some(
+    (text) =>
+      text.includes("首尾帧") || text.includes("首帧尾帧") ||
+      (text.includes("first") && text.includes("last")) ||
+      (text.includes("last") && text.includes("frame")) ||
+      (text.includes("end") && text.includes("frame"))
+  );
+};
+
 // ─── Generic error extractor ──────────────────────────────────────────────────
 
 export const extractApiError = (data) => {
