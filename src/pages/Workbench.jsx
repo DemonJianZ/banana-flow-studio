@@ -163,6 +163,7 @@ import {
 } from "../constants/workbench.jsx";
 import { useAssetLibrary, cloneAssetLibrarySnapshot, buildSnapshotDigest, normalizeAssetLibraryStore, buildAssetLibraryAssetsFromSnapshot, mergeAssetLibraryAssets, normalizeAssetLibraryPersona } from "../hooks/useAssetLibrary";
 import { useCanvas, cloneCanvasNodeLight } from "../hooks/useCanvas";
+import { useCanvasStore } from "../stores/canvasStore.js";
 import { useAgentChat, makeAgentId, HITL_FEEDBACK_REASON_OPTIONS } from "../hooks/useAgentChat";
 import { useWorkbenchRun } from "../hooks/useWorkbenchRun";
 
@@ -1367,6 +1368,8 @@ const Workbench = () => {
     getCanvasViewportCenterPoint,
     handleCanvasDragEnter, handleCanvasDragOver, handleCanvasDragLeave, handleCanvasDrop,
     appendTemplateGraph,
+    updateNodeData,
+    applyPatch: storeApplyPatch,
   } = useCanvas({
     onClearAgentCardSelectionRef: clearAgentCardSelectionRef,
     onBoxSelectCompleteRef: boxSelectCompleteRef,
@@ -1476,7 +1479,7 @@ const Workbench = () => {
     formatHistoryParams,
     cancelNodeGeneration,
     safeInvoke,
-  } = useWorkbenchRun({ apiFetch, setNodes });
+  } = useWorkbenchRun({ apiFetch });
 
   // Callback refs for useCanvas cross-cutting concerns
   clearAgentCardSelectionRef.current = () => {
@@ -2146,126 +2149,12 @@ const Workbench = () => {
     [resolveStoryboardAssetForMention],
   );
 
+  // _applyPatch — 委托给 canvasStore.applyPatch（Immer 事务，无闭包陈旧问题）
+  // 返回值 { nodes, connections, viewport } 与原实现兼容，供 upsertCanvasDraftSnapshot 使用。
   const _applyPatch = useCallback((patchOps) => {
-  if (!Array.isArray(patchOps) || patchOps.length === 0) return;
-
-  // 从 ref 拿最新快照，避免闭包/批处理导致的“旧状态”
-  let nextNodes = Array.isArray(nodesRef.current) ? [...nodesRef.current] : [];
-  let nextConns = Array.isArray(connectionsRef.current) ? [...connectionsRef.current] : [];
-
-  let finalSelectedNodeIds = null;
-  let finalSelectedConnectionIds = null;
-  let finalViewport = null;
-
-  const hasNode = (id) => nextNodes.some(n => n?.id === id);
-  const hasConn = (id) => nextConns.some(c => c?.id === id);
-
-  const removeNodeAndEdges = (nodeId) => {
-    nextNodes = nextNodes.filter(n => n.id !== nodeId);
-    nextConns = nextConns.filter(c => c.from !== nodeId && c.to !== nodeId);
-  };
-
-  const removeConnById = (connId) => {
-    nextConns = nextConns.filter(c => c.id !== connId);
-  };
-
-  patchOps.forEach((op) => {
-    if (!op || !op.op) return;
-
-    switch (op.op) {
-      case "add_node": {
-        const node = op.node;
-        if (!node?.id) return;
-        // 避免重复 add
-        if (!hasNode(node.id)) nextNodes.push(node);
-        break;
-      }
-
-      case "add_connection": {
-        const c = op.connection;
-        if (!c?.id || !c.from || !c.to) return;
-        if (!hasConn(c.id)) nextConns.push(c);
-        break;
-      }
-
-      case "update_node": {
-        const id = op.id;
-        if (!id) return;
-        nextNodes = nextNodes.map(n => {
-          if (n.id !== id) return n;
-
-          // 允许更新 x/y（可选）
-          const x = op.x ?? n.x;
-          const y = op.y ?? n.y;
-
-          // 合并 data（浅合并，够用；如果你 data 很深可换 deep merge）
-          const mergedData = { ...(n.data || {}), ...(op.data || {}) };
-
-          return { ...n, x, y, data: mergedData };
-        });
-        break;
-      }
-
-      // ✅兼容：remove_* / delete_* 都支持
-      case "remove_node":
-      case "delete_node": {
-        if (!op.id) return;
-        removeNodeAndEdges(op.id);
-        break;
-      }
-
-      case "remove_connection":
-      case "delete_connection": {
-        if (!op.id) return;
-        removeConnById(op.id);
-        break;
-      }
-
-      // 可选：移动节点（如果后端以后加 move_node）
-      case "move_node": {
-        const { id, x, y } = op;
-        if (!id) return;
-        nextNodes = nextNodes.map(n => (n.id === id ? { ...n, x: x ?? n.x, y: y ?? n.y } : n));
-        break;
-      }
-
-      // 可选：替换连接（等价于 remove + add）
-      case "replace_connection": {
-        const { id, connection } = op;
-        if (id) removeConnById(id);
-        if (connection?.id && connection.from && connection.to && !hasConn(connection.id)) {
-          nextConns.push(connection);
-        }
-        break;
-      }
-
-      case "select_nodes": {
-        finalSelectedNodeIds = new Set(op.ids || []);
-        finalSelectedConnectionIds = new Set();
-        break;
-      }
-
-      case "set_viewport": {
-        finalViewport = op.viewport || null;
-        break;
-      }
-
-      default:
-        break;
-    }
-  });
-
-  // 最后一次性提交（更稳）
-  setNodes(nextNodes);
-  setConnections(nextConns);
-
-  if (finalSelectedNodeIds) {
-    setSelectedNodeIds(finalSelectedNodeIds);
-    setSelectedConnectionIds(finalSelectedConnectionIds || new Set());
-  }
-  if (finalViewport) setViewport(finalViewport);
-  return { nodes: nextNodes, connections: nextConns, viewport: finalViewport || viewportRef.current };
-}, [setNodes, setConnections, setSelectedNodeIds, setSelectedConnectionIds, setViewport]);
+    if (!Array.isArray(patchOps) || patchOps.length === 0) return undefined;
+    return storeApplyPatch(patchOps);
+  }, [storeApplyPatch]);
 
   // Initialize
   useEffect(() => {
@@ -5123,10 +5012,7 @@ const Workbench = () => {
     });
   };
 
-  const updateNodeData = useCallback(
-    (id, d) => setNodes((p) => p.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...d } } : n))),
-    [setNodes],
-  );
+  // updateNodeData 由 useCanvas() → useCanvasStore 提供（O(1) Immer mutate，Phase 1 迁移）
 
   const runStoryboardInputFromFiles = useCallback(
     async (nodeId, files) => {

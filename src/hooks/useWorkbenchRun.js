@@ -1,6 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import { useCanvasStore } from "../stores/canvasStore.js";
 
-export function useWorkbenchRun({ apiFetch, setNodes } = {}) {
+export function useWorkbenchRun({ apiFetch } = {}) {
+  const updateNodeData = useCanvasStore((s) => s.updateNodeData);
   const [isRunning, setIsRunning] = useState(false);
   const runAbortControllerRef = useRef(null);
   const nodeAbortControllersRef = useRef(new Map());
@@ -99,25 +101,14 @@ export function useWorkbenchRun({ apiFetch, setNodes } = {}) {
     if (controller && !controller.signal.aborted) {
       controller.abort(new DOMException("节点生成已取消", "AbortError"));
     }
-    setNodes((prev) =>
-      prev.map((node) =>
-        node.id === normalizedNodeId && node.data?.status === "loading"
-          ? {
-              ...node,
-              data: {
-                ...node.data,
-                status: "idle",
-                error: "已取消",
-                progress: 0,
-                total: 0,
-              },
-            }
-          : node,
-      ),
-    );
+    // 只在 loading 状态下重置（用 getState 同步读，避免闭包陈旧）
+    const node = useCanvasStore.getState().nodes.find((n) => n.id === normalizedNodeId);
+    if (node?.data?.status === "loading") {
+      updateNodeData(normalizedNodeId, { status: "idle", error: "已取消", progress: 0, total: 0 });
+    }
     setRunToast({ message: "已取消该节点生成", type: "info" });
     setTimeout(() => setRunToast(null), 1800);
-  }, [setNodes]);
+  }, [updateNodeData]);
 
   const safeInvoke = useCallback(
     (action, actionName = "操作") => {

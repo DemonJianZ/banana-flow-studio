@@ -9,6 +9,7 @@ import {
   isMediaFileLike,
   readFilesAsDataUrls,
 } from "../constants/workbench.jsx";
+import { useCanvasStore } from "../stores/canvasStore.js";
 
 // ==========================================
 // Config & Constants
@@ -62,15 +63,22 @@ export function useCanvas({
   onBoxSelectCompleteRef,         // React.MutableRefObject<((x1, y1, x2, y2, appendSelection) => void) | null>
   onPasteToastRef,                // React.MutableRefObject<((toast) => void) | null>
 } = {}) {
-  const [nodes, setNodes] = useState([]);
-  const [connections, setConnections] = useState([]);
+  // ── 核心画布状态：来自 Zustand store（原 useState，Phase 1 迁移）─────────────
+  const {
+    nodes, setNodes,
+    connections, setConnections,
+    viewport, setViewport,
+    selectedNodeIds, setSelectedNodeIds,
+    selectedConnectionIds, setSelectedConnectionIds,
+    activeNodeId, setActiveNodeId,
+    canvasId,
+    updateNodeData,
+    applyPatch,
+  } = useCanvasStore();
+
+  // ── 历史记录：保持 useState（Phase 2 再迁 zundo）────────────────────────────
   const [history, setHistory] = useState([]);
   const [historyStep, setHistoryStep] = useState(-1);
-  const [viewport, setViewport] = useState({ x: 0, y: 0, zoom: 1 });
-
-  const [selectedNodeIds, setSelectedNodeIds] = useState(new Set());
-  const [selectedConnectionIds, setSelectedConnectionIds] = useState(new Set());
-  const [activeNodeId, setActiveNodeId] = useState(null);
 
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   const [interactionMode, setInteractionMode] = useState("idle");
@@ -83,11 +91,6 @@ export function useCanvas({
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const [canvasDropActive, setCanvasDropActive] = useState(false);
   const [canvasDropUploading, setCanvasDropUploading] = useState(null);
-
-  const [canvasId] = useState(() => {
-    const saved = localStorage.getItem(CANVAS_KEY);
-    return saved || newCanvasId();
-  });
 
   // Refs
   const nodeElementMapRef = useRef(new Map());
@@ -106,10 +109,6 @@ export function useCanvas({
   useEffect(() => { nodesRef.current = nodes; }, [nodes]);
   useEffect(() => { connectionsRef.current = connections; }, [connections]);
   useEffect(() => { viewportRef.current = viewport; }, [viewport]);
-  useEffect(() => {
-    localStorage.setItem(CANVAS_KEY, canvasId);
-  }, [canvasId]);
-
   // History
   const pushHistory = useCallback(() => {
     const s = {
@@ -830,5 +829,8 @@ export function useCanvas({
     getCanvasViewportCenterPoint, getCanvasPastePoint,
     handleCanvasDragEnter, handleCanvasDragOver, handleCanvasDragLeave, handleCanvasDrop,
     appendTemplateGraph,
+    // store actions（Phase 1 新增，供 Workbench.jsx 直接使用）
+    updateNodeData,
+    applyPatch,
   };
 }
