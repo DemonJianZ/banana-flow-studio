@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(python3)",
-      "Bash(grep -n \"HITL_FEEDBACK_UI_ENABLED && feedbackDialog\\\\|hoveredStoryboardAssetCard$\\\\|hoveredStoryboardShotCard$\\\\|previewImage &&\" /home/ai/zhangjian/ai_studio_mvp/banana-flow-studio-dev/src/pages/Workbench.jsx)"
+      "Bash(grep -n \"HITL_FEEDBACK_UI_ENABLED && feedbackDialog\\\\|hoveredStoryboardAssetCard$\\\\|hoveredStoryboardShotCard$\\\\|previewImage &&\" /home/ai/zhangjian/ai_studio_mvp/banana-flow-studio-dev/src/pages/Workbench.jsx)",
+      "Bash(sed -n '211,215p' /home/ai/zhangjian/ai_studio_mvp/banana-flow-studio-dev/src/pages/Workbench.jsx)",
+      "Bash(sed -n '521,560p' /home/ai/zhangjian/ai_studio_mvp/banana-flow-studio-dev/src/pages/Workbench.jsx)"
     ]
   }
 }

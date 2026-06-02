@@ -170,6 +170,8 @@ import WorkbenchImagePreview from "../components/workbench/WorkbenchImagePreview
 import WorkbenchHistoryPanel from "../components/workbench/WorkbenchHistoryPanel.jsx";
 import WorkbenchRegressionDialog from "../components/workbench/WorkbenchRegressionDialog.jsx";
 import WorkbenchStoryboardAssetCard from "../components/workbench/WorkbenchStoryboardAssetCard.jsx";
+import WorkbenchSidebar from "../components/workbench/WorkbenchSidebar.jsx";
+import WorkbenchAgentComposer from "../components/workbench/WorkbenchAgentComposer.jsx";
 import WorkbenchStoryboardShotCard from "../components/workbench/WorkbenchStoryboardShotCard.jsx";
 import { useAgentChat, makeAgentId, HITL_FEEDBACK_REASON_OPTIONS } from "../hooks/useAgentChat";
 import { useWorkbenchRun } from "../hooks/useWorkbenchRun";
@@ -7445,632 +7447,57 @@ const Workbench = () => {
             void handleSidebarMediaUpload(event, "video");
           }}
         />
-        {/* Sidebar */}
-        <div className="absolute left-4 top-1/2 z-40 flex -translate-y-1/2 shrink-0 flex-col items-center gap-2">
-          <div
-            ref={sidebarUploadMenuRef}
-            className="relative shrink-0"
-            style={{ width: leftSidebarWidth }}
-            onMouseEnter={() => {
-              if (sidebarUploadMenuCloseTimerRef.current) {
-                window.clearTimeout(sidebarUploadMenuCloseTimerRef.current);
-                sidebarUploadMenuCloseTimerRef.current = null;
-              }
-              setActiveSidebarItemKey("node_upload");
-              setShowSidebarUploadMenu(true);
-            }}
-            onMouseLeave={() => {
-              if (sidebarUploadMenuCloseTimerRef.current) {
-                window.clearTimeout(sidebarUploadMenuCloseTimerRef.current);
-              }
-              sidebarUploadMenuCloseTimerRef.current = window.setTimeout(() => {
-                setShowSidebarUploadMenu(false);
-                sidebarUploadMenuCloseTimerRef.current = null;
-              }, 140);
-            }}
-          >
-            <div className="mx-auto flex w-full rounded-[32px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.96)] p-1.5 shadow-[0_4px_16px_rgba(0,0,0,0.06)] backdrop-blur-xl">
-              <button
-                type="button"
-                onClick={() => {}}
-                className="animate-bf-breathe flex h-11 w-full scale-[1.05] items-center justify-center rounded-[24px] border border-[#B9E975] bg-[linear-gradient(135deg,#A7E163_0%,#8FD14F_100%)] text-[#1F2937] transition-all duration-200 ease-in-out hover:scale-[1.075] hover:brightness-[1.02]"
-                style={{
-                  boxShadow: "0 0 0 4px rgba(163,230,53,0.15), 0 8px 20px rgba(0,0,0,0.12)",
-                }}
-                title="图片/视频上传"
-                aria-label="图片/视频上传"
-              >
-                <Upload className="h-[18px] w-[18px]" strokeWidth={2.2} />
-              </button>
-            </div>
-            {showSidebarUploadMenu ? (
-              <div
-                className="absolute left-[calc(100%+14px)] top-1/2 z-[58] w-48 -translate-y-1/2 rounded-[24px] border border-slate-200 bg-[rgba(255,255,255,0.98)] p-2 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
-                onMouseEnter={() => {
-                  if (sidebarUploadMenuCloseTimerRef.current) {
-                    window.clearTimeout(sidebarUploadMenuCloseTimerRef.current);
-                    sidebarUploadMenuCloseTimerRef.current = null;
-                  }
-                  setShowSidebarUploadMenu(true);
-                }}
-                onMouseLeave={() => {
-                  if (sidebarUploadMenuCloseTimerRef.current) {
-                    window.clearTimeout(sidebarUploadMenuCloseTimerRef.current);
-                  }
-                  sidebarUploadMenuCloseTimerRef.current = window.setTimeout(() => {
-                    setShowSidebarUploadMenu(false);
-                    sidebarUploadMenuCloseTimerRef.current = null;
-                  }, 140);
-                }}
-              >
-                <button
-                  type="button"
-                  className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left text-[12px] text-slate-700 transition-colors hover:bg-slate-50"
-                  onClick={() => {
-                    setShowSidebarUploadMenu(false);
-                    sidebarImageUploadInputRef.current?.click();
-                  }}
-                >
-                  <ImageIcon className="h-4 w-4 text-slate-500" />
-                  <span>上传图片</span>
-                </button>
-                <button
-                  type="button"
-                  className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left text-[12px] text-slate-700 transition-colors hover:bg-slate-50"
-                  onClick={() => {
-                    setShowSidebarUploadMenu(false);
-                    sidebarVideoUploadInputRef.current?.click();
-                  }}
-                >
-                  <Film className="h-4 w-4 text-slate-500" />
-                  <span>上传视频</span>
-                </button>
-                <button
-                  type="button"
-                  className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left text-[12px] text-slate-700 transition-colors hover:bg-slate-50"
-                  onClick={() => {
-                    setShowSidebarUploadMenu(false);
-                    setAssetLibraryPickerMode(true);
-                    setAssetLibraryTab("assets");
-                    setAssetLibraryDetailWorkId("");
-                    setShowAssetLibrary(true);
-                  }}
-                >
-                  <FolderOpen className="h-4 w-4 text-slate-500" />
-                  <span>从资产库选择</span>
-                </button>
-              </div>
-            ) : null}
-          </div>
-          <div
-            className="flex h-auto flex-col items-center rounded-[32px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.9)] px-2 py-2.5 shadow-[0_4px_16px_rgba(0,0,0,0.06)] backdrop-blur-xl select-none"
-            style={{ WebkitOverflowScrolling: "touch", width: leftSidebarWidth }}
-          >
-            <div className="w-full overflow-visible">
-              {renderSidebarContent()}
-            </div>
-          </div>
-          <div className="shrink-0" style={{ width: leftSidebarWidth }}>
-            <div className="mx-auto flex w-full flex-col items-center gap-1.5 rounded-[32px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.9)] px-2 py-1.5 shadow-[0_4px_16px_rgba(0,0,0,0.06)] backdrop-blur-xl">
-              <button
-                type="button"
-                onClick={undo}
-                disabled={!canUndo}
-                title="撤销"
-                aria-label="撤销"
-                className={`flex h-8 w-8 items-center justify-center rounded-full transition-colors ${
-                  canUndo
-                    ? "text-[#6B7280] hover:bg-[#EAECEF] hover:text-slate-800 active:bg-[#E1E5E9]"
-                    : "cursor-not-allowed text-slate-300"
-                }`}
-              >
-                <span className="flex h-7 w-7 items-center justify-center">
-                  <Undo className="h-[18px] w-[18px]" strokeWidth={2.2} />
-                </span>
-              </button>
-              <button
-                type="button"
-                onClick={redo}
-                disabled={!canRedo}
-                title="重做"
-                aria-label="重做"
-                className={`flex h-8 w-8 items-center justify-center rounded-full transition-colors ${
-                  canRedo
-                    ? "text-[#6B7280] hover:bg-[#EAECEF] hover:text-slate-800 active:bg-[#E1E5E9]"
-                    : "cursor-not-allowed text-slate-300"
-                }`}
-              >
-                <span className="flex h-7 w-7 items-center justify-center">
-                  <Redo className="h-[18px] w-[18px]" strokeWidth={2.2} />
-                </span>
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div className="absolute bottom-4 left-4 z-40 shrink-0" style={{ width: leftSidebarWidth }}>
-          <details className="relative group">
-            <summary
-              className="list-none mx-auto flex h-11 w-11 cursor-pointer items-center justify-center rounded-full border border-[#E5E7EB] bg-[rgba(255,255,255,0.9)] text-slate-700 shadow-[0_4px_16px_rgba(0,0,0,0.06)] backdrop-blur-xl hover:bg-[#F8FAFC] hover:text-slate-900 [&::-webkit-details-marker]:hidden"
-              title={memberLabel}
-            >
-              {memberAvatar ? (
-                <img src={memberAvatar} alt={memberLabel} className="h-full w-full rounded-full object-cover" />
-              ) : (
-                <span className="text-xs font-semibold">{String(memberLabel || "G").slice(0, 1).toUpperCase()}</span>
-              )}
-            </summary>
-            <div className="absolute bottom-full left-0 z-[70] mb-2 w-56 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.96)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.1)] backdrop-blur-xl">
-              <div className="flex items-center gap-3">
-                <div className="h-11 w-11 overflow-hidden rounded-xl border border-slate-200 bg-slate-100">
-                  {memberAvatar ? (
-                    <img src={memberAvatar} alt={memberLabel} className="h-full w-full object-cover" />
-                  ) : (
-                    <div className="flex h-full w-full items-center justify-center text-sm font-semibold text-slate-700">
-                      {String(memberLabel || "G").slice(0, 1).toUpperCase()}
-                    </div>
-                  )}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-semibold text-slate-800">{memberLabel}</div>
-                  <div className="text-[10px] text-slate-400">
-                    {memberInfoLoginUrl ? "会员未登录" : "会员信息"}
-                  </div>
-                  <div className="mt-1">
-                    <span
-                      className={`inline-flex rounded-full border px-2 py-0.5 text-[9px] ${
-                        userAuthsLoading
-                          ? "border-slate-200 bg-slate-50 text-slate-500"
-                          : isAdminUser
-                          ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-100"
-                          : "border-slate-200 bg-slate-50 text-slate-500"
-                      }`}
-                    >
-                      {userAuthsLoading ? "权限加载中" : isAdminUser ? "管理员" : "普通成员"}
-                    </span>
-                  </div>
-                </div>
-              </div>
-              <div className="mt-3 grid grid-cols-2 gap-2">
-                <div className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5">
-                  <div className="text-[10px] text-slate-500">当前积分</div>
-                  <div className="mt-0.5 text-xs font-semibold text-yellow-700">{formatMemberPoints(memberPoint)}</div>
-                </div>
-                <div className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5">
-                  <div className="text-[10px] text-slate-500">累计积分</div>
-                  <div className="mt-0.5 text-xs font-semibold text-emerald-700">{formatMemberPoints(memberTotalPoint)}</div>
-                </div>
-              </div>
-              {memberInfoLoginUrl ? (
-                <button
-                  type="button"
-                  onClick={() => navigateToMemberLogin(memberInfoLoginUrl)}
-                  className="mt-2 w-full rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-2 text-left text-[11px] text-cyan-700 hover:border-cyan-300 hover:bg-cyan-100"
-                >
-                  前往会员登录
-                </button>
-              ) : null}
-            </div>
-          </details>
-        </div>
-
-        {isLeftSidebarCollapsed && hoveredSidebarPreview ? (
-          <div
-            className="pointer-events-none absolute z-[55] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.96)] px-4 py-4 text-left shadow-[0_20px_44px_rgba(15,23,42,0.1)] backdrop-blur-xl"
-            style={{ left: leftSidebarWidth + 18, top: hoveredSidebarPreview.top }}
-          >
-            <div className="absolute left-[-6px] top-1/2 h-3 w-3 -translate-y-1/2 rotate-45 border-l border-t border-[#E5E7EB] bg-[rgba(255,255,255,0.96)]" />
-            <div className="flex items-start gap-3">
-              <div
-                className={`mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280] ring-1 ${
-                  hoveredSidebarPreview.active ? "ring-slate-400/35" : "ring-slate-200"
-                }`}
-              >
-                {hoveredSidebarPreview.icon
-                  ? React.createElement(hoveredSidebarPreview.icon, { className: "w-4 h-4" })
-                  : null}
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="text-[13px] font-medium leading-5 text-slate-800">
-                  {hoveredSidebarPreview.label}
-                </div>
-                <div className="mt-1.5 text-[11px] leading-5 text-slate-400 whitespace-normal break-words">
-                  {hoveredSidebarPreview.desc}
-                </div>
-              </div>
-            </div>
-          </div>
-        ) : null}
-
-        {sidebarNodeInputMenu ? (
-          <div
-            data-sidebar-node-input-menu="true"
-            className="absolute z-[58] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.98)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
-            style={{ left: leftSidebarWidth + 18, top: sidebarNodeInputMenu.top }}
-            onMouseEnter={() => {
-              if (sidebarNodeInputMenuCloseTimerRef.current) {
-                window.clearTimeout(sidebarNodeInputMenuCloseTimerRef.current);
-                sidebarNodeInputMenuCloseTimerRef.current = null;
-              }
-            }}
-            onMouseLeave={() => {
-              if (sidebarNodeInputMenuCloseTimerRef.current) {
-                window.clearTimeout(sidebarNodeInputMenuCloseTimerRef.current);
-              }
-              sidebarNodeInputMenuCloseTimerRef.current = window.setTimeout(() => {
-                setSidebarNodeInputMenu(null);
-                sidebarNodeInputMenuCloseTimerRef.current = null;
-              }, 140);
-            }}
-          >
-            <div className="mb-2 px-1 text-[11px] font-medium text-slate-500">选择输入</div>
-            <div className="space-y-1.5">
-              <button
-                type="button"
-                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
-                onClick={() => {
-                  setActiveSidebarItemKey("node_text_prompt");
-                  setSidebarNodeInputMenu(null);
-                  safeInvoke(() => addNode(NODE_TYPES.TEXT_INPUT), "提示词输入");
-                }}
-              >
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
-                  <Clipboard className="h-[18px] w-[18px]" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-[13px] font-medium text-slate-800">提示词输入</div>
-                  <div className="mt-0.5 text-[11px] text-slate-500">纯文本提示词输入，可连接到创作节点</div>
-                </div>
-              </button>
-              <button
-                type="button"
-                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
-                onClick={() => {
-                  setActiveSidebarItemKey("node_storyboard_input");
-                  setSidebarNodeInputMenu(null);
-                  safeInvoke(() => addNode(NODE_TYPES.STORYBOARD_INPUT), "故事板输入");
-                }}
-              >
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#EEF7F6] text-[#0F766E]">
-                  <Clapperboard className="h-[18px] w-[18px]" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-[13px] font-medium text-slate-800">故事板输入</div>
-                  <div className="mt-0.5 text-[11px] text-slate-500">拖入剧本文件，自动生成可编辑故事板</div>
-                </div>
-              </button>
-              <button
-                type="button"
-                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
-                onClick={() => {
-                  setActiveSidebarItemKey("node_image_generate");
-                  setSidebarNodeInputMenu(null);
-                  safeInvoke(() => addNode(NODE_TYPES.PROCESSOR, "image_creation"), "图像创作");
-                }}
-              >
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
-                  <ImagePlus className="h-[18px] w-[18px]" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-[13px] font-medium text-slate-800">图像创作</div>
-                  <div className="mt-0.5 text-[11px] text-slate-500">与现有生图节点一致，支持模型、尺寸和比例</div>
-                </div>
-              </button>
-              <button
-                type="button"
-                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
-                onClick={() => {
-                  setActiveSidebarItemKey("node_video_generate");
-                  setSidebarNodeInputMenu(null);
-                  safeInvoke(() => addNode(NODE_TYPES.VIDEO_GEN, "first_last_reference"), "视频创作");
-                }}
-              >
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
-                  <Film className="h-[18px] w-[18px]" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-[13px] font-medium text-slate-800">视频创作</div>
-                  <div className="mt-0.5 text-[11px] text-slate-500">内置首尾帧参考 / 全能参考模式切换</div>
-                </div>
-              </button>
-            </div>
-          </div>
-        ) : null}
-
-        {sidebarWorkflowMenu ? (
-          <div
-            data-sidebar-workflow-menu="true"
-            className="absolute z-[58] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.98)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
-            style={{ left: leftSidebarWidth + 18, top: sidebarWorkflowMenu.top }}
-            onMouseEnter={() => {
-              if (sidebarWorkflowMenuCloseTimerRef.current) {
-                window.clearTimeout(sidebarWorkflowMenuCloseTimerRef.current);
-                sidebarWorkflowMenuCloseTimerRef.current = null;
-              }
-            }}
-            onMouseLeave={() => {
-              if (sidebarWorkflowMenuCloseTimerRef.current) {
-                window.clearTimeout(sidebarWorkflowMenuCloseTimerRef.current);
-              }
-              sidebarWorkflowMenuCloseTimerRef.current = window.setTimeout(() => {
-                setSidebarWorkflowMenu(null);
-                sidebarWorkflowMenuCloseTimerRef.current = null;
-              }, 140);
-            }}
-          >
-            <div className="mb-2 px-1 text-[11px] font-medium text-slate-500">选择工作流</div>
-            <div className="space-y-1.5">
-              <button
-                type="button"
-                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
-                onClick={() => {
-                  setActiveSidebarItemKey("workflow_swap");
-                  setSidebarWorkflowMenu(null);
-                  safeInvoke(
-                    () =>
-                      handleAnchorActionClick({
-                        partEnum: AI_CHAT_PART_ENUM_209,
-                        modelId: 4,
-                        to: "workflow_swap",
-                        debugLabel: "三合一换图",
-                        action: () => navigate("/app/swap"),
-                      }),
-                    "三合一换图",
-                  );
-                }}
-              >
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
-                  <Layers className="h-[18px] w-[18px]" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-[13px] font-medium text-slate-800">三合一换图</div>
-                  <div className="mt-0.5 text-[11px] text-slate-500">换脸 / 换背景 / 换装 / 视频超清</div>
-                </div>
-              </button>
-              <button
-                type="button"
-                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
-                onClick={() => {
-                  setActiveSidebarItemKey("workflow_batch_video");
-                  setSidebarWorkflowMenu(null);
-                  safeInvoke(
-                    () =>
-                      handleAnchorActionClick({
-                        partEnum: AI_CHAT_PART_ENUM_210,
-                        modelId: 4,
-                        to: "workflow_batch_video",
-                        debugLabel: "批量动图",
-                        action: () => navigate("/app/batch-video"),
-                      }),
-                    "批量动图",
-                  );
-                }}
-              >
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
-                  <Film className="h-[18px] w-[18px]" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-[13px] font-medium text-slate-800">批量动图</div>
-                  <div className="mt-0.5 text-[11px] text-slate-500">单图生成短视频 / 视频超清</div>
-                </div>
-              </button>
-              <button
-                type="button"
-                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
-                onClick={() => {
-                  setActiveSidebarItemKey("workflow_batch_wordart");
-                  setSidebarWorkflowMenu(null);
-                  safeInvoke(
-                    () =>
-                      handleAnchorActionClick({
-                        partEnum: AI_CHAT_PART_ENUM_211,
-                        modelId: defaultVideoModelId,
-                        to: "workflow_batch_wordart",
-                        debugLabel: "批量花字",
-                        action: () => navigate("/app/batch-wordart"),
-                      }),
-                    "批量花字",
-                  );
-                }}
-              >
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
-                  <Palette className="h-[18px] w-[18px]" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-[13px] font-medium text-slate-800">批量花字</div>
-                  <div className="mt-0.5 text-[11px] text-slate-500">批量添加花字文案</div>
-                </div>
-              </button>
-              <button
-                type="button"
-                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
-                onClick={() => {
-                  setSidebarWorkflowMenu(null);
-                  navigate("/app/gemini");
-                }}
-              >
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#EEF2FF] text-[#6366F1]">
-                  <Sparkles className="h-[18px] w-[18px]" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-[13px] font-medium text-slate-800">AI 小禹智能体</div>
-                  <div className="mt-0.5 text-[11px] text-slate-500">图片 / 视频 / 分镜创作助手</div>
-                </div>
-              </button>
-            </div>
-          </div>
-        ) : null}
-
-        {sidebarImageCreateMenu ? (
-          <div
-            data-sidebar-image-create-menu="true"
-            className="absolute z-[58] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.98)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
-            style={{ left: leftSidebarWidth + 18, top: sidebarImageCreateMenu.top }}
-            onMouseEnter={() => {
-              if (sidebarImageCreateMenuCloseTimerRef.current) {
-                window.clearTimeout(sidebarImageCreateMenuCloseTimerRef.current);
-                sidebarImageCreateMenuCloseTimerRef.current = null;
-              }
-            }}
-            onMouseLeave={() => {
-              if (sidebarImageCreateMenuCloseTimerRef.current) {
-                window.clearTimeout(sidebarImageCreateMenuCloseTimerRef.current);
-              }
-              sidebarImageCreateMenuCloseTimerRef.current = window.setTimeout(() => {
-                setSidebarImageCreateMenu(null);
-                sidebarImageCreateMenuCloseTimerRef.current = null;
-              }, 140);
-            }}
-          >
-            <div className="mb-2 px-1 text-[11px] font-medium text-slate-500">选择创作方式</div>
-            <div className="space-y-1.5">
-              <button
-                type="button"
-                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
-                onClick={() => {
-                  setSidebarImageCreateMenu(null);
-                  safeInvoke(
-                    () =>
-                      handleAnchorActionClick({
-                        partEnum: AI_CHAT_PART_ENUM_203,
-                        modelId: defaultImageModelId,
-                        to: "node_image_generate_text2img",
-                        debugLabel: "文生图",
-                        action: () => createText2ImgTemplate(),
-                      }),
-                    "文生图",
-                  );
-                }}
-              >
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
-                  <ImagePlus className="h-[18px] w-[18px]" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-[13px] font-medium text-slate-800">文生图</div>
-                  <div className="mt-0.5 text-[11px] text-slate-500">从提示词直接生成图片</div>
-                </div>
-              </button>
-              <button
-                type="button"
-                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
-                onClick={() => {
-                  setSidebarImageCreateMenu(null);
-                  safeInvoke(
-                    () =>
-                      handleAnchorActionClick({
-                        partEnum: AI_CHAT_PART_ENUM_203,
-                        modelId: defaultImageModelId,
-                        to: "node_image_generate_img2img",
-                        debugLabel: "图生图",
-                        action: () => createImg2ImgTemplate(),
-                      }),
-                    "图生图",
-                  );
-                }}
-              >
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
-                  <Images className="h-[18px] w-[18px]" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-[13px] font-medium text-slate-800">图生图</div>
-                  <div className="mt-0.5 text-[11px] text-slate-500">基于单张参考图继续创作</div>
-                </div>
-              </button>
-              <button
-                type="button"
-                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
-                onClick={() => {
-                  setSidebarImageCreateMenu(null);
-                  safeInvoke(createMultiImg2ImgTemplate, "多图生图");
-                }}
-              >
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
-                  <Layers className="h-[18px] w-[18px]" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-[13px] font-medium text-slate-800">多图生图</div>
-                  <div className="mt-0.5 text-[11px] text-slate-500">多参考图联合生成与重绘</div>
-                </div>
-              </button>
-
-            </div>
-          </div>
-        ) : null}
-
-        {sidebarVideoCreateMenu ? (
-          <div
-            data-sidebar-video-create-menu="true"
-            className="absolute z-[58] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.98)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
-            style={{ left: leftSidebarWidth + 18, top: sidebarVideoCreateMenu.top }}
-            onMouseEnter={() => {
-              if (sidebarVideoCreateMenuCloseTimerRef.current) {
-                window.clearTimeout(sidebarVideoCreateMenuCloseTimerRef.current);
-                sidebarVideoCreateMenuCloseTimerRef.current = null;
-              }
-            }}
-            onMouseLeave={() => {
-              if (sidebarVideoCreateMenuCloseTimerRef.current) {
-                window.clearTimeout(sidebarVideoCreateMenuCloseTimerRef.current);
-              }
-              sidebarVideoCreateMenuCloseTimerRef.current = window.setTimeout(() => {
-                setSidebarVideoCreateMenu(null);
-                sidebarVideoCreateMenuCloseTimerRef.current = null;
-              }, 140);
-            }}
-          >
-            <div className="mb-2 px-1 text-[11px] font-medium text-slate-500">选择创作方式</div>
-            <div className="space-y-1.5">
-              <button
-                type="button"
-                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
-                onClick={() => {
-                  setSidebarVideoCreateMenu(null);
-                  safeInvoke(createText2VideoTemplate, "文生视频");
-                }}
-              >
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
-                  <Clapperboard className="h-[18px] w-[18px]" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-[13px] font-medium text-slate-800">文生视频</div>
-                  <div className="mt-0.5 text-[11px] text-slate-500">直接用提示词生成视频</div>
-                </div>
-              </button>
-              <button
-                type="button"
-                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
-                onClick={() => {
-                  setSidebarVideoCreateMenu(null);
-                  safeInvoke(createImg2VideoTemplate, "图生视频");
-                }}
-              >
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
-                  <ImagePlus className="h-[18px] w-[18px]" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-[13px] font-medium text-slate-800">图生视频</div>
-                  <div className="mt-0.5 text-[11px] text-slate-500">单张图片生成视频</div>
-                </div>
-              </button>
-              <button
-                type="button"
-                className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
-                onClick={() => {
-                  setSidebarVideoCreateMenu(null);
-                  safeInvoke(createOmniReferenceVideoTemplate, "全能生视频");
-                }}
-              >
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">
-                  <Sparkles className="h-[18px] w-[18px]" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-[13px] font-medium text-slate-800">全能生视频</div>
-                  <div className="mt-0.5 text-[11px] text-slate-500">多参考图联合驱动视频生成</div>
-                </div>
-              </button>
-            </div>
-          </div>
-        ) : null}
+        {/* Sidebar — Phase 4: extracted to WorkbenchSidebar */}
+        <WorkbenchSidebar
+          hoveredSidebarPreview={hoveredSidebarPreview}
+          setHoveredSidebarPreview={setHoveredSidebarPreview}
+          setHoveredSidebarItemKey={setHoveredSidebarItemKey}
+          sidebarNodeInputMenu={sidebarNodeInputMenu}
+          setSidebarNodeInputMenu={setSidebarNodeInputMenu}
+          sidebarWorkflowMenu={sidebarWorkflowMenu}
+          setSidebarWorkflowMenu={setSidebarWorkflowMenu}
+          sidebarImageCreateMenu={sidebarImageCreateMenu}
+          setSidebarImageCreateMenu={setSidebarImageCreateMenu}
+          activeSidebarItemKey={activeSidebarItemKey}
+          setActiveSidebarItemKey={setActiveSidebarItemKey}
+          showSidebarUploadMenu={showSidebarUploadMenu}
+          setShowSidebarUploadMenu={setShowSidebarUploadMenu}
+          sidebarVideoCreateMenu={sidebarVideoCreateMenu}
+          setSidebarVideoCreateMenu={setSidebarVideoCreateMenu}
+          sidebarUploadMenuRef={sidebarUploadMenuRef}
+          sidebarUploadMenuCloseTimerRef={sidebarUploadMenuCloseTimerRef}
+          sidebarNodeInputMenuCloseTimerRef={sidebarNodeInputMenuCloseTimerRef}
+          sidebarImageCreateMenuCloseTimerRef={sidebarImageCreateMenuCloseTimerRef}
+          sidebarVideoCreateMenuCloseTimerRef={sidebarVideoCreateMenuCloseTimerRef}
+          sidebarWorkflowMenuCloseTimerRef={sidebarWorkflowMenuCloseTimerRef}
+          sidebarImageUploadInputRef={sidebarImageUploadInputRef}
+          sidebarVideoUploadInputRef={sidebarVideoUploadInputRef}
+          leftSidebarWidth={leftSidebarWidth}
+          workspaceShellRef={workspaceShellRef}
+          memberLabel={memberLabel}
+          memberAvatar={memberAvatar}
+          memberPoint={memberPoint}
+          memberTotalPoint={memberTotalPoint}
+          memberInfoLoginUrl={memberInfoLoginUrl}
+          userAuthsLoading={userAuthsLoading}
+          isAdminUser={isAdminUser}
+          navigateToMemberLogin={navigateToMemberLogin}
+          setShowAssetLibrary={setShowAssetLibrary}
+          setAssetLibraryPickerMode={setAssetLibraryPickerMode}
+          setAssetLibraryTab={setAssetLibraryTab}
+          setAssetLibraryDetailWorkId={setAssetLibraryDetailWorkId}
+          navigate={navigate}
+          defaultVideoModelId={defaultVideoModelId}
+          onAddNode={addNode}
+          onNavigate={handleAnchorActionClick}
+          safeInvoke={safeInvoke}
+          createText2ImgTemplate={createText2ImgTemplate}
+          createImg2ImgTemplate={createImg2ImgTemplate}
+          createMultiImg2ImgTemplate={createMultiImg2ImgTemplate}
+          createImg2VideoTemplate={createImg2VideoTemplate}
+          createText2VideoTemplate={createText2VideoTemplate}
+          createOmniReferenceVideoTemplate={createOmniReferenceVideoTemplate}
+        />
 
         {/* Canvas */}
         <div
@@ -8329,411 +7756,48 @@ const Workbench = () => {
             })}
           </div>
 
-          <div
-            ref={agentComposerRef}
-            className={`absolute left-1/2 -translate-x-1/2 bottom-10 z-40 pointer-events-auto transition-all duration-200 ${
-              agentInputFocused || agentInput.trim()
-                ? "w-[min(100%-2rem,860px)]"
-                : "w-[min(100%-2rem,680px)]"
-            }`}
-            onMouseDown={(e) => e.stopPropagation()}
-            onWheel={(e) => e.stopPropagation()}
-          >
-            {showCanvasExamples ? (
-              <div className="absolute bottom-[calc(100%+1rem)] left-1/2 z-30 w-[min(92vw,760px)] -translate-x-1/2">
-                <div className="relative overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_24px_64px_rgba(15,23,42,0.1)]">
-                  <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.84)_52%,rgba(255,255,255,0.72))]" />
-                  <div className="relative border-b border-slate-200 px-5 py-4">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="text-[15px] font-semibold text-slate-800">画布编排案例</div>
-                        <div className="mt-1 text-[12px] leading-5 text-slate-500">
-                          选择一条常用案例，直接填入 Agent 输入框继续生成画布。
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                                                setShowCanvasExamples(false);
-                        }}
-                        className="rounded-full p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-900"
-                        aria-label="关闭画布编排案例"
-                      >
-                        <X className="h-4 w-4" />
-                      </button>
-                    </div>
-                  </div>
-                  <div className="relative grid gap-3 p-4 md:grid-cols-2">
-                    {AGENT_CANVAS_EXAMPLES.map((example, index) => (
-                      <button
-                        key={example}
-                        type="button"
-                        onClick={() => handleCanvasExamplePick(example)}
-                        className="flex min-h-[84px] items-start gap-3 rounded-[22px] border border-slate-200 bg-white px-4 py-3 text-left transition-colors hover:border-slate-300 hover:bg-slate-50"
-                      >
-                        <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[11px] font-semibold text-slate-700">
-                          {index + 1}
-                        </span>
-                        <span className="text-[13px] leading-6 text-slate-700 whitespace-normal break-words">{example}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            ) : null}
-            <div
-              className={`relative overflow-hidden border border-slate-200 bg-white shadow-[0_24px_60px_rgba(15,23,42,0.08)] transition-all duration-200 ${
-                agentInputFocused || agentInput.trim()
-                  ? "rounded-[32px] px-5 py-5"
-                  : "rounded-[40px] px-4 py-3"
-              }`}
-            >
-              <input
-                ref={agentUploadInputRef}
-                type="file"
-                accept={AGENT_COMPOSER_FILE_ACCEPT}
-                multiple
-                className="hidden"
-                onChange={handleAgentComposerUpload}
-              />
-              <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.72)_54%,rgba(255,255,255,0.84))]" />
-              {isCanvasPromptPending ? (
-                <div className="relative mb-4 rounded-[22px] border border-cyan-200 bg-cyan-50 px-4 py-3 text-[12px] text-cyan-700">
-                  <div className="font-medium">当前在等你补充画面提示词</div>
-                  <div className="mt-1 text-cyan-600">
-                    直接在下方输入框补一句你想生成的画面，再按回车发送即可。
-                  </div>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {CANVAS_PROMPT_EXAMPLES.map((example) => (
-                      <button
-                        key={example}
-                        type="button"
-                        onClick={() => insertCanvasPromptExample(example)}
-                        className="rounded-full border border-cyan-400/25 bg-cyan-400/10 px-3 py-1.5 text-[11px] text-cyan-50 hover:bg-cyan-400/15"
-                      >
-                        {example}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-              {selectedStoryboardTarget ? (
-                <div className="relative mb-3 flex flex-wrap items-start gap-2 rounded-[18px] border border-cyan-200 bg-cyan-50 px-3.5 py-3 text-[12px] text-cyan-800">
-                  <span className="rounded-full border border-cyan-200 bg-white px-2.5 py-1 text-[10px] font-medium text-cyan-700">
-                    正在编辑 {selectedStoryboardTarget.typeLabel}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[12px] font-medium text-slate-800 break-words">
-                      {selectedStoryboardTarget.label}
-                    </div>
-                    {selectedStoryboardTarget.summary ? (
-                      <div className="mt-1 text-[11px] leading-5 text-slate-600 break-words">
-                        {selectedStoryboardTarget.summary}
-                      </div>
-                    ) : null}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setActiveArtifact((current) => (current?.kind === "storyboard_selection" ? null : current))}
-                    className="rounded-full border border-cyan-200 bg-white px-2.5 py-1 text-[10px] text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
-                  >
-                    清除选择
-                  </button>
-                </div>
-              ) : null}
-              <div className="relative flex gap-4">
-                <button
-                  type="button"
-                  title="上传参考图片或分镜脚本表"
-                  onClick={() => agentUploadInputRef.current?.click()}
-                  className={`mt-1 flex shrink-0 items-center justify-center rounded-[20px] border border-slate-200 bg-slate-50 text-slate-700 transition-all disabled:cursor-not-allowed disabled:opacity-90 ${
-                    agentInputFocused || agentInput.trim() ? "h-[84px] w-[68px] -rotate-6" : "h-8 w-8 -rotate-[8deg] rounded-[12px]"
-                  }`}
-                >
-                  <Plus className={`${agentInputFocused || agentInput.trim() ? "h-5 w-5" : "h-4 w-4"}`} />
-                </button>
-                <div className={`relative min-w-0 flex-1 ${isCanvasPromptPending ? "pr-28" : "pr-14"}`}>
-                  <PersonaMentionTextarea
-                    ref={agentInputRef}
-                    value={agentInput}
-                    onChange={(e) => {
-                      setAgentPromptPolishError("");
-                      setAgentInput(e.target.value);
-                    }}
-                    personas={personaMentionOptions}
-                    wrapperClassName="relative"
-                    overlayClassName={`text-[15px] leading-7 ${
-                      agentInputFocused || agentInput.trim() ? "min-h-[120px]" : "h-9 min-h-9 pt-[2px] text-[14px] leading-8"
-                    }`}
-                    onFocus={() => setAgentInputFocused(true)}
-                    onMouseDown={() => setAgentInputFocused(true)}
-                    rows={1}
-                    placeholder={
-                      isCanvasPromptPending
-                        ? "请在这里补一句画面提示词，例如：一瓶极简风洗面奶产品图，白底，棚拍光，高清细节。"
-                        : activeComposerActionId === "shot_workflow"
-                        ? "粘贴剧本，或点击左侧 + 上传 txt/md/docx/csv 分镜脚本。"
-                        : "输入需求，Agent 会先理解目标，再决定是直接回答、调用工具还是规划画布。"
-                    }
-                    className={`w-full resize-none overflow-y-auto bg-transparent text-[15px] leading-7 outline-none placeholder:text-slate-400 ${
-                      agentInputFocused || agentInput.trim() ? "min-h-[120px]" : "h-9 min-h-9 pt-[2px] text-[14px] leading-8"
-                    }`}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault();
-                        sendAgentMission();
-                      }
-                    }}
-                  />
-                  {isCanvasPromptPending && (
-                    <button
-                      type="button"
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={polishAgentPromptInput}
-                      disabled={agentPromptPolishLoading || !agentInput.trim()}
-                      className={`absolute bottom-0 right-14 flex h-9 items-center justify-center gap-1.5 rounded-full border px-3 text-[10px] font-medium transition-all ${
-                        agentPromptPolishLoading
-                          ? "border-cyan-300 bg-cyan-50 text-cyan-700"
-                          : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-40"
-                      } ${agentInputFocused || agentInput.trim() ? "" : "bottom-0.5 h-8"}`}
-                      title="提示词润色"
-                    >
-                      {agentPromptPolishLoading ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Sparkles className="h-3.5 w-3.5" />
-                      )}
-                      <span>AI润色</span>
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={sendAgentMission}
-                    disabled={(!agentInput.trim() && agentComposerFiles.length === 0) || isAgentMissionRunning}
-                    className={`absolute bottom-0 right-0 flex h-12 w-12 items-center justify-center rounded-full border transition-all ${
-                      ((!agentInput.trim() && agentComposerFiles.length === 0) || isAgentMissionRunning)
-                        ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
-                        : "border-cyan-200 bg-cyan-50 text-cyan-700 shadow-[0_10px_24px_rgba(15,23,42,0.08)] hover:translate-y-[-1px] hover:bg-cyan-100"
-                    } ${agentInputFocused || agentInput.trim() ? "" : "h-9 w-9 bottom-0.5"}`}
-                  >
-                    {isAgentMissionRunning ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <ChevronUp className={`${agentInputFocused || agentInput.trim() ? "h-4 w-4" : "h-3.5 w-3.5"}`} />
-                    )}
-                  </button>
-                </div>
-              </div>
-              {agentPromptPolishError && (
-                <div className="mt-2 text-[10px] text-amber-400">{agentPromptPolishError}</div>
-              )}
-              <div
-                className={`relative flex flex-wrap gap-2 transition-all duration-200 ${
-                  agentComposerFiles.length > 0 ? "mt-3 max-h-24 opacity-100" : "max-h-0 overflow-hidden opacity-0"
-                }`}
-              >
-                {agentComposerFiles.map((file) => (
-                  <div
-                    key={file.id}
-                    className="group flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-2 py-1.5"
-                  >
-                    {file.kind === "image" ? (
-                      <img
-                        src={file.previewUrl}
-                        alt={file.name}
-                        className="h-10 w-10 rounded-xl object-cover"
-                      />
-                    ) : (
-                      <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-100 text-slate-500">
-                        <FolderOpen className="h-4 w-4" />
-                      </div>
-                    )}
-                    <div className="max-w-32 truncate text-[11px] text-slate-600">{file.name}</div>
-                    <button
-                      type="button"
-                      onClick={() => removeAgentComposerFile(file.id)}
-                      className="rounded-full p-1 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900"
-                      title={file.kind === "image" ? "移除图片" : "移除文件"}
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-              <div
-                className={`relative flex flex-wrap items-center gap-2 pr-16 transition-all duration-200 ${
-                  agentInputFocused || agentInput.trim() ? "mt-4 max-h-32 opacity-100" : "mt-0 max-h-0 overflow-hidden opacity-0"
-                }`}
-              >
-                <div className="relative">
-                  <button
-                    type="button"
-                    onClick={() => handleAgentQuickAction("shot_workflow")}
-                    className={`inline-flex items-center gap-2 rounded-full border px-3.5 py-2 text-[12px] transition-all ${
-                      activeComposerActionId === "shot_workflow"
-                        ? "border-cyan-200 bg-cyan-50 text-cyan-700 shadow-[0_8px_20px_rgba(15,23,42,0.06)]"
-                        : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                    }`}
-                  >
-                    <Sparkles className="h-3.5 w-3.5" />
-                    剧本工作流
-                  </button>
-                </div>
-                <div className="relative">
-                  <button
-                    type="button"
-                    onClick={() => handleAgentQuickAction("canvas")}
-                    className={`inline-flex items-center gap-2 rounded-full border px-3.5 py-2 text-[12px] transition-all ${
-                      activeComposerActionId === "canvas" || showCanvasExamples
-                        ? "border-cyan-200 bg-cyan-50 text-cyan-700 shadow-[0_8px_20px_rgba(15,23,42,0.06)]"
-                        : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                    }`}
-                  >
-                    <Layout className="h-3.5 w-3.5" />
-                    画布编排
-                  </button>
-                </div>
-                {isAdminUser ? (
-                  <label className="ml-auto inline-flex cursor-pointer select-none items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-2 text-[12px] text-slate-600">
-                    <input
-                      type="checkbox"
-                      checked={agentDevMode}
-                      onChange={(e) => setAgentDevMode(e.target.checked)}
-                      className="h-3.5 w-3.5 accent-slate-300"
-                    />
-                    开发模式
-                  </label>
-                ) : null}
-              </div>
-              <div
-                className={`text-[11px] text-slate-500 transition-all duration-200 ${
-                  agentInputFocused || agentInput.trim() ? "mt-3 max-h-8 opacity-100" : "max-h-0 overflow-hidden opacity-0"
-                }`}
-              >
-                回车发送，Shift+回车换行
-              </div>
-              {preferenceNotice && (
-                <div className="mt-2 rounded border border-yellow-200 bg-yellow-50 p-2 text-[10px] text-yellow-800 flex items-center justify-between gap-2">
-                  <div className="truncate">
-                    已更新偏好：{preferenceNotice.key}
-                    {preferenceNotice.value
-                      ? ` = ${
-                          Array.isArray(preferenceNotice.value)
-                            ? preferenceNotice.value.join("/")
-                            : String(preferenceNotice.value)
-                        }`
-                      : ""}
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        openPreferencesPanelWithSuggestion(preferenceNotice);
-                        setPreferenceNotice(null);
-                      }}
-                      className="px-1.5 py-0.5 rounded border border-yellow-200 hover:bg-yellow-100"
-                    >
-                      快速查看
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPreferenceNotice(null)}
-                      className="text-yellow-700 hover:text-yellow-900"
-                      aria-label="关闭偏好通知"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </div>
-                </div>
-              )}
-              {HITL_FEEDBACK_UI_ENABLED && (
-                <div className="mt-2 rounded border border-fuchsia-200 bg-fuchsia-50 p-2 text-[10px] space-y-1">
-                  <div className="text-fuchsia-700">反馈历史</div>
-                  {hitlFeedbackRows.length === 0 ? (
-                    <div className="text-slate-500">暂无反馈记录</div>
-                  ) : (
-                    <div className="space-y-1 max-h-24 overflow-y-auto custom-scrollbar">
-                      {hitlFeedbackRows.map((row) => (
-                        <div key={row.id} className="rounded border border-slate-200 bg-white px-1.5 py-1">
-                          <div className="text-slate-700">
-                            {row.message}
-                            {row.key ? ` · ${row.key}` : ""}
-                            {row.reason ? ` · ${row.reason}` : ""}
-                          </div>
-                          <div className="text-slate-500">
-                            {new Date(Number(row.updatedAt || Date.now())).toLocaleString()}
-                            {row.caseId ? ` · 用例ID=${row.caseId}` : ""}
-                          </div>
-                          {row.kind === "suggestion" && row.status === "ignored" && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                handleSuggestionEdit({
-                                  key: row.key,
-                                  value: row.value,
-                                })
-                              }
-                              className="mt-1 px-1.5 py-0.5 rounded border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
-                            >
-                              快速编辑
-                            </button>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-              {isAdminUser && agentDevMode && (
-                <div className="mt-2 rounded border border-slate-200 bg-slate-50 p-2 text-[10px] text-slate-500 space-y-1.5">
-                  <div className="text-slate-700">开发：记忆建议</div>
-                  <div>
-                    待处理任务：{" "}
-                    {activePendingTask
-                      ? `${getRouteIntentLabel(activePendingTask.intent)} 缺失=${(activePendingTask.missing || []).join(",") || "-"}`
-                      : "无"}
-                  </div>
-                  {devSuggestionLog.length === 0 ? (
-                    <div className="text-slate-400">暂无建议</div>
-                  ) : (
-                    <div className="space-y-1 max-h-24 overflow-y-auto custom-scrollbar">
-                      {devSuggestionLog.map((row, idx) => (
-                        <div key={`${row.turnId}_${row.key}_${idx}`} className="border border-slate-200 rounded px-1.5 py-1">
-                          <div>
-                            [{getFeedbackStatusLabel(row.status)}] {row.key}
-                          </div>
-                          <div className="text-slate-400">{Array.isArray(row.value) ? row.value.join("/") : String(row.value || "")}</div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {HITL_FEEDBACK_UI_ENABLED && (
-                    <div className="pt-1 border-t border-slate-200 space-y-1">
-                      <div className="text-slate-700">开发：失败回归</div>
-                      {devRegressionLog.length === 0 ? (
-                        <div className="text-slate-400">暂无回归反馈</div>
-                      ) : (
-                        <div className="space-y-1 max-h-24 overflow-y-auto custom-scrollbar">
-                          {devRegressionLog.map((row, idx) => (
-                            <div key={`${row.turnId}_${idx}`} className="border border-slate-200 rounded px-1.5 py-1">
-                              <div>
-                                [{getFeedbackStatusLabel(row.status)}] 原因={row.reason || "-"}
-                              </div>
-                          <div className="text-slate-400">
-                                用例ID={row.caseId || "-"} {row.error ? `错误=${row.error}` : ""}
-                          </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
+
+          {/* AgentComposer — Phase 4: extracted to WorkbenchAgentComposer */}
+          <WorkbenchAgentComposer
+            agentComposerRef={agentComposerRef}
+            agentInputRef={agentInputRef}
+            agentUploadInputRef={agentUploadInputRef}
+            agentInput={agentInput}
+            setAgentInput={setAgentInput}
+            agentInputFocused={agentInputFocused}
+            setAgentInputFocused={setAgentInputFocused}
+            agentPromptPolishLoading={agentPromptPolishLoading}
+            agentPromptPolishError={agentPromptPolishError}
+            setAgentPromptPolishError={setAgentPromptPolishError}
+            agentComposerFiles={agentComposerFiles}
+            activeComposerActionId={activeComposerActionId}
+            showCanvasExamples={showCanvasExamples}
+            setShowCanvasExamples={setShowCanvasExamples}
+            isAgentMissionRunning={isAgentMissionRunning}
+            isCanvasPromptPending={isCanvasPromptPending}
+            preferenceNotice={preferenceNotice}
+            setPreferenceNotice={setPreferenceNotice}
+            agentDevMode={agentDevMode}
+            setAgentDevMode={setAgentDevMode}
+            activePendingTask={activePendingTask}
+            selectedStoryboardTarget={selectedStoryboardTarget}
+            hitlFeedbackRows={hitlFeedbackRows}
+            devSuggestionLog={devSuggestionLog}
+            devRegressionLog={devRegressionLog}
+            personaMentionOptions={personaMentionOptions}
+            isAdminUser={isAdminUser}
+            setActiveArtifact={setActiveArtifact}
+            sendAgentMission={sendAgentMission}
+            polishAgentPromptInput={polishAgentPromptInput}
+            handleAgentComposerUpload={handleAgentComposerUpload}
+            removeAgentComposerFile={removeAgentComposerFile}
+            handleAgentQuickAction={handleAgentQuickAction}
+            insertCanvasPromptExample={insertCanvasPromptExample}
+            handleCanvasExamplePick={handleCanvasExamplePick}
+            handleSuggestionEdit={handleSuggestionEdit}
+            openPreferencesPanelWithSuggestion={openPreferencesPanelWithSuggestion}
+          />
+        </div>{/* end canvas div (canvasRef) */}
 
         {/* ✅ 属性栏（保留并确保存在） */}
 	        <PropertyPanel
