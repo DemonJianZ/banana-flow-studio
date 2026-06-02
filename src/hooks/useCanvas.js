@@ -63,7 +63,7 @@ export function useCanvas({
   onBoxSelectCompleteRef,         // React.MutableRefObject<((x1, y1, x2, y2, appendSelection) => void) | null>
   onPasteToastRef,                // React.MutableRefObject<((toast) => void) | null>
 } = {}) {
-  // ── 核心画布状态：来自 Zustand store（原 useState，Phase 1 迁移）─────────────
+  // ── 核心画布状态 + 历史记录：来自 Zustand store（Phase 1+2 迁移）───────────────
   const {
     nodes, setNodes,
     connections, setConnections,
@@ -74,11 +74,16 @@ export function useCanvas({
     canvasId,
     updateNodeData,
     applyPatch,
+    // Phase 2: history（原 useState 快照系统）
+    _history: history,
+    _historyStep: historyStep,
+    pushHistory,
+    undo,
+    redo,
   } = useCanvasStore();
 
-  // ── 历史记录：保持 useState（Phase 2 再迁 zundo）────────────────────────────
-  const [history, setHistory] = useState([]);
-  const [historyStep, setHistoryStep] = useState(-1);
+  const canUndo = historyStep > 0;
+  const canRedo = historyStep < history.length - 1;
 
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   const [interactionMode, setInteractionMode] = useState("idle");
@@ -110,40 +115,7 @@ export function useCanvas({
   useEffect(() => { connectionsRef.current = connections; }, [connections]);
   useEffect(() => { viewportRef.current = viewport; }, [viewport]);
   // History
-  const pushHistory = useCallback(() => {
-    const s = {
-      nodes: nodes.map(cloneCanvasNodeForHistory),
-      connections: connections.map((connection) => ({ ...connection })),
-    };
-    setHistory((p) => {
-      const n = p.slice(0, historyStep + 1);
-      n.push(s);
-      if (n.length > 50) n.shift();
-      return n;
-    });
-    setHistoryStep((p) => Math.min(p + 1, 49));
-  }, [nodes, connections, historyStep]);
-
-  const undo = () => {
-    if (historyStep > 0) {
-      const p = history[historyStep - 1];
-      setNodes(p.nodes);
-      setConnections(p.connections);
-      setHistoryStep(historyStep - 1);
-    }
-  };
-
-  const redo = () => {
-    if (historyStep < history.length - 1) {
-      const n = history[historyStep + 1];
-      setNodes(n.nodes);
-      setConnections(n.connections);
-      setHistoryStep(historyStep + 1);
-    }
-  };
-
-  const canUndo = historyStep > 0;
-  const canRedo = historyStep < history.length - 1;
+  // pushHistory / undo / redo / canUndo / canRedo 均由 useCanvasStore 提供（Phase 2 迁移）
 
   const deleteSelection = () => {
     if (selectedNodeIds.size === 0 && selectedConnectionIds.size === 0) return;
@@ -166,7 +138,7 @@ export function useCanvas({
       next.delete(connectionId);
       return next;
     });
-  }, [pushHistory]);
+  }, [pushHistory]);  // pushHistory 是 store action，引用稳定，不会引起不必要重建
 
   const handleConnectionClick = useCallback((event, connectionId) => {
     event.stopPropagation();
@@ -788,8 +760,8 @@ export function useCanvas({
   return {
     nodes, setNodes,
     connections, setConnections,
-    history, setHistory,
-    historyStep, setHistoryStep,
+    history,            // 只读引用（来自 store），Workbench.jsx 用于 dep array
+    historyStep,        // 只读（来自 store），Workbench.jsx 用于 dep array
     viewport, setViewport, viewportRef,
     selectedNodeIds, setSelectedNodeIds,
     selectedConnectionIds, setSelectedConnectionIds,

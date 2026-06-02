@@ -2,11 +2,13 @@
  * canvasStore.js — Zustand + Immer canvas state store
  *
  * 替代原 useCanvas.js 里的 nodes / connections / viewport /
- * selectedNodeIds / selectedConnectionIds / activeNodeId 这六块 useState。
+ * selectedNodeIds / selectedConnectionIds / activeNodeId 这六块 useState，
+ * 以及原 history / historyStep / pushHistory / undo / redo 手写快照系统。
  *
  * 核心收益：
  *   • updateNodeData  — O(1) Immer 直接 mutate（原 O(n) spread）
  *   • applyPatch      — 单次 set() 事务，不会撕裂中间状态
+ *   • pushHistory     — O(1) 结构共享快照（Immer 冻结对象，无需 deep clone）
  *   • 跨组件订阅      — useCanvasStore(selector) 按需订阅，无 prop-drilling
  */
 import { create } from "zustand";
@@ -39,6 +41,12 @@ export const useCanvasStore = create(
     selectedNodeIds: new Set(),
     selectedConnectionIds: new Set(),
     activeNodeId: null,
+
+    // ── History（Phase 2：替代 useCanvas.js 的手写 useState 快照系统）────────────
+    // 快照只保存 nodes + connections（不含 viewport / selection），与原逻辑一致。
+    // Immer 产生冻结对象，pushHistory 直接引用当前 state，无需 deep clone — O(1)。
+    _history: [],
+    _historyStep: -1,
 
     // ── Generic setters（兼容 React setState 的函数式 updater）─────────────────
     // 保持与原 useCanvas 完全相同的调用签名：setNodes(fn) 或 setNodes(value)
@@ -74,6 +82,46 @@ export const useCanvasStore = create(
       set((s) => {
         s.activeNodeId = id;
       }),
+
+    // ── History actions ──────────────────────────────────────────────────────────
+
+    // 在每次破坏性操作（删除/拖拽结束/排版/Agent patch）前调用，保存当前快照。
+    // get() 返回 Immer 已冻结的 state，直接引用即可（结构共享，O(1)）。
+    pushHistory: () => {
+      const { nodes, connections, _history, _historyStep } = get();
+      const snapshot = { nodes, connections };
+      // 截断 redo 分支，追加当前快照，限制 50 步
+      const trimmed = _history.slice(0, _historyStep + 1);
+      trimmed.push(snapshot);
+      if (trimmed.length > 50) trimmed.shift();
+      set((s) => {
+        s._history = trimmed;
+        s._historyStep = trimmed.length - 1;
+      });
+    },
+
+    undo: () => {
+      const { _history, _historyStep } = get();
+      if (_historyStep <= 0) return;
+      const prev = _history[_historyStep - 1];
+      set((s) => {
+        // Immer 接受冻结对象直接赋值（结构共享，不再分配新内存）
+        s.nodes = prev.nodes;
+        s.connections = prev.connections;
+        s._historyStep--;
+      });
+    },
+
+    redo: () => {
+      const { _history, _historyStep } = get();
+      if (_historyStep >= _history.length - 1) return;
+      const next = _history[_historyStep + 1];
+      set((s) => {
+        s.nodes = next.nodes;
+        s.connections = next.connections;
+        s._historyStep++;
+      });
+    },
 
     // ── updateNodeData — O(1) Immer 直接 mutate ───────────────────────────────
     // 原：setNodes(p => p.map(n => n.id === id ? {...n, data: {...n.data, ...d}} : n))

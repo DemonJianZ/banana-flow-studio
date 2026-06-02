@@ -1334,8 +1334,8 @@ const Workbench = () => {
   const {
     nodes, setNodes,
     connections, setConnections,
-    history, setHistory,
-    historyStep, setHistoryStep,
+    history,        // Phase 2: 来自 store（只读引用，用于 dep array）
+    historyStep,    // Phase 2: 来自 store（只读，用于 dep array）
     viewport, setViewport, viewportRef,
     selectedNodeIds, setSelectedNodeIds,
     selectedConnectionIds, setSelectedConnectionIds,
@@ -2156,11 +2156,12 @@ const Workbench = () => {
     return storeApplyPatch(patchOps);
   }, [storeApplyPatch]);
 
-  // Initialize
+  // Initialize — Phase 2: 改用 store.pushHistory() 推入初始快照
+  // 执行时机：首次渲染后，canvas restore effect (line ~1982) 可能已恢复 localStorage 数据；
+  // 若历史为空则推入当前状态作为第一个快照，确保 Ctrl+Z 不会越过初始状态。
   useEffect(() => {
-    if (history.length === 0) {
-      setHistory([{ nodes: [], connections: [] }]);
-      setHistoryStep(0);
+    if (useCanvasStore.getState()._history.length === 0) {
+      pushHistory();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -2468,7 +2469,8 @@ const Workbench = () => {
       window.removeEventListener("keyup", ku);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, history, historyStep, selectedNodeIds, selectedConnectionIds, toggleAgentHistoryPanel, activeArtifact, previewImage]);
+    // Phase 2: undo/redo 现在是 store actions（读 get()，无需捕获 history/historyStep）
+  }, [nodes, selectedNodeIds, selectedConnectionIds, toggleAgentHistoryPanel, activeArtifact, previewImage]);
 
   const createPersonaInputNodeAt = useCallback((persona, point = null) => {
     const normalizedPersona = normalizeAssetLibraryPersona(persona);
