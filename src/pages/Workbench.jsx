@@ -208,6 +208,7 @@ import {
   getDefaultVideoModelId,
 } from "../lib/modelHelpers.js";
 import WorkbenchHeader from "../components/workbench/WorkbenchHeader.jsx";
+import WorkbenchCanvas from "../components/workbench/WorkbenchCanvas.jsx";
 import WorkbenchRunBar from "../components/workbench/WorkbenchRunBar.jsx";
 import WorkbenchAssetLibrary from "../components/workbench/WorkbenchAssetLibrary.jsx";
 import WorkbenchImagePreview from "../components/workbench/WorkbenchImagePreview.jsx";
@@ -2214,6 +2215,61 @@ const Workbench = () => {
 
 
 
+  // ── renderConnections / renderTempConnection — restored Phase 9 bug-fix ──────
+  // These were accidentally deleted in Phase 5 Step 3 when runCompactThreeView
+  // block deletion range was too wide (swallowed L5962-L6138 in post-Phase5 numbering).
+  const renderConnections = () =>
+    connections.map((conn) => {
+      const fromNode = nodes.find((n) => n.id === conn.from);
+      const toNode = nodes.find((n) => n.id === conn.to);
+      if (!fromNode || !toNode) return null;
+      const fromAnchor = getNodeAnchorPosition(fromNode, nodeElementMapRef.current.get(fromNode.id), "output");
+      const toAnchor = getNodeAnchorPosition(toNode, nodeElementMapRef.current.get(toNode.id), "input", conn.toHandle);
+      const x1 = fromAnchor.x, y1 = fromAnchor.y, x2 = toAnchor.x, y2 = toAnchor.y;
+      const cp1x = x1 + (x2 - x1) / 2;
+      const cp2x = x2 - (x2 - x1) / 2;
+      const path = `M ${x1} ${y1} C ${cp1x} ${y1}, ${cp2x} ${y2}, ${x2} ${y2}`;
+      const isSelected = selectedConnectionIds.has(conn.id);
+      const isHovered = hoveredConnectionId === conn.id;
+      const isInteractive = isSelected || isHovered;
+      const t = 0.5, invT = 1 - t;
+      const midX = invT*invT*invT*x1 + 3*invT*invT*t*cp1x + 3*invT*t*t*cp2x + t*t*t*x2;
+      const midY = invT*invT*invT*y1 + 3*invT*invT*t*y1 + 3*invT*t*t*y2 + t*t*t*y2;
+      return (
+        <g key={conn.id} onMouseEnter={() => setHoveredConnectionId(conn.id)} onMouseLeave={() => setHoveredConnectionId((prev) => (prev === conn.id ? "" : prev))}>
+          <path d={path} stroke="transparent" strokeWidth="16" fill="none" className="cursor-pointer pointer-events-auto" pointerEvents="stroke" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => handleConnectionClick(e, conn.id)} onDoubleClick={(e) => { e.stopPropagation(); deleteConnectionById(conn.id); }} />
+          <path d={path} stroke={isInteractive ? "#22d3ee" : "rgba(100,116,139,0.72)"} strokeWidth={isInteractive ? "3" : "2.2"} fill="none" className="pointer-events-none transition-colors duration-200" />
+          {isInteractive ? (
+            <g className="cursor-pointer pointer-events-auto" pointerEvents="all" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); deleteConnectionById(conn.id); }}>
+              <title>删除连接</title>
+              <circle cx={midX} cy={midY} r="18" fill="rgba(255,255,255,0.001)" pointerEvents="all" />
+              <circle cx={midX} cy={midY} r="11" fill="white" stroke="#fb7185" strokeWidth="1.5" pointerEvents="all" />
+              <path d={`M ${midX-3.5} ${midY-3.5} L ${midX+3.5} ${midY+3.5} M ${midX+3.5} ${midY-3.5} L ${midX-3.5} ${midY+3.5}`} stroke="#e11d48" strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
+            </g>
+          ) : null}
+          {isRunning && (<circle r="3.5" fill="#67e8f9"><animateMotion dur="1.5s" repeatCount="indefinite" path={path} /></circle>)}
+        </g>
+      );
+    });
+
+  const renderTempConnection = () => {
+    if (!connectingSource) return null;
+    const n = nodes.find((nn) => nn.id === connectingSource.nodeId);
+    if (!n) return null;
+    const sourceAnchor = getNodeAnchorPosition(n, nodeElementMapRef.current.get(n.id), "output");
+    const x1 = sourceAnchor.x, y1 = sourceAnchor.y;
+    const hoverTargetNode = hoveredConnectTarget?.nodeId ? nodes.find((nn) => nn.id === hoveredConnectTarget.nodeId) : null;
+    const hoverTargetAnchor = hoverTargetNode ? getNodeAnchorPosition(hoverTargetNode, nodeElementMapRef.current.get(hoverTargetNode.id), "input", hoveredConnectTarget?.toHandle) : null;
+    const target = hoverTargetAnchor || screenToCanvas(mousePos.x, mousePos.y);
+    const path = `M ${x1} ${y1} C ${x1+(target.x-x1)/2} ${y1}, ${target.x-(target.x-x1)/2} ${target.y}, ${target.x} ${target.y}`;
+    return (
+      <>
+        <path d={path} stroke="#fbbf24" strokeWidth={2/viewport.zoom} strokeDasharray="5,5" fill="none" />
+        {hoverTargetAnchor ? (<circle cx={hoverTargetAnchor.x} cy={hoverTargetAnchor.y} r={8/viewport.zoom} fill="rgba(34,211,238,0.14)" stroke="#22d3ee" strokeWidth={1.6/viewport.zoom} />) : null}
+      </>
+    );
+  };
+
   const apiDebugItems = [
     { key: "memberInfo", label: "memberInfo" },
     { key: "userAuths", label: "userAuths" },
@@ -2494,305 +2550,112 @@ const Workbench = () => {
           createOmniReferenceVideoTemplate={createOmniReferenceVideoTemplate}
         />
 
-        {/* Canvas */}
-        <div
-          ref={canvasRef}
-          className="flex-1 relative overflow-hidden bg-[#fafaf6]"
-          style={{ cursor: getCursor() }}
-          onMouseDown={handleCanvasMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseLeave={() => {
-            canvasHoverClientRef.current = null;
+        {/* Canvas — Phase 9: extracted to WorkbenchCanvas */}
+        <WorkbenchCanvas
+          canvasRef={canvasRef}
+          viewport={viewport}
+          nodes={nodes}
+          connections={connections}
+          selectedNodeIds={selectedNodeIds}
+          selectedConnectionIds={selectedConnectionIds}
+          connectingSource={connectingSource}
+          selectionBox={selectionBox}
+          canvasDropActive={canvasDropActive}
+          canvasDropUploading={canvasDropUploading}
+          hoveredConnectionId={hoveredConnectionId}
+          setHoveredConnectionId={setHoveredConnectionId}
+          hoveredConnectTarget={hoveredConnectTarget}
+          mousePos={mousePos}
+          isRunning={isRunning}
+          hasAgentResultCards={hasAgentResultCards}
+          nodeElementMapRef={nodeElementMapRef}
+          canvasHoverClientRef={canvasHoverClientRef}
+          renderConnections={renderConnections}
+          renderTempConnection={renderTempConnection}
+          handleCanvasMouseDown={handleCanvasMouseDown}
+          handleMouseMove={handleMouseMove}
+          handleMouseUp={handleMouseUp}
+          handleWheel={handleWheel}
+          handleCanvasDragEnter={handleCanvasDragEnter}
+          handleCanvasDragOver={handleCanvasDragOver}
+          handleCanvasDragLeave={handleCanvasDragLeave}
+          handleCanvasDrop={handleCanvasDrop}
+          handleConnectionClick={handleConnectionClick}
+          deleteConnectionById={deleteConnectionById}
+          getCursor={getCursor}
+          screenToCanvas={screenToCanvas}
+          handleNodeMouseDown={handleNodeMouseDown}
+          updateNodeData={updateNodeData}
+          apiFetch={apiFetch}
+          openPromptPolishPicker={openPromptPolishPicker}
+          imageModelOptions={imageModelOptions}
+          videoModelOptions={videoModelOptions}
+          resolveModelParamsForId={resolveModelParamsForId}
+          personaMentionOptions={personaMentionOptions}
+          connectedInputsByNodeId={connectedInputsByNodeId}
+          deleteNode={deleteNode}
+          pushHistory={pushHistory}
+          startConnection={startConnection}
+          handleConnectionTargetHover={handleConnectionTargetHover}
+          handleConnectionTargetLeave={handleConnectionTargetLeave}
+          setPreviewImage={setPreviewImage}
+          createConnectedVideoNode={createConnectedVideoNode}
+          executeFlow={executeFlow}
+          setActiveArtifact={setActiveArtifact}
+          activeArtifact={activeArtifact}
+          createConnectedImg2ImgBranch={createConnectedImg2ImgBranch}
+          runCompactRmbg={runCompactRmbg}
+          runCompactRemoveWatermark={runCompactRemoveWatermark}
+          runCompactThreeView={runCompactThreeView}
+          runCompactVideoUpscale={runCompactVideoUpscale}
+          runVideoRmbg={runVideoRmbg}
+          runVideoLineart={runVideoLineart}
+          runVideoSplit={runVideoSplit}
+          createPromptQuickChain={createPromptQuickChain}
+          cancelNodeGeneration={cancelNodeGeneration}
+          pendingUploadNodeId={pendingUploadNodeId}
+          setPendingUploadNodeId={setPendingUploadNodeId}
+          handleNodeElementChange={handleNodeElementChange}
+          openStoryboardAssetHoverCard={openStoryboardAssetHoverCard}
+          scheduleCloseStoryboardAssetHoverCard={scheduleCloseStoryboardAssetHoverCard}
+          openStoryboardShotHoverCard={openStoryboardShotHoverCard}
+          runStoryboardInputFromFiles={runStoryboardInputFromFiles}
+          setRunToast={setRunToast}
+          agentResultCards={agentResultCards}
+          agentTurns={agentTurns}
+          selectedAgentCardIds={selectedAgentCardIds}
+          activeAgentCardId={activeAgentCardId}
+          setSelectedAgentCardIds={setSelectedAgentCardIds}
+          setActiveAgentCardId={setActiveAgentCardId}
+          handleAgentCardMouseDown={handleAgentCardMouseDown}
+          toggleAgentResultCardCollapsed={toggleAgentResultCardCollapsed}
+          minimizeAgentResultCard={minimizeAgentResultCard}
+          handleAgentCardWheelCapture={handleAgentCardWheelCapture}
+          retryAgentTurn={retryAgentTurn}
+          runBarProps={{
+            onSave: saveCurrentCanvasAsWork,
+            onSaveNew: saveCurrentCanvasAsNewWork,
+            onShowAssets: () => setShowAssetLibrary(true),
+            onArrange: arrangeCanvasNodes,
+            zoomCanvas,
           }}
-          onMouseUp={handleMouseUp}
-          onWheel={handleWheel}
-          onDragEnter={handleCanvasDragEnter}
-          onDragOver={handleCanvasDragOver}
-          onDragLeave={handleCanvasDragLeave}
-          onDrop={handleCanvasDrop}
-        >
-          <div
-            className="absolute inset-0 pointer-events-none"
-            style={{
-              opacity: 0.05,
-              backgroundImage: "linear-gradient(rgba(203,213,225,0.9) 1px, transparent 1px), linear-gradient(90deg, rgba(203,213,225,0.9) 1px, transparent 1px)",
-              backgroundSize: `${GRID_SIZE * viewport.zoom}px ${GRID_SIZE * viewport.zoom}px`,
-              backgroundPosition: `${viewport.x}px ${viewport.y}px`,
-            }}
-          />
-          <div
-            className="absolute inset-0 pointer-events-none"
-            style={{
-              opacity: 0.08,
-              backgroundImage: "linear-gradient(rgba(226,232,240,0.96) 1px, transparent 1px), linear-gradient(90deg, rgba(226,232,240,0.96) 1px, transparent 1px)",
-              backgroundSize: `${GRID_SIZE * 4 * viewport.zoom}px ${GRID_SIZE * 4 * viewport.zoom}px`,
-              backgroundPosition: `${viewport.x}px ${viewport.y}px`,
-            }}
-          />
-          <div className="absolute inset-0 pointer-events-none" style={{ background: "radial-gradient(ellipse at center, rgba(255,255,255,0) 44%, rgba(241,245,249,0.22) 84%, rgba(226,232,240,0.42) 100%)" }} />
-
-	          {canvasDropActive ? (
-	            <div className="pointer-events-none absolute inset-6 z-20 rounded-[32px] border border-cyan-500/40 bg-cyan-500/8 shadow-[inset_0_0_0_1px_rgba(34,211,238,0.18)] backdrop-blur-[1px]" />
-	          ) : null}
-
-	          {nodes.length === 0 && !hasAgentResultCards ? (
-	            <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
-	              <div className="flex items-center gap-4 text-[11px] tracking-[0.16em] text-slate-400/75">
-	                <div className="h-px w-14 bg-[linear-gradient(90deg,rgba(148,163,184,0),rgba(148,163,184,0.45),rgba(148,163,184,0))]" />
-	                <span>拖拽图片或视频到画布</span>
-	                <div className="h-px w-14 bg-[linear-gradient(90deg,rgba(148,163,184,0),rgba(148,163,184,0.45),rgba(148,163,184,0))]" />
-	              </div>
-	            </div>
-	          ) : null}
-
-	          {/* Controls — Phase 3: extracted to WorkbenchRunBar */}
-          <WorkbenchRunBar
-            onSave={saveCurrentCanvasAsWork}
-            onSaveNew={saveCurrentCanvasAsNewWork}
-            onShowAssets={() => setShowAssetLibrary(true)}
-            onArrange={arrangeCanvasNodes}
-            zoomCanvas={zoomCanvas}
-          />
-
-	          <div className="absolute inset-0 origin-top-left" style={{ transform: `translate(${viewport.x}px,${viewport.y}px) scale(${viewport.zoom})` }}>
-	            <svg className="absolute inset-0 overflow-visible pointer-events-none" style={{ width: 1, height: 1 }}>
-	              {renderConnections()}
-	              {renderTempConnection()}
-	            </svg>
-
-	            {canvasDropUploading ? (
-	              <div
-	                className="pointer-events-none absolute z-40 w-[280px] overflow-visible border border-cyan-300 bg-white shadow-none"
-	                style={{ left: canvasDropUploading.x, top: canvasDropUploading.y }}
-	              >
-	                <div className="absolute -top-5 left-0 select-none text-[11px] font-medium tracking-[0.08em] text-slate-500">
-	                  图片/视频上传
-	                </div>
-	                <div
-	                  className="relative flex min-h-[132px] flex-col items-center justify-center overflow-hidden px-4 py-8 text-center"
-	                  style={{ minHeight: MEDIA_UPLOAD_NODE_EMPTY_HEIGHT }}
-	                >
-	                  <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.16),transparent_48%),linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.92))]" />
-	                  <div className="relative flex h-11 w-11 items-center justify-center border border-cyan-200 bg-cyan-50 text-cyan-700 shadow-[0_12px_26px_rgba(34,211,238,0.12)]">
-	                    <Loader2 className="h-5 w-5 animate-spin" />
-	                  </div>
-	                  <div className="relative mt-3 text-[13px] font-medium text-slate-800">文件上传中...</div>
-	                  <div className="relative mt-1 text-[11px] leading-5 text-slate-500">
-	                    正在导入 {canvasDropUploading.total} 个文件
-	                    {canvasDropUploading.images ? ` · ${canvasDropUploading.images} 张图片` : ""}
-	                    {canvasDropUploading.videos ? ` · ${canvasDropUploading.videos} 个视频` : ""}
-	                  </div>
-	                  <div className="relative mt-4 h-1.5 w-full overflow-hidden border border-slate-200 bg-slate-100">
-	                    <div className="h-full w-full animate-pulse bg-[linear-gradient(90deg,rgba(34,211,238,0.18),rgba(34,211,238,0.82),rgba(59,130,246,0.72),rgba(34,211,238,0.18))]" />
-	                  </div>
-	                </div>
-	              </div>
-	            ) : null}
-
-	            {[...nodes].sort((a, b) =>
-              a.type === "group_container" ? -1 : b.type === "group_container" ? 1 : 0
-            ).map((n) => (
-              <NodeComponent
-                key={n.id}
-                node={n}
-                selected={selectedNodeIds.has(n.id)}
-                onMouseDown={(e) => handleNodeMouseDown(e, n.id)}
-                updateData={updateNodeData}
-	                apiFetch={apiFetch}
-	                onOpenPromptPolishPicker={openPromptPolishPicker}
-                imageModelOptions={imageModelOptions}
-                videoModelOptions={videoModelOptions}
-                resolveModelParamsForId={resolveModelParamsForId}
-                personaMentionOptions={personaMentionOptions}
-                connectedInputNodes={connectedInputsByNodeId.get(n.id) || []}
-                onDelete={() => deleteNode(n.id)}
-                onConnectStart={(e) => {
-                  e.stopPropagation();
-                  pushHistory();
-                  startConnection(e, n.id);
-                }}
-                onConnectTargetHover={(toHandle) => {
-                  handleConnectionTargetHover(n.id, toHandle);
-                }}
-                onConnectTargetLeave={(toHandle) => {
-                  handleConnectionTargetLeave(n.id, toHandle);
-                }}
-                connecting={!!connectingSource}
-                hoveredConnectTarget={hoveredConnectTarget}
-                onPreview={setPreviewImage}
-                onContinue={createConnectedVideoNode}
-                onRetry={() => executeFlow(new Set([n.id]))}
-                isReady={checkNodeReady(n, nodes, connections)}
-                onSelectArtifact={setActiveArtifact} // ✅ 修复：现在生效
-                activeArtifact={activeArtifact}
-                onIterateImg2Img={createConnectedImg2ImgBranch}
-                onRunCompactRmbg={runCompactRmbg}
-                onRunCompactRemoveWatermark={runCompactRemoveWatermark}
-                onRunCompactThreeView={runCompactThreeView}
-                onRunCompactVideoUpscale={runCompactVideoUpscale}
-                onRunVideoRmbg={runVideoRmbg}
-                onRunVideoLineart={runVideoLineart}
-                onRunVideoSplit={runVideoSplit}
-                onQuickCreateFromText={createPromptQuickChain}
-                onRunNode={(nodeId) => executeFlow(new Set([nodeId]))}
-                onCancelNode={() => cancelNodeGeneration(n.id)}
-                shouldAutoOpenUploadPicker={pendingUploadNodeId === n.id}
-                onAutoOpenUploadPickerHandled={(nodeId) => {
-                  setPendingUploadNodeId((prev) => (prev === nodeId ? "" : prev));
-                }}
-                onNodeElementChange={handleNodeElementChange}
-                onStoryboardMentionHover={openStoryboardAssetHoverCard}
-                onStoryboardMentionLeave={scheduleCloseStoryboardAssetHoverCard}
-                onShotChipClick={openStoryboardShotHoverCard}
-                onStoryboardScriptFiles={runStoryboardInputFromFiles}
-                setRunToast={setRunToast}
-              />
-            ))}
-
-            {selectionBox && (
-              <div
-                className="absolute border border-blue-500 bg-blue-500/20 pointer-events-none z-50"
-                style={{
-                  left: Math.min(selectionBox.startX, selectionBox.curX),
-                  top: Math.min(selectionBox.startY, selectionBox.curY),
-                  width: Math.abs(selectionBox.curX - selectionBox.startX),
-                  height: Math.abs(selectionBox.curY - selectionBox.startY),
-                }}
-              />
-            )}
-
-            {agentResultCards.map((card) => {
-              const turn = agentTurns.find((item) => item.id === card.turnId);
-              if (!turn || card.minimized) return null;
-              return (
-                <div
-                  key={card.id}
-                  data-agent-card-root="true"
-                  className={`absolute overflow-hidden rounded-xl border bg-white shadow-[0_18px_48px_rgba(15,23,42,0.1)] ${
-                    selectedAgentCardIds.has(card.id)
-                      ? "border-cyan-400/70 ring-1 ring-cyan-400/45"
-                      : activeAgentCardId === card.id
-                      ? "border-violet-400/70 ring-1 ring-violet-400/50"
-                      : "border-slate-200"
-                  }`}
-                  style={{ left: card.x, top: card.y, width: card.w, zIndex: activeAgentCardId === card.id ? 85 : 70 }}
-                  onWheelCapture={handleAgentCardWheelCapture}
-                  onMouseDown={(e) => {
-                    e.stopPropagation();
-                    if (e.shiftKey || e.ctrlKey) {
-                      setSelectedAgentCardIds((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(card.id)) next.delete(card.id);
-                        else next.add(card.id);
-                        return next;
-                      });
-                    } else if (!selectedAgentCardIds.has(card.id)) {
-                      setSelectedAgentCardIds(new Set([card.id]));
-                    }
-                    setActiveAgentCardId(card.id);
-                  }}
-                >
-                  <div className="h-9 px-2.5 flex items-center gap-2 border-b border-slate-200 bg-slate-50">
-                    <div
-                      className="flex-1 min-w-0 flex items-center justify-between cursor-move"
-                      onMouseDown={(e) => handleAgentCardMouseDown(e, card.id)}
-                    >
-                      <div className="text-[11px] font-semibold text-slate-700 truncate">
-                        {turn?.intent === "DRAMA" ? "短剧" : "脚本"} · {turn?.extractedProduct || (turn?.intent === "DRAMA" ? "创作任务" : "未知")}
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      className="p-1 rounded hover:bg-slate-100 text-slate-500"
-                      title={card.collapsed ? "展开" : "折叠"}
-                      onMouseDown={(e) => e.stopPropagation()}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleAgentResultCardCollapsed(card.id);
-                      }}
-                    >
-                      {card.collapsed ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
-                    </button>
-                    <button
-                      type="button"
-                      className="p-1 rounded hover:bg-slate-100 text-slate-500"
-                      title="最小化到对话流"
-                      onMouseDown={(e) => e.stopPropagation()}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        minimizeAgentResultCard(card.id);
-                      }}
-                    >
-                      <Minus className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                  {!card.collapsed && (
-                    <div
-                      data-agent-card-scroll-body="true"
-                      className="p-2.5 max-h-[62vh] overflow-y-auto custom-scrollbar"
-                      onMouseDown={(e) => e.stopPropagation()}
-                    >
-                      <div className="mb-2 text-[11px] text-slate-500 whitespace-pre-wrap break-words">
-                            任务：{turn?.userText || "-"}
-                      </div>
-                      <AgentResultCardContent
-                        turn={turn}
-                        onRetry={retryAgentTurn}
-                      />
-                    </div>
-                  )}
-                  {card.collapsed && (
-                    <div className="px-2.5 py-2 text-[11px] text-slate-400">
-                      已折叠，点击上方按钮可展开。
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-
-
-          {/* AgentComposer — Phase 4: extracted to WorkbenchAgentComposer */}
-          <WorkbenchAgentComposer
-            agentComposerRef={agentComposerRef}
-            agentInputRef={agentInputRef}
-            agentUploadInputRef={agentUploadInputRef}
-            agentInput={agentInput}
-            setAgentInput={setAgentInput}
-            agentInputFocused={agentInputFocused}
-            setAgentInputFocused={setAgentInputFocused}
-            agentPromptPolishLoading={agentPromptPolishLoading}
-            agentPromptPolishError={agentPromptPolishError}
-            setAgentPromptPolishError={setAgentPromptPolishError}
-            agentComposerFiles={agentComposerFiles}
-            activeComposerActionId={activeComposerActionId}
-            showCanvasExamples={showCanvasExamples}
-            setShowCanvasExamples={setShowCanvasExamples}
-            isAgentMissionRunning={isAgentMissionRunning}
-            isCanvasPromptPending={isCanvasPromptPending}
-            preferenceNotice={preferenceNotice}
-            setPreferenceNotice={setPreferenceNotice}
-            agentDevMode={agentDevMode}
-            setAgentDevMode={setAgentDevMode}
-            activePendingTask={activePendingTask}
-            selectedStoryboardTarget={selectedStoryboardTarget}
-            hitlFeedbackRows={hitlFeedbackRows}
-            devSuggestionLog={devSuggestionLog}
-            devRegressionLog={devRegressionLog}
-            personaMentionOptions={personaMentionOptions}
-            isAdminUser={isAdminUser}
-            setActiveArtifact={setActiveArtifact}
-            sendAgentMission={sendAgentMission}
-            polishAgentPromptInput={polishAgentPromptInput}
-            handleAgentComposerUpload={handleAgentComposerUpload}
-            removeAgentComposerFile={removeAgentComposerFile}
-            handleAgentQuickAction={handleAgentQuickAction}
-            insertCanvasPromptExample={insertCanvasPromptExample}
-            handleCanvasExamplePick={handleCanvasExamplePick}
-            handleSuggestionEdit={handleSuggestionEdit}
-            openPreferencesPanelWithSuggestion={openPreferencesPanelWithSuggestion}
-          />
-        </div>{/* end canvas div (canvasRef) */}
+          composerProps={{
+            agentComposerRef, agentInputRef, agentUploadInputRef,
+            agentInput, setAgentInput, agentInputFocused, setAgentInputFocused,
+            agentPromptPolishLoading, agentPromptPolishError, setAgentPromptPolishError,
+            agentComposerFiles, activeComposerActionId,
+            showCanvasExamples, setShowCanvasExamples,
+            isAgentMissionRunning, isCanvasPromptPending,
+            preferenceNotice, setPreferenceNotice,
+            agentDevMode, setAgentDevMode, activePendingTask,
+            selectedStoryboardTarget, hitlFeedbackRows, devSuggestionLog, devRegressionLog,
+            personaMentionOptions, isAdminUser, setActiveArtifact,
+            sendAgentMission, polishAgentPromptInput,
+            handleAgentComposerUpload, removeAgentComposerFile, handleAgentQuickAction,
+            insertCanvasPromptExample, handleCanvasExamplePick,
+            handleSuggestionEdit, openPreferencesPanelWithSuggestion,
+          }}
+        />
 
         {/* ✅ 属性栏（保留并确保存在） */}
 	        <PropertyPanel
