@@ -2616,6 +2616,7 @@ const Workbench = () => {
           setPreviewImage={setPreviewImage}
           createConnectedVideoNode={createConnectedVideoNode}
           executeFlow={executeFlow}
+          checkNodeReady={checkNodeReady}
           setActiveArtifact={setActiveArtifact}
           activeArtifact={activeArtifact}
           createConnectedImg2ImgBranch={createConnectedImg2ImgBranch}
