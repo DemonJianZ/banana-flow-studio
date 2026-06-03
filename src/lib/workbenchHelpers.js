@@ -447,6 +447,41 @@ export const isFirstLastFrameReferenceSelection = (selectedValue, options = EMPT
   );
 };
 
+// ─── Agent route / debug helpers ─────────────────────────────────────────────
+// NOTE: Originally defined at Workbench.jsx module scope; restored Phase 7 bug-fix.
+
+export const buildRouteDebug = (route, backendCalled, backendDecision = null) => ({
+  intent: route?.intent || "UNKNOWN",
+  product: route?.product || "",
+  reason: route?.reason || "",
+  backendCalled: !!backendCalled,
+  backendAction: backendDecision?.action || "",
+  backendIntent: backendDecision?.intent || "",
+  backendRule: backendDecision?.decision?.matched_rule || "",
+  backendCapabilities: Array.isArray(backendDecision?.decision?.matched_capabilities)
+    ? backendDecision.decision.matched_capabilities
+    : [],
+});
+
+export const getDecisionLabel = (action) => {
+  const m = { answer_only: "直接回答", clarify: "澄清", tool_call: "工具调用", canvas_plan: "画布规划", workflow_plan: "工作流规划" };
+  return m[action] || String(action || "-");
+};
+
+const CANVAS_CLARIFY_THOUGHT_PREFIX = "clarify_missing_prompt:";
+
+export const parseCanvasClarification = (response) => {
+  const thought = String(response?.thought || "").trim();
+  if (!thought.startsWith(CANVAS_CLARIFY_THOUGHT_PREFIX)) return null;
+  const mode = thought.slice(CANVAS_CLARIFY_THOUGHT_PREFIX.length).trim();
+  return { mode };
+};
+
+// ─── Deep clone (JSON round-trip, safe for plain data objects) ───────────────
+// NOTE: Originally defined at Workbench.jsx module scope; restored Phase 7 bug-fix.
+
+export const cloneDeep = (obj) => JSON.parse(JSON.stringify(obj));
+
 // ─── Generic error extractor ──────────────────────────────────────────────────
 
 export const extractApiError = (data) => {
