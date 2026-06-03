@@ -2220,6 +2220,16 @@ const Workbench = () => {
 
 
 
+  // ── handleNodeElementChange — restored (same Phase 5 deletion) ──────────────
+  const handleNodeElementChange = useCallback((nodeId, element) => {
+    if (!nodeId) return;
+    if (element) {
+      nodeElementMapRef.current.set(nodeId, element);
+    } else {
+      nodeElementMapRef.current.delete(nodeId);
+    }
+  }, []);
+
   // ── renderConnections / renderTempConnection — restored Phase 9 bug-fix ──────
   // These were accidentally deleted in Phase 5 Step 3 when runCompactThreeView
   // block deletion range was too wide (swallowed L5962-L6138 in post-Phase5 numbering).
