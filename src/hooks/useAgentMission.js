@@ -91,7 +91,7 @@ export function useAgentMission({
   updateApiDebugStatus,
   // canvas node ops
   updateNodeData,
-  focusCanvasNode,
+  // focusCanvasNode removed: implemented inline via canvasStore to avoid TDZ
   viewportRef,
 }) {
   // ── canvas store ────────────────────────────────────────────────────────────
@@ -791,13 +791,27 @@ export function useAgentMission({
         updateNodeData(nodeId, { status: "success", error: "", progressLabel: "", summary: String(taskResult?.summary || "已生成可编辑故事板").trim(), generatedStoryboardNodeIds: storyboardNodeIds });
         setRunToast({ message: String(taskResult?.summary || "故事板已生成").trim(), type: "info" });
         window.setTimeout(() => setRunToast(null), 2200);
-        if (firstStoryboardNodeId) window.setTimeout(() => focusCanvasNode(firstStoryboardNodeId), 80);
+        if (firstStoryboardNodeId) window.setTimeout(() => {
+          // Inline focus: scroll canvas to the storyboard node via store
+          const { nodes, viewport, setViewport } = useCanvasStore.getState();
+          const targetNode = nodes.find((n) => n.id === firstStoryboardNodeId);
+          if (targetNode) {
+            const w = targetNode.type === NODE_TYPES.STORYBOARD_PLAN ? 1280 : 280;
+            const h = targetNode.type === NODE_TYPES.STORYBOARD_PLAN ? 620 : 200;
+            const zoom = viewport.zoom || 1;
+            setViewport({
+              x: window.innerWidth / 2 - (Number(targetNode.x || 0) + w / 2) * zoom,
+              y: window.innerHeight / 2 - (Number(targetNode.y || 0) + h / 2) * zoom,
+              zoom,
+            });
+          }
+        }, 80);
       } catch (error) {
         updateNodeData(nodeId, { status: "error", error: error?.message || String(error || "故事板生成失败"), progressLabel: "" });
         setRunToast({ message: error?.message || "故事板生成失败", type: "error" });
       }
     },
-    [_applyPatch, activeAgentSession?.id, apiFetch, canvasId, focusCanvasNode, storePushHistory, setRunToast, updateNodeData, upsertCanvasDraftSnapshot],
+    [_applyPatch, activeAgentSession?.id, apiFetch, canvasId, storePushHistory, setRunToast, updateNodeData, upsertCanvasDraftSnapshot],
   );
 
   // ─── Return all mission callbacks ──────────────────────────────────────────

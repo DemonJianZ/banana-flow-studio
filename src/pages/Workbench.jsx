@@ -610,6 +610,8 @@ const Workbench = () => {
   );
   const [activeArtifact, setActiveArtifact] = useState(null);
 
+  const [hoveredStoryboardAssetCard, setHoveredStoryboardAssetCard] = useState(null);
+  const [hoveredStoryboardShotCard, setHoveredStoryboardShotCard] = useState(null);
   // ── Phase 5: canvas node operations hook (compact ops + storyboard gen) ────
   const {
     updateStoryboardAssetStatus,
@@ -706,7 +708,7 @@ const Workbench = () => {
     upsertCanvasDraftSnapshot,
     setShowPreferencesPanel, setPreferencesPanelPrefill,
     pushApiDebugDetail, updateApiDebugStatus,
-    updateNodeData, focusCanvasNode, viewportRef,
+    updateNodeData, viewportRef,
   });
 
   // Callback refs for useCanvas cross-cutting concerns
@@ -1179,9 +1181,7 @@ const Workbench = () => {
       }
     };
   }, []);
-  const [hoveredStoryboardAssetCard, setHoveredStoryboardAssetCard] = useState(null);
   const storyboardAssetHoverCloseTimerRef = useRef(null);
-  const [hoveredStoryboardShotCard, setHoveredStoryboardShotCard] = useState(null);
   const storyboardShotHoverCloseTimerRef = useRef(null);
   const selectedStoryboardTarget = useMemo(() => {
     if (String(activeArtifact?.kind || "").trim() !== "storyboard_selection") return null;
@@ -1407,6 +1407,8 @@ const Workbench = () => {
       if (restoredTarget) focusNode(restoredTarget);
     }, 80);
   }, [activeCanvasDraft, restoreSnapshotToCanvas]);
+
+
 
   const saveCanvasToAssetLibrary = useCallback((forceNewWork = false) => {
     if (nodes.length === 0 && connections.length === 0) {
