@@ -501,6 +501,12 @@ const Workbench = () => {
     safeInvoke,
   } = useWorkbenchRun({ apiFetch });
 
+  const [aiChatModels, setAiChatModels] = useState(() => ({
+    language: EMPTY_LIST,
+    image: EMPTY_LIST,
+    video: DEFAULT_VIDEO_MODELS,
+  }));
+
   const imageModelRecords = useMemo(
     () => filterDeprecatedImageModels(Array.isArray(aiChatModels.image) && aiChatModels.image.length ? aiChatModels.image : EMPTY_LIST),
     [aiChatModels.image],
@@ -643,11 +649,6 @@ const Workbench = () => {
   };
   onRunToastForAgentRef.current = setRunToast;
 
-  const [aiChatModels, setAiChatModels] = useState(() => ({
-    language: EMPTY_LIST,
-    image: EMPTY_LIST,
-    video: DEFAULT_VIDEO_MODELS,
-  }));
   const [apiDebugOpen, setApiDebugOpen] = useState(true);
   const [apiDebugStatus, setApiDebugStatus] = useState(() => ({
     memberInfo: { status: "idle", message: "", detail: "", updatedAt: 0 },
