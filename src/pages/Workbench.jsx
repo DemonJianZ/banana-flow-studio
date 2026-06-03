@@ -204,6 +204,7 @@ import {
   DEPRECATED_VIDEO_MODEL_IDS,
   buildAIChatModelOptions,
   filterDeprecatedImageModels,
+  isDeprecatedImageModel,
   getDefaultImageModelId,
   getDefaultVideoModelId,
 } from "../lib/modelHelpers.js";

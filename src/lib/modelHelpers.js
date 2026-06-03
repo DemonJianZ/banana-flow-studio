@@ -109,7 +109,7 @@ export const getDefaultImageModelId = (options, allowFallback = false) => {
   return preferred?.id || list[0]?.id || (allowFallback ? DEFAULT_IMAGE_MODEL_ID : "");
 };
 
-const isDeprecatedImageModel = (item) => {
+export const isDeprecatedImageModel = (item) => {
   const id = String(item?.id || item?.value || "").trim().toLowerCase();
   const name = String(item?.name || item?.label || "").trim().toLowerCase();
   return DEPRECATED_IMAGE_MODEL_IDS.has(id) || DEPRECATED_IMAGE_MODEL_NAMES.has(name);
