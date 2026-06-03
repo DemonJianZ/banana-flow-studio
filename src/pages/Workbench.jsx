@@ -526,6 +526,90 @@ const Workbench = () => {
     return findAIChatModelIdByKeywords(imageModelRecords) || defaultImageModelId;
   }, [defaultImageModelId, imageModelRecords]);
 
+  const aiChatSessionIdRef = useRef("");
+  const aiChatHistoryRecordIdRef = useRef("");
+  const defaultVideoModelId = useMemo(() => getDefaultVideoModelId(videoModelOptions), [videoModelOptions]);
+  const updateApiDebugStatus = useCallback((key, next) => {
+    if (key === "aiChatAnchor") {
+      const current = readAiChatAnchorDebugState();
+      writeAiChatAnchorDebugState({
+        ...current,
+        ...next,
+        updatedAt: Date.now(),
+      });
+    }
+    setApiDebugStatus((prev) => {
+      const merged = {
+        ...(prev[key] || { status: "idle", message: "", detail: "", updatedAt: 0 }),
+        ...next,
+        updatedAt: Date.now(),
+      };
+      return {
+        ...prev,
+        [key]: merged,
+      };
+    });
+  }, []);
+  const pushApiDebugDetail = useCallback((key, event) => {
+    const nextDetail = buildApiDebugDetailText(event);
+    if (!nextDetail) return;
+    if (key === "aiChatAnchor") {
+      const current = readAiChatAnchorDebugState();
+      const detail =
+        event?.type === "start" || !current.detail
+          ? nextDetail
+          : `${current.detail}\n\n[${event.type || "event"}]\n${nextDetail}`;
+      writeAiChatAnchorDebugState({
+        ...current,
+        detail,
+        updatedAt: Date.now(),
+      });
+    }
+    setApiDebugStatus((prev) => {
+      const current = prev[key] || { status: "idle", message: "", detail: "", updatedAt: 0 };
+      const detail =
+        event?.type === "start" || !current.detail
+          ? nextDetail
+          : `${current.detail}\n\n[${event.type || "event"}]\n${nextDetail}`;
+      const merged = {
+        ...current,
+        detail,
+        updatedAt: Date.now(),
+      };
+      return {
+        ...prev,
+        [key]: merged,
+      };
+    });
+  }, []);
+  const resolveModelParamsForId = useCallback(
+    async (modelId) => {
+      const normalizedModelId = String(modelId || "").trim();
+      if (!normalizedModelId) return EMPTY_LIST;
+      const cached = aiChatModelParamsCacheRef.current.get(normalizedModelId);
+      if (cached) return cached;
+      const numericModelId = Number(normalizedModelId);
+      const requestModelId = Number.isFinite(numericModelId) ? numericModelId : normalizedModelId;
+
+      updateApiDebugStatus("modelParams", {
+        status: "loading",
+        message: `POST /ai/viewAIChatModelParams id=${normalizedModelId}`,
+      });
+      const data = await viewAIChatModelParams(apiFetch, { ai_chat_model_id: requestModelId }, {
+        onDebug: (event) => pushApiDebugDetail("modelParams", event),
+      });
+      const list = extractModelParamList(data);
+      aiChatModelParamsCacheRef.current.set(normalizedModelId, list);
+      updateApiDebugStatus("modelParams", {
+        status: "success",
+        message: `id=${normalizedModelId}, params=${list.length}`,
+      });
+      return list;
+    },
+    [apiFetch, pushApiDebugDetail, updateApiDebugStatus],
+  );
+  const [activeArtifact, setActiveArtifact] = useState(null);
+
   // ── Phase 5: canvas node operations hook (compact ops + storyboard gen) ────
   const {
     updateStoryboardAssetStatus,
@@ -664,8 +748,6 @@ const Workbench = () => {
     agentPlanner: { status: "idle", message: "", detail: "", updatedAt: 0 },
   }));
   const aiChatModelParamsCacheRef = useRef(new Map());
-  const aiChatSessionIdRef = useRef("");
-  const aiChatHistoryRecordIdRef = useRef("");
   const workspaceShellRef = useRef(null);
   const previewOpenedBySpaceRef = useRef(false);
 
@@ -738,7 +820,6 @@ const Workbench = () => {
     return () => document.removeEventListener("mousedown", handlePointerDown);
   }, [sidebarVideoCreateMenu]);
 
-  const defaultVideoModelId = useMemo(() => getDefaultVideoModelId(videoModelOptions), [videoModelOptions]);
 
   // For each text_input node: find sibling input nodes connected to the same downstream node
   const connectedInputsByNodeId = useMemo(() => {
@@ -779,59 +860,6 @@ const Workbench = () => {
     return map;
   }, [nodes, connections]);
 
-  const updateApiDebugStatus = useCallback((key, next) => {
-    if (key === "aiChatAnchor") {
-      const current = readAiChatAnchorDebugState();
-      writeAiChatAnchorDebugState({
-        ...current,
-        ...next,
-        updatedAt: Date.now(),
-      });
-    }
-    setApiDebugStatus((prev) => {
-      const merged = {
-        ...(prev[key] || { status: "idle", message: "", detail: "", updatedAt: 0 }),
-        ...next,
-        updatedAt: Date.now(),
-      };
-      return {
-        ...prev,
-        [key]: merged,
-      };
-    });
-  }, []);
-  const pushApiDebugDetail = useCallback((key, event) => {
-    const nextDetail = buildApiDebugDetailText(event);
-    if (!nextDetail) return;
-    if (key === "aiChatAnchor") {
-      const current = readAiChatAnchorDebugState();
-      const detail =
-        event?.type === "start" || !current.detail
-          ? nextDetail
-          : `${current.detail}\n\n[${event.type || "event"}]\n${nextDetail}`;
-      writeAiChatAnchorDebugState({
-        ...current,
-        detail,
-        updatedAt: Date.now(),
-      });
-    }
-    setApiDebugStatus((prev) => {
-      const current = prev[key] || { status: "idle", message: "", detail: "", updatedAt: 0 };
-      const detail =
-        event?.type === "start" || !current.detail
-          ? nextDetail
-          : `${current.detail}\n\n[${event.type || "event"}]\n${nextDetail}`;
-      const merged = {
-        ...current,
-        detail,
-        updatedAt: Date.now(),
-      };
-      return {
-        ...prev,
-        [key]: merged,
-      };
-    });
-  }, []);
 
   const {
     memberInfoLoginUrl,
@@ -899,32 +927,6 @@ const Workbench = () => {
     [triggerAIChatAnchor],
   );
 
-  const resolveModelParamsForId = useCallback(
-    async (modelId) => {
-      const normalizedModelId = String(modelId || "").trim();
-      if (!normalizedModelId) return EMPTY_LIST;
-      const cached = aiChatModelParamsCacheRef.current.get(normalizedModelId);
-      if (cached) return cached;
-      const numericModelId = Number(normalizedModelId);
-      const requestModelId = Number.isFinite(numericModelId) ? numericModelId : normalizedModelId;
-
-      updateApiDebugStatus("modelParams", {
-        status: "loading",
-        message: `POST /ai/viewAIChatModelParams id=${normalizedModelId}`,
-      });
-      const data = await viewAIChatModelParams(apiFetch, { ai_chat_model_id: requestModelId }, {
-        onDebug: (event) => pushApiDebugDetail("modelParams", event),
-      });
-      const list = extractModelParamList(data);
-      aiChatModelParamsCacheRef.current.set(normalizedModelId, list);
-      updateApiDebugStatus("modelParams", {
-        status: "success",
-        message: `id=${normalizedModelId}, params=${list.length}`,
-      });
-      return list;
-    },
-    [apiFetch, pushApiDebugDetail, updateApiDebugStatus],
-  );
 
 
   useEffect(() => {
@@ -1177,7 +1179,6 @@ const Workbench = () => {
       }
     };
   }, []);
-  const [activeArtifact, setActiveArtifact] = useState(null);
   const [hoveredStoryboardAssetCard, setHoveredStoryboardAssetCard] = useState(null);
   const storyboardAssetHoverCloseTimerRef = useRef(null);
   const [hoveredStoryboardShotCard, setHoveredStoryboardShotCard] = useState(null);
