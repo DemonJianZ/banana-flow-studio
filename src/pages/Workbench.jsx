@@ -198,6 +198,16 @@ import {
   buildStoryboardWorkflowStepState,
   enhanceStoryboardPatchWithProductionWorkflow,
 } from "../lib/agentHelpers.js";
+import {
+  DEFAULT_AI_MODELS,
+  DEFAULT_VIDEO_MODELS,
+  DEPRECATED_VIDEO_MODEL_IDS,
+  buildAIChatModelOptions,
+  filterDeprecatedImageModels,
+  getDefaultImageModelId,
+  getDefaultVideoModelId,
+} from "../lib/modelHelpers.js";
+import WorkbenchHeader from "../components/workbench/WorkbenchHeader.jsx";
 import WorkbenchRunBar from "../components/workbench/WorkbenchRunBar.jsx";
 import WorkbenchAssetLibrary from "../components/workbench/WorkbenchAssetLibrary.jsx";
 import WorkbenchImagePreview from "../components/workbench/WorkbenchImagePreview.jsx";
@@ -297,163 +307,6 @@ const AI_CHAT_PART_ENUM_2 = 2;
 const AI_CHAT_PART_ENUM_3 = 3;
 const AI_CHAT_PART_ENUM_4 = 4;
 const AI_CHAT_PART_ENUM_5 = 5;
-
-const DEFAULT_AI_MODELS = [];
-const DEPRECATED_IMAGE_MODEL_IDS = new Set([
-  "gemini-3-pro-image-preview",
-  "doubao-seedream-4.5",
-]);
-const DEPRECATED_IMAGE_MODEL_NAMES = new Set([
-  "gemini 3 pro",
-  "doubao 4.5",
-]);
-
-const DEFAULT_VIDEO_MODELS = [];
-const DEPRECATED_VIDEO_MODEL_IDS = new Set([
-  "Doubao-Seedance-1.0-pro",
-  "Doubao-Seedance-1.5-pro",
-]);
-const DEFAULT_IMAGE_MODEL_ID = DEFAULT_AI_MODELS[0]?.id || "";
-const DEFAULT_VIDEO_MODEL_ID = DEFAULT_VIDEO_MODELS[0]?.id || "";
-
-const pickModelField = (record, keys) => {
-  for (const key of keys) {
-    const value = record?.[key];
-    if (typeof value === "string" && value.trim()) return value.trim();
-    if (typeof value === "number" && Number.isFinite(value)) return String(value);
-  }
-  return "";
-};
-
-const resolveAIChatModelVendor = (record) =>
-  pickModelField(record, [
-    "vendor",
-    "vendor_name",
-    "provider",
-    "provider_name",
-    "company",
-    "company_name",
-    "platform",
-    "platform_name",
-    "source",
-  ]);
-
-const resolveAIChatModelIcon = (record) => {
-  const vendor = resolveAIChatModelVendor(record).toLowerCase();
-  const modelId = pickModelField(record, ["model", "model_id", "ai_chat_model", "ai_chat_model_id", "id"]).toLowerCase();
-  if (vendor.includes("google") || modelId.includes("gemini")) return Sparkles;
-  if (vendor.includes("byte") || vendor.includes("doubao") || modelId.includes("doubao") || modelId.includes("seed")) {
-    return Zap;
-  }
-  return Cpu;
-};
-
-const normalizeAIChatModelOption = (record, fallback = {}) => {
-  if (typeof record === "string") {
-    const value = record.trim();
-    return value ? { id: value, name: value, vendor: fallback.vendor || "", icon: fallback.icon || Cpu } : null;
-  }
-  if (!record || typeof record !== "object") return null;
-
-  const id = pickModelField(record, [
-    "model",
-    "model_id",
-    "ai_chat_model",
-    "ai_chat_model_id",
-    "id",
-    "value",
-    "code",
-  ]);
-  const name = pickModelField(record, [
-    "ai_model_name",
-    "model_name",
-    "ai_chat_model_name",
-    "name",
-    "label",
-    "title",
-    "text",
-    "desc",
-  ]);
-
-  if (!id && !name) return null;
-
-  return {
-    id: id || name,
-    name: name || id,
-    vendor: resolveAIChatModelVendor(record) || fallback.vendor || "",
-    icon: fallback.icon || resolveAIChatModelIcon(record),
-  };
-};
-
-const extractAIChatModelRecords = (payload) => {
-  if (Array.isArray(payload)) return payload;
-  if (!payload || typeof payload !== "object") return EMPTY_LIST;
-
-  const queue = [payload];
-  const visited = new Set();
-  const preferredKeys = ["list", "records", "items", "rows", "models", "model_list", "data", "result"];
-
-  while (queue.length > 0) {
-    const current = queue.shift();
-    if (!current || typeof current !== "object" || visited.has(current)) continue;
-    visited.add(current);
-
-    for (const key of preferredKeys) {
-      if (Array.isArray(current[key])) return current[key];
-    }
-
-    for (const value of Object.values(current)) {
-      if (Array.isArray(value)) return value;
-      if (value && typeof value === "object") queue.push(value);
-    }
-  }
-
-  return EMPTY_LIST;
-};
-
-const buildAIChatModelOptions = (payload, fallbackOptions) => {
-  const normalized = extractAIChatModelRecords(payload)
-    .map((item) => normalizeAIChatModelOption(item))
-    .filter(Boolean);
-
-  if (!normalized.length) return fallbackOptions;
-
-  const seen = new Set();
-  return normalized.filter((item) => {
-    if (!item?.id || seen.has(item.id)) return false;
-    seen.add(item.id);
-    return true;
-  });
-};
-
-const getDefaultImageModelId = (options, allowFallback = false) => {
-  const list = Array.isArray(options) ? options : EMPTY_LIST;
-  if (!list.length) return allowFallback ? DEFAULT_IMAGE_MODEL_ID : "";
-  const preferred = list.find((item) => String(item?.id || "").trim() === "4");
-  return preferred?.id || list[0]?.id || (allowFallback ? DEFAULT_IMAGE_MODEL_ID : "");
-};
-
-const isDeprecatedImageModel = (item) => {
-  const id = String(item?.id || item?.value || "").trim().toLowerCase();
-  const name = String(item?.name || item?.label || "").trim().toLowerCase();
-  return DEPRECATED_IMAGE_MODEL_IDS.has(id) || DEPRECATED_IMAGE_MODEL_NAMES.has(name);
-};
-
-const filterDeprecatedImageModels = (items = EMPTY_LIST) =>
-  (Array.isArray(items) ? items : EMPTY_LIST).filter((item) => !isDeprecatedImageModel(item));
-
-
-
-const getDefaultVideoModelId = (options) => {
-  if (!Array.isArray(options) || options.length === 0) return DEFAULT_VIDEO_MODEL_ID;
-  return options[0]?.id || DEFAULT_VIDEO_MODEL_ID;
-};
-
-
-
-
-
-
 
 const getNodeAnchorPosition = (node, nodeElement, direction = "output", handle = VIDEO_GEN_INPUT_HANDLE_MAIN) => {
   const width =
@@ -2404,442 +2257,54 @@ const Workbench = () => {
       className="h-screen w-screen bg-[var(--bf-bg)] text-[var(--bf-text)] overflow-hidden flex flex-col font-sans"
       style={workbenchLightVars}
     >
-      <header className="relative h-[68px] bg-[var(--bf-panel-strong)] border-b border-[var(--bf-border)] flex items-center justify-between px-4 z-50 select-none shadow-[var(--bf-shadow-md)] backdrop-blur-xl">
-        <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.9),rgba(255,255,255,0.72)_68%,rgba(255,255,255,0.38))]" />
-        <div className="flex items-center gap-2.5 min-w-0">
-          <div className="flex flex-col min-w-0">
-            <span className="truncate bg-[linear-gradient(135deg,#0f172a_0%,#334155_54%,#64748b_100%)] bg-clip-text text-[25px] font-normal leading-tight tracking-[0.10em] text-transparent [font-family:'STXingkai','Xingkai_SC','STKaiti','KaiTi','Georgia',serif]">
-              Yu Canvas
-            </span>
-            <span className="text-[10px] font-normal text-slate-500 tracking-[0.18em] truncate">AI小禹无限画布</span>
-          </div>
-        </div>
-
-        <div className="relative flex items-center gap-2">
-          {isAdminUser && agentDevMode && (
-            <div className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[10px] transition-colors ${
-              apiStatus === "online"
-                ? "text-emerald-200 border-emerald-500/20 bg-emerald-500/10"
-                : "text-rose-200 border-rose-500/20 bg-rose-500/10"
-            }`}>
-              <Server className="w-3 h-3" /> {apiStatus === "online" ? "API Online" : "API Offline"}
-            </div>
-          )}
-
-          <div className="relative">
-            <button
-              type="button"
-              onClick={toggleAgentHistoryPanel}
-              title={agentHistoryCollapsed ? "展开对话（Ctrl+Shift+E）" : "收起对话（Ctrl+Shift+E）"}
-              aria-label={agentHistoryCollapsed ? "展开对话（Ctrl+Shift+E）" : "收起对话（Ctrl+Shift+E）"}
-              className={`inline-flex h-10 items-center gap-2 rounded-[18px] border px-3.5 text-[11px] transition-colors ${
-                agentHistoryCollapsed
-                  ? "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900"
-                  : "border-cyan-200 bg-cyan-50 text-cyan-700 shadow-[0_12px_24px_rgba(15,23,42,0.08)]"
-              }`}
-            >
-              <History className="w-3.5 h-3.5 text-slate-500" />
-              <span className="font-medium">对话流</span>
-              <ChevronRight
-                className={`w-3.5 h-3.5 transition-transform duration-300 ${
-                  agentHistoryCollapsed ? "rotate-0" : "rotate-90"
-                }`}
-              />
-            </button>
-
-            {!agentHistoryCollapsed && (
-              <div
-                className="absolute right-0 top-full mt-3 z-[95] pointer-events-auto"
-                style={rightPanelContainerStyle}
-                onMouseDown={(e) => e.stopPropagation()}
-                onWheel={(e) => e.stopPropagation()}
-              >
-                <button
-                  type="button"
-                  onMouseDown={handleRightPanelResizeStart}
-                  className="absolute -left-2 top-0 bottom-0 w-2 rounded-md cursor-col-resize text-slate-500 hover:text-cyan-600"
-                  title="拖拽调整对话栏宽度"
-                  aria-label="拖拽调整对话栏宽度"
-                >
-                  <GripVertical className="w-3.5 h-3.5 absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none" />
-                </button>
-                <div
-                  className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-[28px] border border-slate-200 bg-white"
-                  style={{ boxShadow: "0 24px 60px rgba(15,23,42,0.12)" }}
-                >
-              <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.92),rgba(248,250,252,0.78)_42%,rgba(255,255,255,0.62))]" />
-              <div className="relative flex h-[54px] shrink-0 items-center justify-between border-b border-slate-200 bg-white/70 px-4">
-                <div className="inline-flex min-w-0 items-center gap-1.5 text-xs">
-                  <History className="w-3.5 h-3.5 text-slate-500" />
-                  <span className="font-medium truncate text-slate-700">对话流</span>
-                </div>
-                <div className="ml-auto flex items-center gap-1.5 shrink-0">
-                  <button
-                    type="button"
-                    onClick={createAgentSession}
-                    className="h-8 inline-flex items-center gap-1 px-2.5 rounded-full border border-slate-200 bg-white text-[11px] text-slate-700 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
-                    title="新建会话"
-                  >
-                    <Plus className="w-3 h-3" />
-                    新建
-                  </button>
-                  <button
-                    type="button"
-                    onClick={clearActiveAgentConversation}
-                    disabled={!hasActiveAgentConversation || isAgentMissionRunning}
-                    className={`h-8 inline-flex items-center gap-1 px-2.5 rounded-full border text-[11px] transition-colors ${
-                      !hasActiveAgentConversation || isAgentMissionRunning
-                        ? "border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed"
-                        : "border-slate-200 bg-white text-slate-600 hover:bg-rose-50 hover:border-rose-200 hover:text-rose-700"
-                    }`}
-                    title="清除当前会话对话记录"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                    清除
-                  </button>
-                  <button
-                    type="button"
-                    onClick={toggleAgentHistoryPanel}
-                    title="收起对话（Ctrl+Shift+E）"
-                    aria-label="收起对话（Ctrl+Shift+E）"
-                    className="p-2 rounded-full border border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
-                  >
-                    <ChevronRight className="w-3.5 h-3.5 rotate-90" />
-                  </button>
-                </div>
-              </div>
-              <div className="flex min-h-0 flex-1 flex-col">
-                <div className="relative shrink-0 border-b border-slate-200 bg-white/70 p-3">
-                  <select
-                    value={activeAgentSession?.id || ""}
-                    onChange={(e) => setActiveAgentSession(e.target.value)}
-                    className="w-full rounded-[18px] border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-700 outline-none focus:border-slate-400"
-                  >
-                    {agentSessions.map((session) => (
-                      <option key={session.id} value={session.id}>
-                        {session.title || "新会话"} ({(session.turns || []).length})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                {minimizedAgentCards.length > 0 && (
-                  <div className="relative shrink-0 space-y-2 border-b border-slate-200 bg-white/70 p-3">
-                    <div className="text-[10px] uppercase tracking-wider text-slate-500">已最小化结果</div>
-                    {minimizedAgentCards.map((card) => {
-                      const turn = agentTurns.find((item) => item.id === card.turnId);
-                      if (!turn) return null;
-                      return (
-                        <button
-                          key={card.id}
-                          type="button"
-                          onClick={() => focusAgentResultCard(turn.id)}
-                          className="w-full rounded-[16px] border border-slate-200 bg-white px-3 py-2 text-left text-[11px] text-slate-700 hover:bg-slate-50 hover:border-slate-300 transition-colors"
-                        >
-                          恢复 · {turn.extractedProduct || "结果"}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-                <div className="relative min-h-0 flex-1 overflow-y-auto bg-[#fbfbf8] p-3 space-y-3 custom-scrollbar">
-                  {agentTurns.length === 0 && (
-                    <div className="space-y-2 rounded-[20px] border border-slate-200 bg-white px-3 py-3">
-                      <div className="text-[11px] text-slate-400">暂无对话，先试一个任务示例或快速打开模板。</div>
-                      <div className="flex flex-wrap gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => void sendAgentMissionFromText(AGENT_SHOT_WORKFLOW_QUICK_PROMPT)}
-                          className="rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] text-slate-600 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
-                        >
-                          发送剧本工作流示例
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => safeInvoke(createText2ImgTemplate, "打开文生图模板")}
-                          className="rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] text-slate-600 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
-                        >
-                          打开模板
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  {agentTurns.map((turn) => {
-                    const relatedCard = agentResultCards.find((item) => item.turnId === turn.id);
-                    const quickActions = Array.isArray(turn.quickActions) ? turn.quickActions : [];
-                    const memorySuggestions = Array.isArray(turn.memorySuggestions) ? turn.memorySuggestions : [];
-                    const routeDebug = turn.routeDebug || null;
-                    return (
-                    <div key={turn.id} className="space-y-1.5">
-                      {turn.userText ? (
-                        <div className="flex justify-end">
-                          <div className="max-w-[92%] space-y-1">
-                            <div className="rounded-[20px] border border-cyan-400/20 bg-[linear-gradient(180deg,rgba(14,116,144,0.24),rgba(21,94,117,0.18))] px-3 py-2.5 text-[11px] text-slate-50 whitespace-pre-wrap break-words shadow-[0_10px_24px_rgba(8,145,178,0.12)]">
-                              {turn.userText}
-                            </div>
-                            {isAdminUser && agentDevMode && routeDebug && (
-                              <div className="rounded-[16px] border border-slate-300 bg-slate-100 px-2.5 py-1.5 text-[10px] text-slate-800">
-                                后端决策={getDecisionLabel(routeDebug.backendAction)} | 产品={routeDebug.product || "-"} | 规则={routeDebug.backendRule || routeDebug.reason || "-"} | 能力={(routeDebug.backendCapabilities || []).join(", ") || "-"} | 后端调用={routeDebug.backendCalled ? "是" : "否"}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      ) : null}
-                      <div className="flex justify-start">
-                        <div className="max-w-[92%] rounded-[22px] border border-slate-200 bg-white px-3 py-2.5 text-[11px] text-slate-700 shadow-[0_10px_24px_rgba(15,23,42,0.08)]">
-                          {turn.status === "running" && (
-                            <div className="inline-flex items-center gap-1.5 text-slate-500">
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                              {getAgentTurnStepLabel(turn)}
-                            </div>
-                          )}
-                          {(turn.status === "assistant" || turn.status === "clarify") && (
-                            <div className="space-y-1.5">
-                              <div>{turn.assistantText || "你想做哪个产品/品类？"}</div>
-                              {memorySuggestions.length > 0 && (
-                                <div className="space-y-1.5">
-                                  {memorySuggestions.map((suggestion) => (
-                                    <PreferenceSuggestionCard
-                                      key={`${turn.id}_${suggestion.id}`}
-                                      suggestion={suggestion}
-                                      disabled={
-                                        savingSuggestionId === suggestion.id ||
-                                        savingFeedbackTargetId === `suggest_${suggestion.id}`
-                                      }
-                                      onConfirm={() => handleSuggestionConfirm(turn.id, suggestion)}
-                                      onIgnore={() => handleSuggestionIgnore(turn.id, suggestion)}
-                                      onEdit={() => handleSuggestionEdit(suggestion)}
-                                      showRegressionAction={HITL_FEEDBACK_UI_ENABLED}
-                                      regressionTooltip="将该建议对应会话加入回归评估集，帮助后续质量修复"
-                                      onMarkRegression={() => handleSuggestionMarkRegression(turn.id, suggestion)}
-                                    />
-                                  ))}
-                                </div>
-                              )}
-                              {quickActions.length > 0 && (
-                                <div className="flex flex-wrap gap-1">
-                                  {quickActions.map((actionId) => {
-                                    const action = AGENT_QUICK_ACTIONS.find((item) => item.id === actionId);
-                                    if (!action) return null;
-                                    return (
-                                    <button
-                                      key={`${turn.id}_${actionId}`}
-                                      type="button"
-                                      onClick={() => handleAgentQuickAction(actionId)}
-                                        className="rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] text-slate-600 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
-                                      >
-                                        {action.label}
-                                      </button>
-                                    );
-                                  })}
-                                </div>
-                              )}
-                              {turn.showCancelPending && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleAgentQuickAction("cancel_pending")}
-                                  className="rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] text-slate-600 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
-                                >
-                                  取消
-                                </button>
-                              )}
-                            </div>
-                          )}
-                          {turn.status === "error" && (
-                            <div className="space-y-1.5">
-                              <div className="text-rose-600">{turn.error || "请求失败"}</div>
-                              <div className="flex flex-wrap gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() => retryAgentTurn(turn.id)}
-                                  className="rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] text-slate-600 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
-                                >
-                                  重试
-                                </button>
-                                {HITL_FEEDBACK_UI_ENABLED && (
-                                  <button
-                                    type="button"
-                                    onClick={() => handleTurnMarkRegression(turn)}
-                                    disabled={savingFeedbackTargetId === `turn_${turn.id}`}
-                                    title="将当前会话标记为回归用例，进入评估集用于后续改进"
-                                    className={`rounded-full border px-2.5 py-1.5 text-[10px] ${
-                                      savingFeedbackTargetId === `turn_${turn.id}`
-                                        ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed"
-                                        : "bg-fuchsia-50 border-fuchsia-200 text-fuchsia-700 hover:bg-fuchsia-100"
-                                    }`}
-                                  >
-                                    标记为回归用例
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          )}
-                          {turn.status === "done" && (
-                            <div className="space-y-1.5">
-                              {turn?.intent === "STORYBOARD" ? (
-                                <div className="space-y-2">
-                                  <div className="text-slate-600">{turn.assistantText || turn.response?.summary || "已生成故事板"}</div>
-                                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-[11px] leading-6 text-slate-600">
-                                    已将故事板节点加入当前画布，并写入当前会话记录。
-                                  </div>
-                                </div>
-                              ) : turn?.intent === "DRAMA" ? (
-                                <div className="space-y-2">
-                                  <div className="text-slate-600">{turn.response?.summary || "短剧内容已生成"}</div>
-                                  <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[11px] leading-6 max-h-52 overflow-y-auto">
-                                    <DramaMarkdownBlock value={turn.response?.text || ""} className="space-y-1.5" />
-                                  </div>
-                                </div>
-                              ) : turn?.intent === "SCRIPT_EXTRACTION" ? (
-                                <div className="space-y-2">
-                                  <div className="text-slate-600">{turn.assistantText || "已从剧本中提取分镜信息，请确认后继续。"}</div>
-                                  <ScriptExtractionCard
-                                    data={turn.response}
-                                    confirmed={Boolean(turn.extractionConfirmed)}
-                                    superseded={Boolean(turn.superseded)}
-                                    onConfirm={() => {
-                                      updateAgentTurn(turn.id, { extractionConfirmed: true });
-                                      confirmScriptExtraction(turn.response);
-                                    }}
-                                  />
-                                </div>
-                              ) : turn?.intent === "ASSET_GEN_CONFIRM" ? (
-                                <div className="space-y-2">
-                                  <div className="text-slate-600">{turn.assistantText || "是否要生成角色与场景参考设定图？"}</div>
-                                  <AssetGenConfirmCard
-                                    data={turn.response}
-                                    confirmed={Boolean(turn.assetGenConfirmed)}
-                                    onConfirm={() => {
-                                      updateAgentTurn(turn.id, { assetGenConfirmed: true });
-                                      buildAssetCanvas(turn.response);
-                                    }}
-                                    onSkip={() => {
-                                      updateAgentTurn(turn.id, { assetGenConfirmed: true });
-                                      skipToShotWorkflow(turn.response);
-                                    }}
-                                  />
-                                </div>
-                              ) : turn?.intent === "ASSET_CANVAS_BUILT" ? (
-                                <div className="space-y-2">
-                                  <div className="text-slate-600">{turn.assistantText || turn.response?.summary || "已在画布上创建参考设定图组。"}</div>
-                                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] text-slate-500">
-                                    已创建 {turn.response?.char_count || 0} 个角色/道具组和 {turn.response?.scene_count || 0} 个场景组，点击运行即可生成参考图。
-                                  </div>
-                                  {Array.isArray(turn.response?.next_choices) && turn.response.next_choices.length > 0 && (
-                                    <div className="space-y-1.5 pt-1">
-                                      <div className="text-[11px] text-slate-500">接下来以哪种方式生成？</div>
-                                      <div className="flex flex-wrap gap-2">
-                                        {turn.response.next_choices.map((choice) => (
-                                          <button
-                                            key={choice.id}
-                                            type="button"
-                                            disabled={Boolean(turn.workflowChoiceSelected)}
-                                            onClick={() => {
-                                              updateAgentTurn(turn.id, { workflowChoiceSelected: choice.id });
-                                              if (choice.id === "direct_video") {
-                                                buildDirectVideoCanvas(turn.extractionData || turn.response);
-                                              }
-                                              // storyboard_first: TODO
-                                            }}
-                                            className={`rounded-full border px-3 py-1.5 text-[11px] transition-colors ${
-                                              turn.workflowChoiceSelected === choice.id
-                                                ? "border-blue-400 bg-blue-50 text-blue-700"
-                                                : turn.workflowChoiceSelected
-                                                ? "border-slate-200 bg-white text-slate-400 cursor-not-allowed opacity-50"
-                                                : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 cursor-pointer"
-                                            }`}
-                                          >
-                                            {choice.label}
-                                          </button>
-                                        ))}
-                                      </div>
-                                    </div>
-                                  )}
-                                </div>
-                              ) : turn?.intent === "VIDEO_CANVAS_BUILT" ? (
-                                <div className="space-y-2">
-                                  <div className="text-slate-600">{turn.assistantText || turn.response?.summary || "已搭建图生视频工作流。"}</div>
-                                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] text-slate-500">
-                                    已为 {(turn.response?.shots || []).length} 个镜头搭建图生视频节点，点击运行即可生成视频。
-                                  </div>
-                                </div>
-                              ) : turn?.intent === "SHOT_WORKFLOW" ? (
-                                <div className="space-y-2">
-                                  <div className="text-slate-600">{turn.assistantText || turn.response?.summary || "已搭建分镜出图工作流。"}</div>
-                                  {turn.response?.annotated_script ? (
-                                    <ShotAnnotatedScriptBlock script={turn.response.annotated_script} />
-                                  ) : null}
-                                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] text-slate-500">
-                                    已为 {(turn.response?.shots || []).length} 个分镜搭建出图节点，资产已自动绑定。
-                                  </div>
-                                </div>
-                              ) : (
-                                <div className="space-y-2">
-                                  <div className="text-slate-600">{turn.assistantText || turn.response?.summary || "任务已处理。"}</div>
-                                </div>
-                              )}
-                              <div className="flex gap-1.5">
-                                {turn?.intent === "STORYBOARD" ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      const nodeId = Array.isArray(turn?.response?.storyboardNodeIds)
-                                        ? turn.response.storyboardNodeIds.find(Boolean)
-                                        : "";
-                                      if (nodeId) focusCanvasNode(nodeId);
-                                    }}
-                                    className="rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] text-slate-600 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
-                                  >
-                                    定位故事板
-                                  </button>
-                                ) : turn?.intent !== "SCRIPT_EXTRACTION" && turn?.intent !== "ASSET_GEN_CONFIRM" && turn?.intent !== "ASSET_CANVAS_BUILT" && turn?.intent !== "VIDEO_CANVAS_BUILT" && turn?.intent !== "SHOT_WORKFLOW" ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => focusAgentResultCard(turn.id)}
-                                    className="rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] text-slate-600 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
-                                  >
-                                    {relatedCard?.minimized ? "恢复结果卡片" : "定位结果卡片"}
-                                  </button>
-                                ) : null}
-                                {turn?.intent !== "STORYBOARD" && turn?.intent !== "SCRIPT_EXTRACTION" && turn?.intent !== "ASSET_GEN_CONFIRM" && turn?.intent !== "ASSET_CANVAS_BUILT" && turn?.intent !== "VIDEO_CANVAS_BUILT" && turn?.intent !== "SHOT_WORKFLOW" && relatedCard && !relatedCard.minimized && (
-                                  <button
-                                    type="button"
-                                    onClick={() => minimizeAgentResultCard(relatedCard.id)}
-                                    className="rounded-full border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] text-slate-600 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-colors"
-                                  >
-                                    最小化到对话流
-                                  </button>
-                                )}
-                                {HITL_FEEDBACK_UI_ENABLED && (
-                                  <button
-                                    type="button"
-                                    onClick={() => handleTurnMarkRegression(turn)}
-                                    disabled={savingFeedbackTargetId === `turn_${turn.id}`}
-                                    title="将当前会话标记为回归用例，进入评估集用于后续改进"
-                                    className={`rounded-full border px-2.5 py-1.5 text-[10px] ${
-                                      savingFeedbackTargetId === `turn_${turn.id}`
-                                        ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed"
-                                        : "bg-fuchsia-50 border-fuchsia-200 text-fuchsia-700 hover:bg-fuchsia-100"
-                                    }`}
-                                  >
-                                    标记为回归用例
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )})}
-                  <div ref={agentConversationBottomRef} />
-                </div>
-              </div>
-            </div>
-              </div>
-            )}
-          </div>
-        </div>
-      </header>
+      {/* Header — Phase 8: extracted to WorkbenchHeader */}
+      <WorkbenchHeader
+        agentHistoryCollapsed={agentHistoryCollapsed}
+        toggleAgentHistoryPanel={toggleAgentHistoryPanel}
+        rightPanelContainerStyle={rightPanelContainerStyle}
+        handleRightPanelResizeStart={handleRightPanelResizeStart}
+        agentSessions={agentSessions}
+        activeAgentSession={activeAgentSession}
+        agentTurns={agentTurns}
+        activePendingTask={activePendingTask}
+        isAgentMissionRunning={isAgentMissionRunning}
+        hasActiveAgentConversation={hasActiveAgentConversation}
+        minimizedAgentCards={minimizedAgentCards}
+        agentResultCards={agentResultCards}
+        selectedAgentCardIds={selectedAgentCardIds}
+        activeAgentCardId={activeAgentCardId}
+        setActiveAgentSession={setActiveAgentSession}
+        createAgentSession={createAgentSession}
+        clearActiveAgentConversation={clearActiveAgentConversation}
+        focusAgentResultCard={focusAgentResultCard}
+        toggleAgentResultCardCollapsed={toggleAgentResultCardCollapsed}
+        minimizeAgentResultCard={minimizeAgentResultCard}
+        handleAgentCardWheelCapture={handleAgentCardWheelCapture}
+        agentConversationBottomRef={agentConversationBottomRef}
+        agentDevMode={agentDevMode}
+        isAdminUser={isAdminUser}
+        apiStatus={apiStatus}
+        setShowHistoryPanel={setShowHistoryPanel}
+        retryAgentTurn={retryAgentTurn}
+        handleTurnMarkRegression={handleTurnMarkRegression}
+        handleSuggestionConfirm={handleSuggestionConfirm}
+        handleSuggestionIgnore={handleSuggestionIgnore}
+        handleSuggestionEdit={handleSuggestionEdit}
+        handleSuggestionMarkRegression={handleSuggestionMarkRegression}
+        confirmScriptExtraction={confirmScriptExtraction}
+        buildAssetCanvas={buildAssetCanvas}
+        skipToShotWorkflow={skipToShotWorkflow}
+        buildDirectVideoCanvas={buildDirectVideoCanvas}
+        hitlFeedbackRows={hitlFeedbackRows}
+        devSuggestionLog={devSuggestionLog}
+        devRegressionLog={devRegressionLog}
+        sendAgentMissionFromText={sendAgentMissionFromText}
+        createText2ImgTemplate={createText2ImgTemplate}
+        safeInvoke={safeInvoke}
+        handleAgentCardMouseDown={handleAgentCardMouseDown}
+        savingSuggestionId={savingSuggestionId}
+        savingFeedbackTargetId={savingFeedbackTargetId}
+      />
 
       {/* Toast */}
       {runToast && (
