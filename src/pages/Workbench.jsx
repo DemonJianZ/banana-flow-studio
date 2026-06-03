@@ -187,6 +187,7 @@ import {
   MODES_WITHOUT_APP_AUTH,
   formatAIChatErrorMessage,
   isFirstLastFrameReferenceSelection,
+  extractModelParamList,
   cloneDeep,
   buildRouteDebug,
   parseCanvasClarification,

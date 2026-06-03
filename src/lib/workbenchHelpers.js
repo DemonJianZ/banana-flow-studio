@@ -285,6 +285,26 @@ export const resolveWorkbenchAIChatPartEnum = ({ mode }) => {
   return AI_CHAT_PART_ENUM_203;
 };
 
+// ─── Extract param list from raw API response ────────────────────────────────
+
+export const extractModelParamList = (payload) => {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== "object") return EMPTY_LIST;
+  const queue = [payload];
+  const visited = new Set();
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || typeof current !== "object" || visited.has(current)) continue;
+    visited.add(current);
+    if (Array.isArray(current.list)) return current.list;
+    for (const value of Object.values(current)) {
+      if (Array.isArray(value)) return value;
+      if (value && typeof value === "object") queue.push(value);
+    }
+  }
+  return EMPTY_LIST;
+};
+
 // ─── AI Chat param payload helpers ───────────────────────────────────────────
 
 const resolveDefaultParamValueId = (paramItem) => {
