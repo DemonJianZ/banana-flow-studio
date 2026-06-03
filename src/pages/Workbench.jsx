@@ -501,6 +501,25 @@ const Workbench = () => {
     safeInvoke,
   } = useWorkbenchRun({ apiFetch });
 
+  const imageModelRecords = useMemo(
+    () => filterDeprecatedImageModels(Array.isArray(aiChatModels.image) && aiChatModels.image.length ? aiChatModels.image : EMPTY_LIST),
+    [aiChatModels.image],
+  );
+  const imageModelOptions = useMemo(
+    () => (imageModelRecords.length ? imageModelRecords : filterDeprecatedImageModels(DEFAULT_AI_MODELS)),
+    [imageModelRecords],
+  );
+  const videoModelOptions = useMemo(() => {
+    const source = Array.isArray(aiChatModels.video) && aiChatModels.video.length ? aiChatModels.video : DEFAULT_VIDEO_MODELS;
+    return source.filter((item) => !DEPRECATED_VIDEO_MODEL_IDS.has(String(item?.id || "").trim()));
+  }, [aiChatModels.video]);
+  const defaultImageModelId = useMemo(() => getDefaultImageModelId(imageModelRecords), [imageModelRecords]);
+  const threeViewImageModelId = useMemo(() => {
+    const preferred = String(AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2 || "").trim();
+    if (preferred) return preferred;
+    return findAIChatModelIdByKeywords(imageModelRecords) || defaultImageModelId;
+  }, [defaultImageModelId, imageModelRecords]);
+
   // ── Phase 5: canvas node operations hook (compact ops + storyboard gen) ────
   const {
     updateStoryboardAssetStatus,
@@ -718,24 +737,6 @@ const Workbench = () => {
     return () => document.removeEventListener("mousedown", handlePointerDown);
   }, [sidebarVideoCreateMenu]);
 
-  const imageModelRecords = useMemo(
-    () => filterDeprecatedImageModels(Array.isArray(aiChatModels.image) && aiChatModels.image.length ? aiChatModels.image : EMPTY_LIST),
-    [aiChatModels.image],
-  );
-  const imageModelOptions = useMemo(
-    () => (imageModelRecords.length ? imageModelRecords : filterDeprecatedImageModels(DEFAULT_AI_MODELS)),
-    [imageModelRecords],
-  );
-  const videoModelOptions = useMemo(() => {
-    const source = Array.isArray(aiChatModels.video) && aiChatModels.video.length ? aiChatModels.video : DEFAULT_VIDEO_MODELS;
-    return source.filter((item) => !DEPRECATED_VIDEO_MODEL_IDS.has(String(item?.id || "").trim()));
-  }, [aiChatModels.video]);
-  const defaultImageModelId = useMemo(() => getDefaultImageModelId(imageModelRecords), [imageModelRecords]);
-  const threeViewImageModelId = useMemo(() => {
-    const preferred = String(AI_CHAT_IMAGE_MODEL_ID_NANO_BANANA2 || "").trim();
-    if (preferred) return preferred;
-    return findAIChatModelIdByKeywords(imageModelRecords) || defaultImageModelId;
-  }, [defaultImageModelId, imageModelRecords]);
   const defaultVideoModelId = useMemo(() => getDefaultVideoModelId(videoModelOptions), [videoModelOptions]);
 
   // For each text_input node: find sibling input nodes connected to the same downstream node
