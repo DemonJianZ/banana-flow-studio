@@ -21,6 +21,7 @@ const MAX_ZOOM = 3;
 const MEDIA_UPLOAD_NODE_WIDTH = 280;
 const MEDIA_UPLOAD_NODE_DROP_OFFSET_Y = 96;
 const CANVAS_KEY = "bananaflow_canvas_id";
+const PERF_NODE_COUNT_LIMIT = 1200;
 
 // ==========================================
 // Module-level utilities
@@ -53,7 +54,45 @@ export const getMediaUploadNodePosition = (point) => ({
   y: point.y - MEDIA_UPLOAD_NODE_DROP_OFFSET_Y,
 });
 
-const newCanvasId = () => "canvas_" + Math.random().toString(36).slice(2, 12);
+const normalizePerfNodeCount = (value) => {
+  const count = Math.round(Number(value || 0));
+  if (!Number.isFinite(count) || count <= 0) return 0;
+  return Math.min(PERF_NODE_COUNT_LIMIT, Math.max(1, count));
+};
+
+const buildPerfCanvasGraph = (count) => {
+  const safeCount = normalizePerfNodeCount(count);
+  const columns = Math.max(1, Math.ceil(Math.sqrt(safeCount)));
+  const horizontalGap = 360;
+  const verticalGap = 240;
+  const nodes = Array.from({ length: safeCount }, (_, index) => {
+    const column = index % columns;
+    const row = Math.floor(index / columns);
+    const isTextNode = index % 3 === 0;
+    return {
+      id: `perf_node_${index + 1}`,
+      type: isTextNode ? NODE_TYPES.TEXT_INPUT : NODE_TYPES.PROCESSOR,
+      x: column * horizontalGap,
+      y: row * verticalGap,
+      data: isTextNode
+        ? { text: `性能压测节点 ${index + 1}` }
+        : {
+            mode: "text2img",
+            prompt: `性能压测节点 ${index + 1}`,
+            templates: { size: "1k", aspect_ratio: "1:1" },
+            batchSize: 1,
+            status: "idle",
+            model: "",
+          },
+    };
+  });
+  const connections = nodes.slice(1).map((node, index) => ({
+    id: `perf_conn_${index + 1}`,
+    from: nodes[index].id,
+    to: node.id,
+  }));
+  return { nodes, connections };
+};
 
 // ==========================================
 // useCanvas hook
@@ -101,6 +140,8 @@ export function useCanvas({
   const nodeElementMapRef = useRef(new Map());
   const viewportRef = useRef(viewport);
   const nodeDragCleanupRef = useRef(null);
+  const nodeDragFrameRef = useRef(0);
+  const nodeDragLatestEventRef = useRef(null);
   const connectionDragSelectionRef = useRef({ userSelect: "", webkitUserSelect: "" });
   const dragSelectionStyleRef = useRef({ userSelect: "", webkitUserSelect: "" });
   const connectionHoverTargetRef = useRef(null);
@@ -116,6 +157,42 @@ export function useCanvas({
   useEffect(() => { viewportRef.current = viewport; }, [viewport]);
   // History
   // pushHistory / undo / redo / canUndo / canRedo 均由 useCanvasStore 提供（Phase 2 迁移）
+
+  const installPerfCanvasGraph = useCallback((count = 500) => {
+    const safeCount = normalizePerfNodeCount(count);
+    if (!safeCount) return null;
+    const nextGraph = buildPerfCanvasGraph(safeCount);
+    pushHistory();
+    setNodes(nextGraph.nodes);
+    setConnections(nextGraph.connections);
+    setSelectedNodeIds(new Set(nextGraph.nodes.slice(0, 1).map((node) => node.id)));
+    setSelectedConnectionIds(new Set());
+    setActiveNodeId(nextGraph.nodes[0]?.id || null);
+    setViewport({ x: 96, y: 96, zoom: 0.8 });
+    return nextGraph;
+  }, [pushHistory, setActiveNodeId, setConnections, setNodes, setSelectedConnectionIds, setSelectedNodeIds, setViewport]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const api = {
+      generateCanvas: installPerfCanvasGraph,
+      generate500: () => installPerfCanvasGraph(500),
+      generate1000: () => installPerfCanvasGraph(1000),
+    };
+    window.__bananaFlowPerf = api;
+
+    const params = new URLSearchParams(window.location.search);
+    const count = normalizePerfNodeCount(params.get("perfNodes"));
+    if (count) {
+      window.requestAnimationFrame(() => {
+        installPerfCanvasGraph(count);
+      });
+    }
+
+    return () => {
+      if (window.__bananaFlowPerf === api) delete window.__bananaFlowPerf;
+    };
+  }, [installPerfCanvasGraph]);
 
   const deleteSelection = () => {
     if (selectedNodeIds.size === 0 && selectedConnectionIds.size === 0) return;
@@ -138,7 +215,7 @@ export function useCanvas({
       next.delete(connectionId);
       return next;
     });
-  }, [pushHistory]);  // pushHistory 是 store action，引用稳定，不会引起不必要重建
+  }, [pushHistory, setConnections, setSelectedConnectionIds]);
 
   const handleConnectionClick = useCallback((event, connectionId) => {
     event.stopPropagation();
@@ -151,7 +228,7 @@ export function useCanvas({
       else next.add(connectionId);
       return next;
     });
-  }, []);
+  }, [setSelectedConnectionIds, setSelectedNodeIds]);
 
   const screenToCanvas = useCallback((sx, sy) => {
     const r = canvasRef.current?.getBoundingClientRect();
@@ -366,7 +443,7 @@ export function useCanvas({
     }
 
     onPasteToastRef?.current?.({ message: "已辅助整理画布节点", type: "info" });
-  }, [pushHistory, onPasteToastRef]);
+  }, [pushHistory, onPasteToastRef, setNodes, setSelectedConnectionIds, setSelectedNodeIds, setViewport]);
 
   const handleWheel = (e) => {
     if (isEditableElement(e.target)) {
@@ -434,7 +511,10 @@ export function useCanvas({
     const startX = e.clientX;
     const startY = e.clientY;
 
-    const onWindowMouseMove = (event) => {
+    const flushNodeDragFrame = () => {
+      nodeDragFrameRef.current = 0;
+      const event = nodeDragLatestEventRef.current;
+      if (!event) return;
       const dx = (event.clientX - startX) / viewport.zoom;
       const dy = (event.clientY - startY) / viewport.zoom;
       setNodes((prev) =>
@@ -442,7 +522,19 @@ export function useCanvas({
       );
     };
 
+    const onWindowMouseMove = (event) => {
+      nodeDragLatestEventRef.current = { clientX: event.clientX, clientY: event.clientY };
+      if (nodeDragFrameRef.current) return;
+      nodeDragFrameRef.current = window.requestAnimationFrame(flushNodeDragFrame);
+    };
+
     const cleanupDrag = () => {
+      if (nodeDragFrameRef.current) {
+        window.cancelAnimationFrame(nodeDragFrameRef.current);
+        nodeDragFrameRef.current = 0;
+      }
+      flushNodeDragFrame();
+      nodeDragLatestEventRef.current = null;
       window.removeEventListener("mousemove", onWindowMouseMove);
       window.removeEventListener("mouseup", cleanupDrag, true);
       window.removeEventListener("blur", cleanupDrag);
@@ -468,18 +560,12 @@ export function useCanvas({
         canvasHoverClientRef.current = { x: e.clientX, y: e.clientY };
       }
       if (interactionMode === "panning") setViewport({ ...viewport, x: e.clientX - dragStart.x, y: e.clientY - dragStart.y });
-      else if (interactionMode === "dragging_node") {
-        const dx = (e.clientX - dragStart.x) / viewport.zoom;
-        const dy = (e.clientY - dragStart.y) / viewport.zoom;
-        setNodes((p) =>
-          p.map((n) => (initialNodePos[n.id] ? { ...n, x: initialNodePos[n.id].x + dx, y: initialNodePos[n.id].y + dy } : n))
-        );
-      } else if (interactionMode === "selecting") {
+      else if (interactionMode === "selecting") {
         const c = screenToCanvas(e.clientX, e.clientY);
         setSelectionBox((p) => ({ ...p, curX: c.x, curY: c.y }));
       }
     },
-    [interactionMode, dragStart, viewport, initialNodePos, screenToCanvas]
+    [interactionMode, dragStart, viewport, screenToCanvas, setViewport]
   );
 
   const handleMouseUp = useCallback(() => {
@@ -504,7 +590,7 @@ export function useCanvas({
     setInteractionMode("idle");
     setSelectionBox(null);
     setConnectingSource(null);
-  }, [interactionMode, selectionBox, selectedNodeIds, nodes, onBoxSelectCompleteRef, pushHistory]);
+  }, [interactionMode, selectionBox, selectedNodeIds, nodes, onBoxSelectCompleteRef, pushHistory, setSelectedNodeIds, setConnectingSource]);
 
   useEffect(() => {
     if (!["panning", "selecting"].includes(interactionMode)) return undefined;
@@ -582,7 +668,7 @@ export function useCanvas({
     setSelectedNodeIds(new Set([nodeId]));
     setSelectedConnectionIds(new Set());
     setActiveNodeId(nodeId);
-  }, [pushHistory]);
+  }, [pushHistory, setActiveNodeId, setNodes, setSelectedConnectionIds, setSelectedNodeIds]);
 
   const getCanvasViewportCenterPoint = useCallback(() => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -754,7 +840,7 @@ export function useCanvas({
       setSelectedConnectionIds(new Set());
       setActiveNodeId(nextNodes[0]?.id || null);
     },
-    [getCanvasViewportCenterPoint, pushHistory],
+    [getCanvasViewportCenterPoint, pushHistory, setActiveNodeId, setConnections, setNodes, setSelectedConnectionIds, setSelectedNodeIds],
   );
 
   return {

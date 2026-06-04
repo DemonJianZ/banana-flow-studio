@@ -1,6 +1,12 @@
 import React from "react";
 import { Loader2, ChevronDown, ChevronUp, Minus } from "lucide-react";
 import { MEDIA_UPLOAD_NODE_EMPTY_HEIGHT } from "../../constants/workbench.jsx";
+import {
+  NODE_CULLING_OVERSCAN,
+  getNodeBounds,
+  getViewportCanvasBounds,
+  rectsIntersect,
+} from "../../lib/workbenchGeometry.js";
 
 // GRID_SIZE is defined in Workbench.jsx module scope, not exported from constants
 const GRID_SIZE = 20;
@@ -29,20 +35,15 @@ export default function WorkbenchCanvas({
   nodes,
   connections,
   selectedNodeIds,
-  selectedConnectionIds,
 
   // --- interaction state (from useCanvas) ---
   connectingSource,
   selectionBox,
   canvasDropActive,
   canvasDropUploading,
-  hoveredConnectionId,
   hoveredConnectTarget,
-  mousePos,
-  nodeElementMapRef,
 
   // --- run state ---
-  isRunning,
 
   // --- agent result cards state ---
   hasAgentResultCards,
@@ -68,10 +69,6 @@ export default function WorkbenchCanvas({
   handleCanvasDragLeave,
   handleCanvasDrop,
   getCursor,
-  screenToCanvas,
-  setHoveredConnectionId,
-  handleConnectionClick,
-  deleteConnectionById,
   handleNodeMouseDown,
 
   // --- render helpers (close over canvas state in Workbench) ---
@@ -123,6 +120,46 @@ export default function WorkbenchCanvas({
   // --- WorkbenchAgentComposer props (spread via composerProps) ---
   composerProps,
 }) {
+  const [canvasSize, setCanvasSize] = React.useState(() => ({ width: 0, height: 0 }));
+
+  React.useLayoutEffect(() => {
+    const canvasElement = canvasRef.current;
+    if (!canvasElement) return undefined;
+
+    const updateCanvasSize = () => {
+      setCanvasSize((prev) => {
+        const width = canvasElement.clientWidth || 0;
+        const height = canvasElement.clientHeight || 0;
+        return prev.width === width && prev.height === height ? prev : { width, height };
+      });
+    };
+
+    updateCanvasSize();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateCanvasSize);
+      return () => window.removeEventListener("resize", updateCanvasSize);
+    }
+
+    const observer = new ResizeObserver(updateCanvasSize);
+    observer.observe(canvasElement);
+    return () => observer.disconnect();
+  }, [canvasRef]);
+
+  const visibleCanvasBounds = React.useMemo(
+    () => getViewportCanvasBounds(viewport, canvasSize, NODE_CULLING_OVERSCAN),
+    [canvasSize, viewport],
+  );
+
+  const visibleNodes = React.useMemo(
+    () =>
+      nodes.filter((node) => {
+        if (selectedNodeIds.has(node.id)) return true;
+        if (connectingSource?.nodeId === node.id || hoveredConnectTarget?.nodeId === node.id) return true;
+        return rectsIntersect(getNodeBounds(node), visibleCanvasBounds);
+      }),
+    [connectingSource, hoveredConnectTarget, nodes, selectedNodeIds, visibleCanvasBounds],
+  );
+
   return (
     <div
       ref={canvasRef}
@@ -202,8 +239,8 @@ export default function WorkbenchCanvas({
           className="absolute inset-0 overflow-visible pointer-events-none"
           style={{ width: 1, height: 1 }}
         >
-          {renderConnections()}
-          {renderTempConnection()}
+          {renderConnections({ visibleCanvasBounds, visibleNodes })}
+          {renderTempConnection({ visibleCanvasBounds, visibleNodes })}
         </svg>
 
         {/* Drop-uploading placeholder node */}
@@ -237,7 +274,7 @@ export default function WorkbenchCanvas({
         ) : null}
 
         {/* Canvas nodes */}
-        {[...nodes]
+        {[...visibleNodes]
           .sort((a, b) =>
             a.type === "group_container" ? -1 : b.type === "group_container" ? 1 : 0
           )

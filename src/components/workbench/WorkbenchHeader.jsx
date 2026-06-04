@@ -128,22 +128,17 @@ export default function WorkbenchHeader({
   agentSessions,
   activeAgentSession,
   agentTurns,
-  activePendingTask,
   isAgentMissionRunning,
   hasActiveAgentConversation,
   minimizedAgentCards,
   agentResultCards,
-  selectedAgentCardIds,
-  activeAgentCardId,
 
   // Session callbacks
   setActiveAgentSession,
   createAgentSession,
   clearActiveAgentConversation,
   focusAgentResultCard,
-  toggleAgentResultCardCollapsed,
   minimizeAgentResultCard,
-  handleAgentCardWheelCapture,
   updateAgentTurn,
 
   // Refs
@@ -153,7 +148,6 @@ export default function WorkbenchHeader({
   agentDevMode,
   isAdminUser,
   apiStatus,
-  setShowHistoryPanel,
 
   // Turn-level callbacks
   retryAgentTurn,
@@ -176,15 +170,11 @@ export default function WorkbenchHeader({
   buildDirectVideoCanvas,
 
   // HITL / dev
-  hitlFeedbackRows,
-  devSuggestionLog,
-  devRegressionLog,
 
   // Agent composer helpers
   sendAgentMissionFromText,
   createText2ImgTemplate,
   safeInvoke,
-  handleAgentCardMouseDown,
   handleAgentQuickAction,
   focusCanvasNode,
 }) {

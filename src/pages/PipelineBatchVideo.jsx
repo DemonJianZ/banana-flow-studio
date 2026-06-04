@@ -815,7 +815,6 @@ const PipelineBatchVideo = () => {
       return finalOutputUrl;
     },
     [
-      apiFetch,
       align,
       boldStrength,
       boldTexts,

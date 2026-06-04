@@ -9,10 +9,7 @@ import React from "react";
 import { createPortal } from "react-dom";
 import { Loader2, Sparkles, Wand2 } from "lucide-react";
 import { useCanvasStore } from "../../stores/canvasStore.js";
-import {
-  matchesSceneBinding,
-  stripStoryboardDisplayIds,
-} from "../../constants/workbench.jsx";
+import { matchesSceneBinding } from "../../constants/workbench.jsx";
 import { API_BASE } from "../../config.js";
 
 const normalizeStoryboardAssetCandidates = (value) => {

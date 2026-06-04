@@ -248,16 +248,21 @@ export default function WorkbenchSidebar({
     );
   };
 
-  // ── Helper to make hover menu ──────────────────────────────────────────────
-  const makeHoverMenu = (timerRef, setter) => ({
-    onMouseEnter: () => {
-      if (timerRef.current) { window.clearTimeout(timerRef.current); timerRef.current = null; }
-    },
-    onMouseLeave: () => {
-      if (timerRef.current) window.clearTimeout(timerRef.current);
-      timerRef.current = window.setTimeout(() => { setter(null); timerRef.current = null; }, 140);
-    },
-  });
+  // ── Hover menu helpers ────────────────────────────────────────────────────
+  const clearHoverMenuTimer = (timerRef) => {
+    if (timerRef.current) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  };
+
+  const scheduleHoverMenuClose = (timerRef, setter) => {
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => {
+      setter(null);
+      timerRef.current = null;
+    }, 140);
+  };
 
   return (
     <>
@@ -353,13 +358,13 @@ export default function WorkbenchSidebar({
             {[
               { action: undo, can: canUndo, icon: Undo, label: "撤销" },
               { action: redo, can: canRedo, icon: Redo, label: "重做" },
-            ].map(({ action, can, icon: Icon, label }) => (
-              <button key={label} type="button" onClick={action} disabled={!can} title={label} aria-label={label}
+            ].map((item) => (
+              <button key={item.label} type="button" onClick={item.action} disabled={!item.can} title={item.label} aria-label={item.label}
                 className={`flex h-8 w-8 items-center justify-center rounded-full transition-colors ${
-                  can ? "text-[#6B7280] hover:bg-[#EAECEF] hover:text-slate-800 active:bg-[#E1E5E9]" : "cursor-not-allowed text-slate-300"
+                  item.can ? "text-[#6B7280] hover:bg-[#EAECEF] hover:text-slate-800 active:bg-[#E1E5E9]" : "cursor-not-allowed text-slate-300"
                 }`}>
                 <span className="flex h-7 w-7 items-center justify-center">
-                  <Icon className="h-[18px] w-[18px]" strokeWidth={2.2} />
+                  {React.createElement(item.icon, { className: "h-[18px] w-[18px]", strokeWidth: 2.2 })}
                 </span>
               </button>
             ))}
@@ -447,7 +452,8 @@ export default function WorkbenchSidebar({
           data-sidebar-node-input-menu="true"
           className="absolute z-[58] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.98)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
           style={{ left: leftSidebarWidth + 18, top: sidebarNodeInputMenu.top }}
-          {...makeHoverMenu(sidebarNodeInputMenuCloseTimerRef, setSidebarNodeInputMenu)}
+          onMouseEnter={() => clearHoverMenuTimer(sidebarNodeInputMenuCloseTimerRef)}
+          onMouseLeave={() => scheduleHoverMenuClose(sidebarNodeInputMenuCloseTimerRef, setSidebarNodeInputMenu)}
         >
           <div className="mb-2 px-1 text-[11px] font-medium text-slate-500">选择输入</div>
           <div className="space-y-1.5">
@@ -456,18 +462,18 @@ export default function WorkbenchSidebar({
               { key: "node_storyboard_input", icon: Clapperboard, bg: "bg-[#EEF7F6]", color: "text-[#0F766E]", label: "故事板输入", desc: "拖入剧本文件，自动生成可编辑故事板", type: NODE_TYPES.STORYBOARD_INPUT },
               { key: "node_image_generate", icon: ImagePlus, bg: "bg-[#F3F4F6]", color: "text-[#6B7280]", label: "图像创作", desc: "与现有生图节点一致，支持模型、尺寸和比例", type: NODE_TYPES.PROCESSOR, mode: "image_creation" },
               { key: "node_video_generate", icon: Film, bg: "bg-[#F3F4F6]", color: "text-[#6B7280]", label: "视频创作", desc: "内置首尾帧参考 / 全能参考模式切换", type: NODE_TYPES.VIDEO_GEN, mode: "first_last_reference" },
-            ].map(({ key, icon: Icon, bg, color, label, desc, type, mode }) => (
-              <button key={key} type="button"
+            ].map((item) => (
+              <button key={item.key} type="button"
                 className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
                 onClick={() => {
-                  setActiveSidebarItemKey(key);
+                  setActiveSidebarItemKey(item.key);
                   setSidebarNodeInputMenu(null);
-                  safeInvoke(() => onAddNode(type, mode || null), label);
+                  safeInvoke(() => onAddNode(item.type, item.mode || null), item.label);
                 }}>
-                <div className={`flex h-10 w-10 items-center justify-center rounded-full ${bg} ${color}`}><Icon className="h-[18px] w-[18px]" /></div>
+                <div className={`flex h-10 w-10 items-center justify-center rounded-full ${item.bg} ${item.color}`}>{React.createElement(item.icon, { className: "h-[18px] w-[18px]" })}</div>
                 <div className="min-w-0">
-                  <div className="text-[13px] font-medium text-slate-800">{label}</div>
-                  <div className="mt-0.5 text-[11px] text-slate-500">{desc}</div>
+                  <div className="text-[13px] font-medium text-slate-800">{item.label}</div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">{item.desc}</div>
                 </div>
               </button>
             ))}
@@ -481,7 +487,8 @@ export default function WorkbenchSidebar({
           data-sidebar-workflow-menu="true"
           className="absolute z-[58] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.98)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
           style={{ left: leftSidebarWidth + 18, top: sidebarWorkflowMenu.top }}
-          {...makeHoverMenu(sidebarWorkflowMenuCloseTimerRef, setSidebarWorkflowMenu)}
+          onMouseEnter={() => clearHoverMenuTimer(sidebarWorkflowMenuCloseTimerRef)}
+          onMouseLeave={() => scheduleHoverMenuClose(sidebarWorkflowMenuCloseTimerRef, setSidebarWorkflowMenu)}
         >
           <div className="mb-2 px-1 text-[11px] font-medium text-slate-500">选择工作流</div>
           <div className="space-y-1.5">
@@ -518,7 +525,8 @@ export default function WorkbenchSidebar({
           data-sidebar-image-create-menu="true"
           className="absolute z-[58] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.98)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
           style={{ left: leftSidebarWidth + 18, top: sidebarImageCreateMenu.top }}
-          {...makeHoverMenu(sidebarImageCreateMenuCloseTimerRef, setSidebarImageCreateMenu)}
+          onMouseEnter={() => clearHoverMenuTimer(sidebarImageCreateMenuCloseTimerRef)}
+          onMouseLeave={() => scheduleHoverMenuClose(sidebarImageCreateMenuCloseTimerRef, setSidebarImageCreateMenu)}
         >
           <div className="mb-2 px-1 text-[11px] font-medium text-slate-500">选择创作方式</div>
           <div className="space-y-1.5">
@@ -549,7 +557,8 @@ export default function WorkbenchSidebar({
           data-sidebar-video-create-menu="true"
           className="absolute z-[58] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.98)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
           style={{ left: leftSidebarWidth + 18, top: sidebarVideoCreateMenu.top }}
-          {...makeHoverMenu(sidebarVideoCreateMenuCloseTimerRef, setSidebarVideoCreateMenu)}
+          onMouseEnter={() => clearHoverMenuTimer(sidebarVideoCreateMenuCloseTimerRef)}
+          onMouseLeave={() => scheduleHoverMenuClose(sidebarVideoCreateMenuCloseTimerRef, setSidebarVideoCreateMenu)}
         >
           <div className="mb-2 px-1 text-[11px] font-medium text-slate-500">选择创作方式</div>
           <div className="space-y-1.5">
@@ -557,11 +566,11 @@ export default function WorkbenchSidebar({
               { icon: Clapperboard, label: "文生视频", desc: "直接用提示词生成视频", action: createText2VideoTemplate },
               { icon: ImagePlus, label: "图生视频", desc: "单张图片生成视频", action: createImg2VideoTemplate },
               { icon: Sparkles, label: "全能生视频", desc: "多参考图联合驱动视频生成", action: createOmniReferenceVideoTemplate },
-            ].map(({ icon: Icon, label, desc, action }) => (
-              <button key={label} type="button" className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
-                onClick={() => { setSidebarVideoCreateMenu(null); safeInvoke(action, label); }}>
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]"><Icon className="h-[18px] w-[18px]" /></div>
-                <div className="min-w-0"><div className="text-[13px] font-medium text-slate-800">{label}</div><div className="mt-0.5 text-[11px] text-slate-500">{desc}</div></div>
+            ].map((item) => (
+              <button key={item.label} type="button" className="flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-left transition-colors hover:bg-[#F3F4F6]"
+                onClick={() => { setSidebarVideoCreateMenu(null); safeInvoke(item.action, item.label); }}>
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F3F4F6] text-[#6B7280]">{React.createElement(item.icon, { className: "h-[18px] w-[18px]" })}</div>
+                <div className="min-w-0"><div className="text-[13px] font-medium text-slate-800">{item.label}</div><div className="mt-0.5 text-[11px] text-slate-500">{item.desc}</div></div>
               </button>
             ))}
           </div>

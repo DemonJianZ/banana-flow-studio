@@ -59,7 +59,7 @@ export function useAgentMission({
   setPendingTaskForActiveSession,
   clearPendingTaskForActiveSession,
   agentInput, setAgentInput,
-  agentInputFocused, setAgentInputFocused,
+  setAgentInputFocused,
   agentComposerFiles, setAgentComposerFiles,
   agentInputRef,
   agentUploadInputRef,
@@ -80,9 +80,6 @@ export function useAgentMission({
   // other state
   activeArtifact,
   apiFetch,
-  aiChatSessionIdRef,
-  aiChatHistoryRecordIdRef,
-  agentDevMode,
   setRunToast,
   upsertCanvasDraftSnapshot,
   setShowPreferencesPanel,
@@ -92,7 +89,6 @@ export function useAgentMission({
   // canvas node ops
   updateNodeData,
   // focusCanvasNode removed: implemented inline via canvasStore to avoid TDZ
-  viewportRef,
 }) {
   // ── canvas store ────────────────────────────────────────────────────────────
   const storeApplyPatch = useCanvasStore((s) => s.applyPatch);

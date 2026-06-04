@@ -17,6 +17,36 @@ export function useWorkbenchRun({ apiFetch } = {}) {
   const [expandedHistoryIds, setExpandedHistoryIds] = useState(new Set());
   const [apiStats, setApiStats] = useState(null);
   const [runToast, setRunToast] = useState(null);
+  const runToastTimerRef = useRef(null);
+
+  const clearRunToast = useCallback(() => {
+    if (runToastTimerRef.current) {
+      window.clearTimeout(runToastTimerRef.current);
+      runToastTimerRef.current = null;
+    }
+    setRunToast(null);
+  }, []);
+
+  const showRunToast = useCallback((toast, duration = 2200) => {
+    if (runToastTimerRef.current) {
+      window.clearTimeout(runToastTimerRef.current);
+      runToastTimerRef.current = null;
+    }
+    setRunToast(toast);
+    if (duration > 0) {
+      runToastTimerRef.current = window.setTimeout(() => {
+        runToastTimerRef.current = null;
+        setRunToast(null);
+      }, duration);
+    }
+  }, []);
+
+  useEffect(() => () => {
+    if (runToastTimerRef.current) {
+      window.clearTimeout(runToastTimerRef.current);
+      runToastTimerRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     apiFetch("/docs")
@@ -89,9 +119,8 @@ export function useWorkbenchRun({ apiFetch } = {}) {
         nodeController.abort(new DOMException("生成已取消", "AbortError"));
       }
     });
-    setRunToast({ message: "正在取消当前生成...", type: "info" });
-    setTimeout(() => setRunToast(null), 1800);
-  }, []);
+    showRunToast({ message: "正在取消当前生成...", type: "info" }, 1800);
+  }, [showRunToast]);
 
   const cancelNodeGeneration = useCallback((nodeId) => {
     const normalizedNodeId = String(nodeId || "").trim();
@@ -106,9 +135,8 @@ export function useWorkbenchRun({ apiFetch } = {}) {
     if (node?.data?.status === "loading") {
       updateNodeData(normalizedNodeId, { status: "idle", error: "已取消", progress: 0, total: 0 });
     }
-    setRunToast({ message: "已取消该节点生成", type: "info" });
-    setTimeout(() => setRunToast(null), 1800);
-  }, [updateNodeData]);
+    showRunToast({ message: "已取消该节点生成", type: "info" }, 1800);
+  }, [showRunToast, updateNodeData]);
 
   const safeInvoke = useCallback(
     (action, actionName = "操作") => {
@@ -117,10 +145,10 @@ export function useWorkbenchRun({ apiFetch } = {}) {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error || "未知错误");
         console.error(`[Workbench] action:error(${actionName})`, error);
-        setRunToast({ type: "error", message: `${actionName}失败：${message}` });
+        showRunToast({ type: "error", message: `${actionName}失败：${message}` }, 0);
       }
     },
-    [],
+    [showRunToast],
   );
 
   return {
@@ -135,7 +163,7 @@ export function useWorkbenchRun({ apiFetch } = {}) {
     apiHistory, setApiHistory,
     expandedHistoryIds, setExpandedHistoryIds,
     apiStats, setApiStats,
-    runToast, setRunToast,
+    runToast, setRunToast, showRunToast, clearRunToast,
     fetchHistoryAndStats,
     normalizeHistoryOutputs,
     normalizeHistoryInputs,

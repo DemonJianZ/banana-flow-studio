@@ -513,7 +513,7 @@ const NodeComponent = ({
       if (mediaCount <= 0) return -1;
       return Math.min(prev, mediaCount - 1);
     });
-  }, [node.data?.images?.length]);
+  }, [node.data?.images, node.data?.images?.length]);
 
   useEffect(() => {
     if (simpleMediaActionIndex < 0) {
@@ -3171,4 +3171,21 @@ const NodeComponent = ({
   );
 };
 
-export default NodeComponent;
+const getNodeConnectHighlightKey = (props) => {
+  if (!props.connecting || props.hoveredConnectTarget?.nodeId !== props.node?.id) return "";
+  return normalizeConnectionTargetHandle(props.hoveredConnectTarget?.toHandle);
+};
+
+const areNodeComponentPropsEqual = (prev, next) =>
+  prev.node === next.node &&
+  prev.selected === next.selected &&
+  prev.isReady === next.isReady &&
+  prev.shouldAutoOpenUploadPicker === next.shouldAutoOpenUploadPicker &&
+  prev.imageModelOptions === next.imageModelOptions &&
+  prev.videoModelOptions === next.videoModelOptions &&
+  prev.personaMentionOptions === next.personaMentionOptions &&
+  prev.connectedInputNodes === next.connectedInputNodes &&
+  isSameArtifactSelection(prev.activeArtifact, next.activeArtifact) &&
+  getNodeConnectHighlightKey(prev) === getNodeConnectHighlightKey(next);
+
+export default React.memo(NodeComponent, areNodeComponentPropsEqual);

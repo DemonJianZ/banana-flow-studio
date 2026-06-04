@@ -66,7 +66,6 @@ export function useCanvasNodeOps({
   defaultImageModelId,
   threeViewImageModelId,
   imageModelRecords,
-  imageModelOptions,         // used by createConnectedImg2ImgBranch
   resolveModelParamsForId,
   // Canvas artifacts
   activeArtifact,            // used by createConnectedImg2ImgBranch
@@ -209,7 +208,7 @@ export function useCanvasNodeOps({
         );
       }
     },
-    [apiFetch, imageModelRecords, resolveModelParamsForId, updateStoryboardAssetStatus, setHoveredStoryboardAssetCard],
+    [apiFetch, imageModelRecords, resolveModelParamsForId, updateStoryboardAssetStatus, setHoveredStoryboardAssetCard, aiChatHistoryRecordIdRef, aiChatSessionIdRef],
   );
 
   // ────────────────────────────────────────────────────────────────────────────
@@ -340,7 +339,7 @@ export function useCanvasNodeOps({
         );
       }
     },
-    [apiFetch, imageModelRecords, resolveModelParamsForId, updateStoryboardAssetStatus, setHoveredStoryboardShotCard],
+    [apiFetch, imageModelRecords, resolveModelParamsForId, updateStoryboardAssetStatus, setHoveredStoryboardShotCard, aiChatHistoryRecordIdRef, aiChatSessionIdRef],
   );
 
   // ────────────────────────────────────────────────────────────────────────────
@@ -509,7 +508,7 @@ export function useCanvasNodeOps({
       setRunToast({ message: `视频超清完成 (${safeTemplateEnum === VOLC_VIDEO_HD_TEMPLATE_ENUM_2 ? "4K" : "2K"})`, type: "info" });
       setTimeout(() => setRunToast(null), 2200);
     },
-    [apiFetch, pushHistory, updateNodeData, setRunToast, pushApiDebugDetail, updateApiDebugStatus],
+    [apiFetch, pushHistory, updateNodeData, setRunToast, pushApiDebugDetail, updateApiDebugStatus, aiChatHistoryRecordIdRef, aiChatSessionIdRef],
   );
 
   // ────────────────────────────────────────────────────────────────────────────
@@ -690,7 +689,7 @@ export function useCanvasNodeOps({
       setRunToast({ message: imageEntries.length > 1 ? `批量三视图完成，共 ${imageEntries.length} 张` : "三视图生成完成", type: "info" });
       setTimeout(() => setRunToast(null), 2200);
     },
-    [apiFetch, pushHistory, createImageOperationResultNode, resolveModelParamsForId, threeViewImageModelId, setRunToast, pushApiDebugDetail, updateApiDebugStatus],
+    [apiFetch, pushHistory, createImageOperationResultNode, resolveModelParamsForId, threeViewImageModelId, setRunToast, pushApiDebugDetail, updateApiDebugStatus, aiChatHistoryRecordIdRef, aiChatSessionIdRef],
   );
 
   // ─── Return all operations ────────────────────────────────────────────────

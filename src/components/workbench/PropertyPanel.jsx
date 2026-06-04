@@ -339,7 +339,7 @@ const PropertyPanel = ({
     }
 
     if (changed) updateData(node.id, { templates: nextTemplates });
-  }, [isRemoteVideoGen, remoteResolutionOptions, remoteDurationOptions, remoteRatioOptions, remoteImageTypeOptions, node?.data?.templates, node?.id, updateData]);
+  }, [isRemoteVideoGen, remoteResolutionOptions, remoteDurationOptions, remoteRatioOptions, remoteImageTypeOptions, node, node?.data?.templates, node?.id, updateData]);
 
   useEffect(() => {
     if (!isRemoteImageGen || !node) return;
@@ -371,6 +371,7 @@ const PropertyPanel = ({
     remoteImageSizeOptions,
     remoteImageRatioOptions,
     remoteImageTaskTypeOptions,
+    node,
     node?.data?.templates,
     node?.id,
     updateData,

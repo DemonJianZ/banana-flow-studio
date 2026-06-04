@@ -30,7 +30,6 @@ import {
 import { API_BASE } from "../config.js";
 import {
   NODE_TYPES,
-  checkNodeReady,
   EMPTY_LIST,
   VOLC_VIDEO_HD_TEMPLATE_ENUM_1,
   DEFAULT_VIDEO_HD_MODEL_ID,

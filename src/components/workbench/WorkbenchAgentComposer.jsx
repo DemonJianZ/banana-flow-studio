@@ -332,7 +332,7 @@ export default function WorkbenchAgentComposer({
                         {row.message}{row.key ? ` · ${row.key}` : ""}{row.reason ? ` · ${row.reason}` : ""}
                       </div>
                       <div className="text-slate-500">
-                        {new Date(Number(row.updatedAt || Date.now())).toLocaleString()}{row.caseId ? ` · 用例ID=${row.caseId}` : ""}
+                        {row.updatedAt ? new Date(Number(row.updatedAt)).toLocaleString() : "--"}{row.caseId ? ` · 用例ID=${row.caseId}` : ""}
                       </div>
                       {row.kind === "suggestion" && row.status === "ignored" && (
                         <button type="button"
