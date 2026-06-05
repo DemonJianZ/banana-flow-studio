@@ -18,7 +18,7 @@ export default function StoryboardPlanNodeRenderer({
   onShotChipClick,
 }) {
   return (
-          <div className="nodrag space-y-3 p-3">
+          <div className="space-y-3 p-3">
             <div className="rounded-[14px] border border-violet-200 bg-[linear-gradient(180deg,#fcfaff,#f4f1ff)] p-3 shadow-[0_12px_28px_rgba(76,29,149,0.08)]">
               {(() => {
                 const storyboardPlan = node.data?.storyboard_plan || {};

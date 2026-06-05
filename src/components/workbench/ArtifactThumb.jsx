@@ -15,8 +15,8 @@ export default function ArtifactThumb({ image, index, meta, nodeId, activeArtifa
   return (
     <div
       key={index}
-      className={`relative aspect-square cursor-pointer overflow-hidden rounded-[18px] border bg-white shadow-[0_12px_28px_rgba(15,23,42,0.08)] group ${
-        isActive ? "border-amber-300 ring-1 ring-amber-200" : "border-slate-200"
+      className={`wbn-artifact-thumb relative aspect-square cursor-pointer overflow-hidden border bg-white group ${
+        isActive ? "wbn-artifact-thumb-active ring-1 ring-cyan-200" : ""
       }`}
       onPointerDown={(event) => event.stopPropagation()}
       onMouseDown={(event) => event.stopPropagation()}
@@ -36,7 +36,7 @@ export default function ArtifactThumb({ image, index, meta, nodeId, activeArtifa
 
       <button
         type="button"
-        className="nodrag absolute bottom-1.5 left-1.5 rounded-full border border-slate-200 bg-white/95 px-2 py-1 text-[9px] text-slate-700 opacity-0 backdrop-blur-sm transition hover:border-amber-300 hover:bg-amber-50 hover:text-amber-700 group-hover:opacity-100"
+        className="nodrag absolute bottom-1.5 left-1.5 rounded-[6px] border border-white/60 bg-white/80 px-2 py-1 text-[9px] text-slate-700 opacity-0 backdrop-blur-md transition hover:bg-white hover:text-cyan-700 group-hover:opacity-100"
         onPointerDown={(event) => event.stopPropagation()}
         onMouseDown={(event) => event.stopPropagation()}
         onClick={(event) => {
@@ -50,7 +50,7 @@ export default function ArtifactThumb({ image, index, meta, nodeId, activeArtifa
 
       {isActive ? (
         <div className="absolute left-1 top-1">
-          <CheckCircle2 className="h-4 w-4 text-yellow-300 drop-shadow" />
+          <CheckCircle2 className="h-4 w-4 text-cyan-300 drop-shadow" />
         </div>
       ) : null}
     </div>

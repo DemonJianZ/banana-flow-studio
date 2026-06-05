@@ -49,6 +49,32 @@ export const isEditableElement = (element) => {
   return Boolean(element.closest("input, textarea, select, [contenteditable='true'], [contenteditable=''], [role='textbox']"));
 };
 
+const isNodeDragBlockedElement = (element) => {
+  if (!(element instanceof Element)) return false;
+  if (element instanceof HTMLElement && isEditableElement(element)) return true;
+  if (element.closest("[data-node-drag-allow='true']")) return false;
+  return Boolean(
+    element.closest([
+      ".nodrag",
+      "input",
+      "textarea",
+      "select",
+      "button",
+      "a",
+      "audio",
+      "video",
+      "[contenteditable='true']",
+      "[contenteditable='']",
+      "summary",
+      "[role='button']",
+      "[role='menuitem']",
+      "[role='textbox']",
+      "[data-nodrag='true']",
+      "[data-agent-card-root='true']",
+    ].join(", "))
+  );
+};
+
 export const getMediaUploadNodePosition = (point) => ({
   x: point.x - MEDIA_UPLOAD_NODE_WIDTH / 2,
   y: point.y - MEDIA_UPLOAD_NODE_DROP_OFFSET_Y,
@@ -479,8 +505,7 @@ export function useCanvas({
   const handleNodeMouseDown = (e, nid) => {
     e.stopPropagation();
 
-    // ✅ 如果点在 nodrag 区域：只做"选中"，不要进入拖拽
-    const isNoDragZone = !!e.target.closest(".nodrag");
+    const shouldBlockDrag = isNodeDragBlockedElement(e.target);
 
     const s = new Set(selectedNodeIds);
     if (e.shiftKey || e.ctrlKey) s.has(nid) ? s.delete(nid) : s.add(nid);
@@ -489,7 +514,7 @@ export function useCanvas({
     setSelectedNodeIds(s);
     setSelectedConnectionIds(new Set());
 
-    if (isNoDragZone) {
+    if (shouldBlockDrag || e.button !== 0) {
       setInteractionMode("idle");
       return;
     }

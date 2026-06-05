@@ -8,7 +8,7 @@ export default function LocalAssetImageNodeRenderer({ node }) {
   const assetName = String(node.data?.asset_name || "").trim();
 
   return (
-    <div className="nodrag p-2">
+    <div className="p-2">
       <div className="overflow-hidden rounded-[10px] border border-slate-100 bg-slate-50">
         {fullUrl ? (
           <img

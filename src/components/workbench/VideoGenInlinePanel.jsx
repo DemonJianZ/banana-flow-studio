@@ -23,7 +23,7 @@ export default function VideoGenInlinePanel({
   return (
     <>
       {node.data.mode === "img2video" ? (
-        <div className="nodrag space-y-2 px-4 pt-3" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="space-y-2 px-4 pt-3">
           <div className="grid grid-cols-2 gap-2">
             <button
               type="button"

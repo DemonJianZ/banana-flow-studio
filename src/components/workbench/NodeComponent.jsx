@@ -38,6 +38,7 @@ import ArtifactThumb from "./ArtifactThumb.jsx";
 import BackgroundProcessingOverlay from "./BackgroundProcessingOverlay.jsx";
 import NodeErrorPanel from "./NodeErrorPanel.jsx";
 import NodeFloatingActions from "./NodeFloatingActions.jsx";
+import NodeHeader from "./NodeHeader.jsx";
 import NodePorts from "./NodePorts.jsx";
 import PersonaMentionTextarea from "./PersonaMentionTextarea";
 import VideoGenInlinePanel from "./VideoGenInlinePanel.jsx";
@@ -965,7 +966,7 @@ const NodeComponent = ({
   };
 
   const selectedNodeShellClass = selected
-    ? "ring-1 ring-cyan-200/90 shadow-[0_28px_64px_rgba(6,182,212,0.12)]"
+    ? "wbn-node-selected ring-1 ring-cyan-300/70"
     : "";
   const showFloatingDeleteButton = Boolean(onDelete);
   const showFloatingRetryButton = !isCompactInput && !isTextInputNode && !isStoryboardInputNode && !isRoleInputNode && !isRoleStructurerNode && !isSimpleMediaInputNode && !isInlineImageGenNode && !isOutput && node.data.status === "error";
@@ -1038,11 +1039,7 @@ const NodeComponent = ({
       onMouseDown={onMouseDown}
       onWheelCapture={handleStoryboardWheelCapture}
     >
-      {!isCompactInput && !isRoleInputNode && (
-        <div className="absolute -top-5 left-0 cursor-grab select-none text-[11px] font-medium tracking-[0.08em] text-slate-500 active:cursor-grabbing">
-          {title}
-        </div>
-      )}
+      {!isCompactInput && !isRoleInputNode && !isLocalAssetImageNode ? <NodeHeader node={node} title={title} /> : null}
 
       <NodeFloatingActions
         showRetry={showFloatingRetryButton}
@@ -1140,7 +1137,7 @@ const NodeComponent = ({
         </button>
       )}
 
-      <div className={`${isRoleInputNode ? "p-1.5" : isCompactInput ? "nodrag space-y-2 p-1.5" : isTextInputNode || isStoryboardInputNode || isSimpleMediaInputNode ? "p-0" : isInlineImageGenNode ? "space-y-3 p-3" : "space-y-3 p-4"}`}>
+      <div className={`${isRoleInputNode ? "p-1.5" : isCompactInput ? "space-y-2 p-1.5" : isTextInputNode || isStoryboardInputNode || isSimpleMediaInputNode || isOutput ? "p-0" : isInlineImageGenNode ? "space-y-2 p-4" : "space-y-3 p-4"}`}>
         {isRoleInputNode && NodeRenderer ? <NodeRenderer node={node} /> : null}
         {isRoleStructurerNode && NodeRenderer ? (
           <NodeRenderer node={node} updateData={updateData} onRun={runRoleStructurer} />

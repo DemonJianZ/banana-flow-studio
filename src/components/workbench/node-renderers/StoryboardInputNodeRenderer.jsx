@@ -11,8 +11,7 @@ export default function StoryboardInputNodeRenderer({
 }) {
   return (
     <div
-      className="nodrag p-3"
-      onMouseDown={(event) => event.stopPropagation()}
+      className="p-3"
       onDragEnter={(event) => {
         event.preventDefault();
         event.stopPropagation();

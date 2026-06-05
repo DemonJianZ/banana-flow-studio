@@ -4,7 +4,6 @@ import InlineDropdown from "../InlineDropdown";
 
 export default function AiNodeRenderer({
   node,
-  title,
   isInlineImageGenNode,
   isInlineImg2ImgNode,
   imageModelOptions,
@@ -29,12 +28,6 @@ export default function AiNodeRenderer({
   return (
     <div className="space-y-2">
       {isInlineImageGenNode ? (
-        <div className="pointer-events-none absolute -top-5 left-0 cursor-grab select-none text-[11px] font-medium tracking-[0.08em] text-slate-500 active:cursor-grabbing">
-          {title}
-        </div>
-      ) : null}
-
-      {isInlineImageGenNode ? (
         <>
           <div className="pointer-events-none absolute right-3 top-3 z-20 flex gap-1">
             {node.data.status === "error" ? (
@@ -53,7 +46,7 @@ export default function AiNodeRenderer({
             ) : null}
           </div>
 
-          <div className="space-y-3">
+          <div className="space-y-2">
             <div>
               <div className="mb-1.5 px-1 text-[10px] font-medium uppercase tracking-[0.08em] text-slate-400">模型</div>
               <InlineDropdown
@@ -64,7 +57,7 @@ export default function AiNodeRenderer({
               />
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2">
+            <div className="grid gap-2 sm:grid-cols-2">
               <div>
                 <div className="mb-1.5 px-1 text-[10px] font-medium uppercase tracking-[0.08em] text-slate-400">尺寸</div>
                 <InlineDropdown
@@ -109,7 +102,7 @@ export default function AiNodeRenderer({
             <div>
               <div className="mb-2 flex items-center justify-between px-1 text-[10px] font-medium uppercase tracking-[0.08em] text-slate-400">
                 <span>生成数量</span>
-                <span className="rounded-[10px] border border-[#E5E7EB] bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-700">
+                <span className="rounded-[6px] border border-[#E5E7EB] bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-700">
                   {node.data.batchSize || 1}
                 </span>
               </div>
@@ -136,7 +129,7 @@ export default function AiNodeRenderer({
                 onRunNode?.(node.id);
               }}
               disabled={!isReady || node.data.status === "loading"}
-              className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-[10px] border border-cyan-500 bg-cyan-500 px-4 text-[12px] font-semibold text-white shadow-[0_12px_28px_rgba(6,182,212,0.22)] transition hover:border-cyan-600 hover:bg-cyan-600 disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300 disabled:shadow-none"
+              className="wbn-run-button inline-flex h-10 w-full items-center justify-center gap-2 rounded-[8px] border px-4 text-[12px] font-semibold transition disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300"
             >
               {node.data.status === "loading" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
               {node.data.status === "loading" ? "运行中..." : "运行"}
@@ -150,7 +143,7 @@ export default function AiNodeRenderer({
                   event.stopPropagation();
                   onCancelNode?.();
                 }}
-                className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-[10px] border border-rose-200 bg-rose-50 px-4 text-[12px] font-semibold text-rose-600 transition hover:border-rose-300 hover:bg-rose-100 hover:text-rose-700"
+                className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-[8px] border border-rose-200 bg-rose-50 px-4 text-[12px] font-semibold text-rose-600 transition hover:border-rose-300 hover:bg-rose-100 hover:text-rose-700"
                 title="取消该节点生成"
               >
                 <X className="h-4 w-4" />
@@ -162,7 +155,7 @@ export default function AiNodeRenderer({
       ) : null}
 
       {node.data.status === "loading" ? (
-        <div className="space-y-1.5 rounded-[22px] border border-slate-200 bg-slate-50 px-3 py-2.5">
+        <div className="space-y-1.5 rounded-[8px] border border-slate-200 bg-slate-50 px-3 py-2.5">
           <div className="flex justify-between text-[10px] text-slate-600">
             <span className="flex items-center gap-1">
               <Loader2 className="w-3 h-3 animate-spin" /> 处理中...
@@ -185,31 +178,35 @@ export default function AiNodeRenderer({
         </div>
       ) : null}
 
-      {node.data.status === "success" && (isProcessor || isPostProcessor) && !isImageCreationNode ? (
-        <button
-          onMouseDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation();
-            onContinue?.(node.id);
-          }}
-          className="flex w-full items-center justify-center gap-1 rounded-full border border-slate-200 bg-white py-2 text-[10px] text-slate-700 transition-colors hover:border-cyan-300 hover:bg-cyan-50"
-          type="button"
-        >
-          <Film className="w-3 h-3" /> 生成视频 <ArrowRight className="w-3 h-3" />
-        </button>
-      ) : null}
+      {node.data.status === "success" && !isImageCreationNode ? (
+        <div className="flex gap-1.5 border-t border-slate-200 pt-2">
+          {(isProcessor || isPostProcessor) ? (
+            <button
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                onContinue?.(node.id);
+              }}
+              className="wbn-action-button inline-flex h-7 flex-1 items-center justify-center gap-1 rounded-[7px] border text-[10px] transition-colors"
+              type="button"
+            >
+              <Film className="h-3 w-3" /> 视频 <ArrowRight className="h-3 w-3" />
+            </button>
+          ) : null}
 
-      {node.data.status === "success" && isProcessor && !isImageCreationNode && (node.data.mode === "text2img" || node.data.mode === "local_text2img") ? (
-        <button
-          onMouseDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation();
-            onIterateImg2Img?.(node.id);
-          }}
-          className="flex w-full items-center justify-center gap-1 rounded-full border border-slate-200 bg-white py-2 text-[10px] text-slate-700 transition-colors hover:border-cyan-300 hover:bg-cyan-50"
-        >
-          <ImageIcon className="w-3 h-3" /> 继续图生图 <ArrowRight className="w-3 h-3" />
-        </button>
+          {isProcessor && (node.data.mode === "text2img" || node.data.mode === "local_text2img") ? (
+            <button
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                onIterateImg2Img?.(node.id);
+              }}
+              className="wbn-action-button inline-flex h-7 flex-1 items-center justify-center gap-1 rounded-[7px] border text-[10px] transition-colors"
+            >
+              <ImageIcon className="h-3 w-3" /> 图生图 <ArrowRight className="h-3 w-3" />
+            </button>
+          ) : null}
+        </div>
       ) : null}
     </div>
   );

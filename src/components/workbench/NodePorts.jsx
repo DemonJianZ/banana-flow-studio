@@ -25,19 +25,25 @@ export default function NodePorts({
     !isRoleInputNode &&
     !isLocalAssetImageNode;
   const showOutputPort = !isStoryboardPlanNode && !isLocalAssetImageNode;
+  const portTone =
+    node.type === NODE_TYPES.TEXT_INPUT
+      ? { fill: "bg-blue-500", border: "border-blue-500", hover: "hover:bg-blue-500", ring: "ring-blue-200/80" }
+      : node.type === NODE_TYPES.INPUT || node.type === NODE_TYPES.OUTPUT
+      ? { fill: "bg-violet-500", border: "border-violet-500", hover: "hover:bg-violet-500", ring: "ring-violet-200/80" }
+      : { fill: "bg-cyan-500", border: "border-cyan-500", hover: "hover:bg-cyan-500", ring: "ring-cyan-200/80" };
 
   return (
     <>
       <div className="pointer-events-none absolute top-1/2 flex w-full -translate-y-1/2 justify-between px-0">
         {showInputPort ? (
-          <div className="pointer-events-auto relative -translate-x-1/2">
+          <div className="pointer-events-auto relative -translate-x-[5px]">
             <div
               onMouseEnter={() => onConnectTargetHover?.(VIDEO_GEN_INPUT_HANDLE_MAIN)}
               onMouseLeave={() => onConnectTargetLeave?.(VIDEO_GEN_INPUT_HANDLE_MAIN)}
-              className={`z-20 h-3 w-3 cursor-crosshair rounded-full border bg-white shadow-[0_0_0_2px_rgba(255,255,255,0.9)] transition-transform duration-150 hover:scale-[1.55] ${
+              className={`wbn-port z-20 h-2.5 w-2.5 cursor-crosshair rounded-full border-2 transition-transform duration-150 hover:scale-[1.28] ${
                 isMainInputTargetHighlighted
-                  ? "border-cyan-500 bg-cyan-50 ring-4 ring-cyan-200/80 shadow-[0_0_0_6px_rgba(34,211,238,0.14)]"
-                  : "border-slate-300 hover:border-cyan-400 hover:bg-cyan-50"
+                  ? `wbn-port-active border-white ${portTone.fill} ring-4 ${portTone.ring}`
+                  : `${portTone.border} bg-white ${portTone.hover}`
               }`}
             />
             {isMainInputTargetHighlighted ? (
@@ -51,7 +57,7 @@ export default function NodePorts({
         {showOutputPort ? (
           <div
             onMouseDown={onConnectStart}
-            className="pointer-events-auto z-20 ml-auto h-3 w-3 translate-x-1/2 cursor-crosshair rounded-full border border-slate-300 bg-white shadow-[0_0_0_2px_rgba(255,255,255,0.9)] transition-transform duration-150 hover:scale-[1.55] hover:border-cyan-400 hover:bg-cyan-50"
+            className={`wbn-port pointer-events-auto z-20 ml-auto h-2.5 w-2.5 translate-x-[5px] cursor-crosshair rounded-full border-2 ${portTone.border} bg-white transition-transform duration-150 hover:scale-[1.28] ${portTone.hover}`}
           />
         ) : null}
 
@@ -89,14 +95,14 @@ export default function NodePorts({
 
       {hasDedicatedLastFrameInput ? (
         <div className="pointer-events-none absolute inset-y-0 left-0 flex w-full items-center justify-between px-0">
-          <div className="pointer-events-auto relative -translate-x-1/2 translate-y-10">
+          <div className="pointer-events-auto relative -translate-x-[5px] translate-y-10">
             <div
               onMouseEnter={() => onConnectTargetHover?.(VIDEO_GEN_INPUT_HANDLE_LAST_FRAME)}
               onMouseLeave={() => onConnectTargetLeave?.(VIDEO_GEN_INPUT_HANDLE_LAST_FRAME)}
-              className={`z-20 h-3 w-3 cursor-crosshair rounded-full border bg-white shadow-[0_0_0_2px_rgba(255,255,255,0.9)] transition-transform duration-150 hover:scale-[1.55] ${
+              className={`wbn-port z-20 h-2.5 w-2.5 cursor-crosshair rounded-full border-2 transition-transform duration-150 hover:scale-[1.28] ${
                 isLastFrameTargetHighlighted
-                  ? "border-rose-500 bg-rose-50 ring-4 ring-rose-200/80 shadow-[0_0_0_6px_rgba(251,113,133,0.16)]"
-                  : "border-rose-300 hover:border-rose-400 hover:bg-rose-50"
+                  ? "wbn-port-active border-white bg-rose-500 ring-4 ring-rose-200/80"
+                  : "border-rose-500 bg-white hover:bg-rose-500"
               }`}
               title="连接尾帧"
             />

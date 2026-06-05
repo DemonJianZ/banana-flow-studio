@@ -51,7 +51,7 @@ const InlineDropdown = ({
     >
       <button
         type="button"
-        className={`flex h-10 w-full items-center justify-between rounded-[10px] border border-[#E5E7EB] bg-white px-3 text-[12px] text-slate-700 outline-none transition hover:border-slate-300 ${open ? "border-cyan-300 shadow-[0_0_0_4px_rgba(34,211,238,0.12)]" : ""}`}
+        className={`flex h-8 w-full items-center justify-between rounded-[7px] border border-[#E5E7EB] bg-white px-2.5 text-[11px] text-slate-700 outline-none transition hover:border-slate-300 ${open ? "border-cyan-300 shadow-[0_0_0_2px_rgba(34,211,238,0.14)]" : ""}`}
         onClick={(event) => {
           event.stopPropagation();
           setOpen((prev) => !prev);
@@ -60,12 +60,12 @@ const InlineDropdown = ({
         <span className={`truncate ${selectedOption ? "text-slate-700" : "text-slate-400"}`}>
           {selectedOption?.label || placeholder}
         </span>
-        <ChevronDown className={`h-4 w-4 text-slate-400 transition-transform ${open ? "rotate-180" : ""}`} />
+        <ChevronDown className={`h-3.5 w-3.5 text-slate-400 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
 
       {open ? (
         <div
-          className={`absolute left-0 right-0 top-full z-40 mt-2 overflow-hidden rounded-[12px] border border-[#E5E7EB] bg-white shadow-[0_8px_24px_rgba(0,0,0,0.08)] animate-in fade-in slide-in-from-top-1 duration-150 ${panelClassName}`}
+          className={`absolute left-0 right-0 top-full z-40 mt-1.5 overflow-hidden rounded-[8px] border border-[#E5E7EB] bg-white shadow-[0_8px_20px_rgba(15,23,42,0.10)] animate-in fade-in slide-in-from-top-1 duration-150 ${panelClassName}`}
         >
           <div className="max-h-64 overflow-y-auto py-1">
             {normalizedOptions.map((item) => {
@@ -74,7 +74,7 @@ const InlineDropdown = ({
                 <button
                   key={item.value}
                   type="button"
-                  className={`flex h-9 w-full items-center px-3 text-left text-[12px] transition-colors ${
+                  className={`flex h-8 w-full items-center px-2.5 text-left text-[11px] transition-colors ${
                     isSelected
                       ? "bg-[rgba(59,130,246,0.10)] text-cyan-700"
                       : "text-slate-700 hover:bg-[#F3F4F6]"

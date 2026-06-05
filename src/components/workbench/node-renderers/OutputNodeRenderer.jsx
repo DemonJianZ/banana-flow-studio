@@ -3,28 +3,26 @@ import { CheckCircle2, Download } from "lucide-react";
 
 export default function OutputNodeRenderer({ node, onDownloadAll, renderArtifactThumb }) {
   return (
-    <div className="nodrag flex min-h-[140px] flex-col" onMouseDown={(event) => event.stopPropagation()}>
+    <div className="group/output relative flex min-h-[140px] flex-col">
       {node.data.images?.length > 0 ? (
-        <div className="flex items-center justify-end gap-2 px-3 py-2.5">
-          <div className="flex items-center gap-1">
-            <button
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                onDownloadAll();
-              }}
-              className="inline-flex h-7 items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 text-[10px] font-medium text-emerald-700 transition hover:border-emerald-300 hover:bg-emerald-100"
-              type="button"
-            >
-              <Download className="h-3 w-3" /> 下载
-            </button>
-          </div>
-        </div>
+        <button
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onDownloadAll();
+          }}
+          className="wbn-glass-button absolute right-2 top-2 z-20 inline-flex h-8 w-8 items-center justify-center rounded-[8px] text-slate-700 opacity-0 transition hover:bg-white group-hover/output:opacity-100"
+          type="button"
+          title="下载全部"
+          aria-label="下载全部"
+        >
+          <Download className="h-3.5 w-3.5" />
+        </button>
       ) : null}
 
-      <div className="custom-scrollbar max-h-[200px] overflow-y-auto p-3">
+      <div className="custom-scrollbar max-h-[220px] overflow-y-auto p-0">
         {node.data.images?.length > 0 ? (
-          <div className="grid grid-cols-2 gap-1.5">
+          <div className="grid grid-cols-2 gap-px bg-white">
             {node.data.images.map((img, index) => (
               <div key={index} className="relative aspect-square">
                 {renderArtifactThumb(img, index, {

@@ -164,6 +164,8 @@ export function useWorkbenchConnectionLayer({
         const isSelected = selectedConnectionIds.has(connection.id);
         const isHovered = hoveredConnectionId === connection.id;
         const isInteractive = isSelected || isHovered;
+        const gradientId = `connection_flow_${String(connection.id).replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+        const glowId = `connection_glow_${String(connection.id).replace(/[^a-zA-Z0-9_-]/g, "_")}`;
         const deleteX = routePoints.length === 3 ? routePoints[1].x : (start.x + end.x) / 2;
         const deleteY = routePoints.length === 3 ? routePoints[1].y : (start.y + end.y) / 2;
         return (
@@ -171,7 +173,23 @@ export function useWorkbenchConnectionLayer({
             key={connection.id}
             onMouseEnter={() => setHoveredConnectionId(connection.id)}
             onMouseLeave={() => setHoveredConnectionId((prev) => (prev === connection.id ? "" : prev))}
-          >
+            >
+            {isRunning ? (
+              <defs>
+                <linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="0%">
+                  <stop offset="0%" stopColor="var(--wbn-edge-flow-a)" />
+                  <stop offset="45%" stopColor="var(--wbn-edge-flow-b)" />
+                  <stop offset="100%" stopColor="var(--wbn-edge-flow-c)" />
+                </linearGradient>
+                <filter id={glowId} x="-40%" y="-40%" width="180%" height="180%">
+                  <feGaussianBlur stdDeviation="3" result="blur" />
+                  <feMerge>
+                    <feMergeNode in="blur" />
+                    <feMergeNode in="SourceGraphic" />
+                  </feMerge>
+                </filter>
+              </defs>
+            ) : null}
             <path
               d={path}
               stroke="transparent"
@@ -188,11 +206,16 @@ export function useWorkbenchConnectionLayer({
             />
             <path
               d={path}
-              stroke={isInteractive ? "#22d3ee" : "rgba(100,116,139,0.72)"}
-              strokeWidth={isInteractive ? "3" : "2.2"}
+              stroke={isRunning ? `url(#${gradientId})` : isInteractive ? "var(--wbn-edge-active)" : "var(--wbn-edge-idle)"}
+              strokeWidth={isInteractive || isRunning ? "3" : "2"}
               fill="none"
-              className="pointer-events-none transition-colors duration-200"
-            />
+              strokeLinecap="round"
+              className={`pointer-events-none transition-colors duration-200 ${isRunning ? "wbn-edge-flow" : ""}`}
+              strokeDasharray={isRunning ? "10 8" : undefined}
+              filter={isRunning ? `url(#${glowId})` : undefined}
+            >
+              {isRunning ? <animate attributeName="stroke-dashoffset" from="18" to="0" dur="0.9s" repeatCount="indefinite" /> : null}
+            </path>
             {isInteractive ? (
               <g
                 className="cursor-pointer pointer-events-auto"

@@ -4,7 +4,7 @@ import { checkNodeReady } from "../../../constants/workbench.jsx";
 
 export default function RoleStructurerNodeRenderer({ node, updateData, onRun }) {
   return (
-    <div className="nodrag space-y-3" onMouseDown={(event) => event.stopPropagation()}>
+    <div className="space-y-3">
       <div className="rounded-[18px] border border-slate-200 bg-slate-50 px-3 py-2.5">
         <div className="text-[12px] font-semibold text-slate-800">短剧角色画像结构化</div>
         <div className="mt-1 text-[10px] leading-4 text-slate-500">

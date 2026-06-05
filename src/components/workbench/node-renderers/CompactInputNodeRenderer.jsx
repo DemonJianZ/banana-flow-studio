@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useRef } from "react";
 import {
   Layout,
   Loader2,
@@ -46,22 +46,28 @@ export default function CompactInputNodeRenderer({
   onCompactRmbg,
   onCompactRemove,
 }) {
+  const mediaPointerDownRef = useRef(null);
+
   return (
     <div className="space-y-2">
       <div className="relative overflow-visible">
         <div className="overflow-hidden rounded-[18px] border border-slate-200 bg-slate-50 shadow-[0_12px_28px_rgba(15,23,42,0.08)]">
           <button
             type="button"
-            className={`nodrag relative block h-[286px] w-full overflow-hidden bg-slate-100 transition-[transform,filter,box-shadow] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+            data-node-drag-allow="true"
+            className={`relative block h-[286px] w-full cursor-grab overflow-hidden bg-slate-100 transition-[transform,filter,box-shadow] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] active:cursor-grabbing ${
               showActions
                 ? "scale-[0.985] shadow-[0_18px_45px_rgba(8,15,34,0.5)]"
                 : "hover:scale-[1.01] hover:brightness-105"
             }`}
             onMouseDown={(event) => {
-              event.stopPropagation();
+              mediaPointerDownRef.current = { x: event.clientX, y: event.clientY };
             }}
             onClick={(event) => {
               event.stopPropagation();
+              const start = mediaPointerDownRef.current;
+              mediaPointerDownRef.current = null;
+              if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 4) return;
               setShowVideoUpscaleOptions(false);
               setShowActions((prev) => !prev);
             }}
