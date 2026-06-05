@@ -2,26 +2,21 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { API_BASE, TOKEN_KEY } from "../config";
 import { notifyApp } from "../lib/notify";
+import { buildUrl, createApiError, extractApiError } from "../services/http/httpClient.js";
+import { clearAuthToken, getAuthToken, setAuthToken } from "../services/auth/tokenStorage.js";
 
 const AuthContext = createContext(null);
-const API_ROOT = (API_BASE || "").replace(/\/+$/, "");
-
-const buildUrl = (path) => {
-  if (!path) return API_ROOT || "";
-  if (path.startsWith("http")) return path;
-  if (!API_ROOT) return path.startsWith("/") ? path : `/${path}`;
-  return path.startsWith("/") ? `${API_ROOT}${path}` : `${API_ROOT}/${path}`;
-};
+const buildApiUrl = (path) => buildUrl(API_BASE, path);
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
-  const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY));
+  const [token, setToken] = useState(() => getAuthToken(TOKEN_KEY));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const lastSessionNoticeAtRef = useRef(0);
 
   const clearSession = useCallback(() => {
-    localStorage.removeItem(TOKEN_KEY);
+    clearAuthToken(TOKEN_KEY);
     setToken(null);
     setUser(null);
   }, []);
@@ -41,7 +36,7 @@ export function AuthProvider({ children }) {
         if (typeof body === "string") requestHeaders.set("Content-Type", "application/json");
       }
 
-      const resp = await fetch(buildUrl(path), { ...fetchOptions, headers: requestHeaders });
+      const resp = await fetch(buildApiUrl(path), { ...fetchOptions, headers: requestHeaders });
 
       // ✅ 仅对需要 app 鉴权的请求处理 401，避免 skipAuth 请求误清登录态
       if (resp.status === 401 && !skipAuth) {
@@ -66,7 +61,7 @@ export function AuthProvider({ children }) {
 
     try {
       const resp = await apiFetch("/api/auth/me");
-      if (!resp.ok) throw new Error("Failed to fetch profile");
+      if (!resp.ok) throw createApiError("Failed to fetch profile", { status: resp.status, source: "auth.profile" });
       const data = await resp.json();
       setUser(data.user || null);
     } catch {
@@ -83,7 +78,7 @@ export function AuthProvider({ children }) {
   const login = useCallback(async (email, password) => {
     setError(null);
 
-    const resp = await fetch(buildUrl("/api/auth/login"), {
+    const resp = await fetch(buildApiUrl("/api/auth/login"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email: (email || "").trim(), password }),
@@ -91,13 +86,13 @@ export function AuthProvider({ children }) {
 
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-      const msg = data.detail || "登录失败";
+      const msg = extractApiError(data, "登录失败");
       setError(msg);
       notifyApp({ type: "error", message: msg });
-      throw new Error(msg);
+      throw createApiError(msg, { status: resp.status, data, source: "auth.login" });
     }
 
-    localStorage.setItem(TOKEN_KEY, data.access_token);
+    setAuthToken(data.access_token, TOKEN_KEY);
     setToken(data.access_token);
     setUser(data.user || null);
     return data;
@@ -106,7 +101,7 @@ export function AuthProvider({ children }) {
   const register = useCallback(async (email, password) => {
     setError(null);
 
-    const resp = await fetch(buildUrl("/api/auth/register"), {
+    const resp = await fetch(buildApiUrl("/api/auth/register"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email: (email || "").trim(), password }),
@@ -114,13 +109,13 @@ export function AuthProvider({ children }) {
 
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-      const msg = data.detail || "注册失败";
+      const msg = extractApiError(data, "注册失败");
       setError(msg);
       notifyApp({ type: "error", message: msg });
-      throw new Error(msg);
+      throw createApiError(msg, { status: resp.status, data, source: "auth.register" });
     }
 
-    localStorage.setItem(TOKEN_KEY, data.access_token);
+    setAuthToken(data.access_token, TOKEN_KEY);
     setToken(data.access_token);
     setUser(data.user || null);
     return data;

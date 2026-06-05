@@ -923,78 +923,35 @@ const Workbench = () => {
 
         {/* Canvas — Phase 9: extracted to WorkbenchCanvas */}
         <WorkbenchCanvas
-          canvasRef={canvasRef}
-          viewport={viewport}
-          nodes={nodes}
-          connections={connections}
-          selectedNodeIds={selectedNodeIds}
-          connectingSource={connectingSource}
-          selectionBox={selectionBox}
-          canvasDropActive={canvasDropActive}
-          canvasDropUploading={canvasDropUploading}
-          hoveredConnectTarget={hoveredConnectTarget}
-          hasAgentResultCards={hasAgentResultCards}
-          canvasHoverClientRef={canvasHoverClientRef}
-          renderConnections={renderConnections}
-          renderTempConnection={renderTempConnection}
-          handleCanvasMouseDown={handleCanvasMouseDown}
-          handleMouseMove={handleMouseMove}
-          handleMouseUp={handleMouseUp}
-          handleWheel={handleWheel}
-          handleCanvasDragEnter={handleCanvasDragEnter}
-          handleCanvasDragOver={handleCanvasDragOver}
-          handleCanvasDragLeave={handleCanvasDragLeave}
-          handleCanvasDrop={handleCanvasDrop}
-          getCursor={getCursor}
-          handleNodeMouseDown={handleNodeMouseDown}
-          updateNodeData={updateNodeData}
-          apiFetch={apiFetch}
-          openPromptPolishPicker={openPromptPolishPicker}
-          imageModelOptions={imageModelOptions}
-          videoModelOptions={videoModelOptions}
-          resolveModelParamsForId={resolveModelParamsForId}
-          personaMentionOptions={personaMentionOptions}
-          connectedInputsByNodeId={connectedInputsByNodeId}
-          deleteNode={deleteNode}
-          pushHistory={pushHistory}
-          startConnection={startConnection}
-          handleConnectionTargetHover={handleConnectionTargetHover}
-          handleConnectionTargetLeave={handleConnectionTargetLeave}
-          setPreviewImage={setPreviewImage}
-          createConnectedVideoNode={createConnectedVideoNode}
-          executeFlow={executeFlow}
-          checkNodeReady={checkNodeReady}
-          setActiveArtifact={setActiveArtifact}
-          activeArtifact={activeArtifact}
-          createConnectedImg2ImgBranch={createConnectedImg2ImgBranch}
-          runCompactRmbg={runCompactRmbg}
-          runCompactRemoveWatermark={runCompactRemoveWatermark}
-          runCompactThreeView={runCompactThreeView}
-          runCompactVideoUpscale={runCompactVideoUpscale}
-          runVideoRmbg={runVideoRmbg}
-          runVideoLineart={runVideoLineart}
-          runVideoSplit={runVideoSplit}
-          createPromptQuickChain={createPromptQuickChain}
-          cancelNodeGeneration={cancelNodeGeneration}
-          pendingUploadNodeId={pendingUploadNodeId}
-          setPendingUploadNodeId={setPendingUploadNodeId}
-          handleNodeElementChange={handleNodeElementChange}
-          openStoryboardAssetHoverCard={openStoryboardAssetHoverCard}
-          scheduleCloseStoryboardAssetHoverCard={scheduleCloseStoryboardAssetHoverCard}
-          openStoryboardShotHoverCard={openStoryboardShotHoverCard}
-          runStoryboardInputFromFiles={runStoryboardInputFromFiles}
-          setRunToast={setRunToast}
-          agentResultCards={agentResultCards}
-          agentTurns={agentTurns}
-          selectedAgentCardIds={selectedAgentCardIds}
-          activeAgentCardId={activeAgentCardId}
-          setSelectedAgentCardIds={setSelectedAgentCardIds}
-          setActiveAgentCardId={setActiveAgentCardId}
-          handleAgentCardMouseDown={handleAgentCardMouseDown}
-          toggleAgentResultCardCollapsed={toggleAgentResultCardCollapsed}
-          minimizeAgentResultCard={minimizeAgentResultCard}
-          handleAgentCardWheelCapture={handleAgentCardWheelCapture}
-          retryAgentTurn={retryAgentTurn}
+          canvasRuntime={{
+            canvasRef, canvasHoverClientRef,
+            viewport, nodes, connections, selectedNodeIds,
+            connectingSource, selectionBox, canvasDropActive, canvasDropUploading, hoveredConnectTarget,
+            renderConnections, renderTempConnection,
+            handleCanvasMouseDown, handleMouseMove, handleMouseUp, handleWheel,
+            handleCanvasDragEnter, handleCanvasDragOver, handleCanvasDragLeave, handleCanvasDrop,
+            getCursor, handleNodeMouseDown,
+          }}
+          nodeRuntime={{
+            updateNodeData, apiFetch, openPromptPolishPicker,
+            imageModelOptions, videoModelOptions, resolveModelParamsForId, personaMentionOptions,
+            connectedInputsByNodeId, deleteNode, pushHistory, startConnection,
+            handleConnectionTargetHover, handleConnectionTargetLeave,
+            setPreviewImage, createConnectedVideoNode, executeFlow, checkNodeReady,
+            setActiveArtifact, activeArtifact, createConnectedImg2ImgBranch,
+            runCompactRmbg, runCompactRemoveWatermark, runCompactThreeView, runCompactVideoUpscale,
+            runVideoRmbg, runVideoLineart, runVideoSplit, createPromptQuickChain,
+            cancelNodeGeneration, pendingUploadNodeId, setPendingUploadNodeId,
+            handleNodeElementChange, openStoryboardAssetHoverCard, scheduleCloseStoryboardAssetHoverCard,
+            openStoryboardShotHoverCard, runStoryboardInputFromFiles, setRunToast,
+          }}
+          agentRuntime={{
+            hasAgentResultCards, agentResultCards, agentTurns,
+            selectedAgentCardIds, activeAgentCardId,
+            setSelectedAgentCardIds, setActiveAgentCardId,
+            handleAgentCardMouseDown, toggleAgentResultCardCollapsed,
+            minimizeAgentResultCard, handleAgentCardWheelCapture, retryAgentTurn,
+          }}
           runBarProps={{
             onSave: saveCurrentCanvasAsWork,
             onSaveNew: saveCurrentCanvasAsNewWork,
