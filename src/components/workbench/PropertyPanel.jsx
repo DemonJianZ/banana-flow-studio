@@ -5,7 +5,6 @@ import {
   Loader2,
   ChevronRight,
   ChevronDown,
-  Sparkles,
   Sliders,
   Cpu,
 } from "lucide-react";
@@ -23,7 +22,6 @@ import {
   getAIChatParamDisplayValue,
   listAIChatParamValues,
   listAIChatParamChoiceOptions,
-  normalizePromptPolishVariants,
   TOOL_CARDS,
   FEATURE_EXTRACT_PRESET_PROMPTS,
   getProcessorModeDefaults,
@@ -33,8 +31,7 @@ import {
 } from "../../constants/workbench.jsx";
 import InlineDropdown from "./InlineDropdown";
 import PersonaMentionTextarea from "./PersonaMentionTextarea";
-import { polishCanvasPrompt } from "../../api/agentCanvas";
-import { buildCanvasNodePreviewPrompt } from "../agent-canvas/promptUtils";
+import { buildCanvasNodePreviewPrompt } from "../../lib/canvasPromptUtils.js";
 
 
 // ---------------------------------------------------------------------------
@@ -45,8 +42,6 @@ const PropertyPanel = ({
   node,
   updateData,
   onClose,
-  apiFetch,
-  onOpenPromptPolishPicker,
   imageModelOptions = EMPTY_LIST,
   videoModelOptions = EMPTY_LIST,
   resolveModelParamsForId,
@@ -58,8 +53,6 @@ const PropertyPanel = ({
 }) => {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [expandedParam, setExpandedParam] = useState(null); // "model"|"duration"|"resolution"|"ratio"
-  const [promptPolishLoading, setPromptPolishLoading] = useState(false);
-  const [promptPolishError, setPromptPolishError] = useState("");
   const [videoParamOptions, setVideoParamOptions] = useState(() => ({
     resolution: EMPTY_LIST,
     ratio: EMPTY_LIST,
@@ -154,7 +147,10 @@ const PropertyPanel = ({
   }, [node?.id]);
 
   useEffect(() => {
-    setExpandedParam(null);
+    const tid = window.setTimeout(() => {
+      setExpandedParam(null);
+    }, 0);
+    return () => window.clearTimeout(tid);
   }, [node?.id]);
 
   useEffect(() => {
@@ -388,73 +384,10 @@ const PropertyPanel = ({
     };
   }, [activeTemplates, isRemoteVideoGen, remoteRatioOptions]);
 
-  const updateTemplateData = (key, value) => {
-    // multi_image_generate 的 prompt 更像"主 prompt"
-    const newTemplates = { ...(node.data.templates || {}), [key]: value };
-    // ✅ img2video：note 就是主提示词（直接覆盖 prompt）
-    if ((node.data.mode === "img2video" || node.data.mode === "text2video") && key === "note") {
-      updateData(node.id, { templates: newTemplates, prompt: value });
-      return;
-    }
-
-    const parts = [];
-    if (newTemplates.style) parts.push(newTemplates.style);
-    if (newTemplates.vibe) parts.push(newTemplates.vibe);
-    if (newTemplates.direction) parts.push(newTemplates.direction);
-    if (newTemplates.note) parts.push(newTemplates.note);
-
-    // text2img / multi_image_generate：prompt 不强制拼接
-    const autoPrompt = parts.filter(Boolean).join(", ");
-    updateData(node.id, { templates: newTemplates, prompt: node.data.mode === "relight" ? autoPrompt : (node.data.prompt || autoPrompt) });
-  };
-
   const promptValue = promptModes.includes(node?.data?.mode)
     ? (node?.data?.prompt || "")
     : (node?.data?.templates?.note || node?.data?.prompt || "");
   const previewPrompt = buildCanvasNodePreviewPrompt(node);
-  const showPromptPolishButton = Boolean(
-    promptModes.includes(node?.data?.mode) ||
-    node?.data?.mode === "img2video" ||
-    node?.data?.mode === "local_img2video" ||
-    node?.data?.mode === "relight",
-  );
-
-  const handlePolishPrompt = async () => {
-    const sourcePrompt = String(promptValue || "").trim();
-    if (!sourcePrompt) {
-      setPromptPolishError("请先输入提示词");
-      return;
-    }
-    if (!apiFetch) {
-      setPromptPolishError("缺少 API 连接");
-      return;
-    }
-    setPromptPolishLoading(true);
-    setPromptPolishError("");
-    try {
-      const result = await polishCanvasPrompt(
-        { prompt: sourcePrompt, mode: node?.data?.mode },
-        apiFetch,
-      );
-      const variants = normalizePromptPolishVariants(result);
-      if (!variants.length) {
-        throw new Error("润色结果为空");
-      }
-      onOpenPromptPolishPicker?.({
-        title: "提示词润色",
-        sourcePrompt,
-        variants,
-        onUse: (text) => {
-          if (promptModes.includes(node?.data?.mode)) updateData(node.id, { prompt: text });
-          else updateTemplateData("note", text);
-        },
-      });
-    } catch (error) {
-      setPromptPolishError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setPromptPolishLoading(false);
-    }
-  };
 
   if (!hasConfigNode) return null;
 
@@ -463,7 +396,7 @@ const PropertyPanel = ({
     className={
       embedded
         ? "nodrag overflow-visible rounded-t-[16px] bg-[linear-gradient(180deg,rgba(248,250,252,0.98),rgba(255,255,255,0.96))] px-4 pt-3 pb-0"
-        : "w-80 bg-white border-l border-slate-200 z-40 flex flex-col shadow-[0_24px_48px_rgba(15,23,42,0.08)] shrink-0 h-full min-h-0 overflow-hidden animate-in slide-in-from-right duration-200"
+        : "w-80 bg-white z-40 flex flex-col shadow-[-4px_0_24px_rgba(0,0,0,0.03)] shrink-0 h-full min-h-0 overflow-hidden animate-in slide-in-from-right duration-200"
     }
     onMouseDown={(e) => {
       if (embedded) e.stopPropagation();
@@ -778,28 +711,10 @@ const PropertyPanel = ({
                 }
                 value={promptValue}
                 onChange={(e) => {
-                  setPromptPolishError("");
                   updateData(node.id, { prompt: e.target.value });
                 }}
               />
-
-              {showPromptPolishButton && (
-                <button
-                  type="button"
-                  onClick={handlePolishPrompt}
-                  disabled={promptPolishLoading || !String(promptValue || "").trim()}
-                  className={`absolute bottom-2 right-2 inline-flex h-7 w-7 items-center justify-center rounded-md border transition-colors ${
-                    promptPolishLoading
-                      ? "border-purple-200 bg-purple-50 text-purple-700"
-                      : "border-slate-200 bg-white text-slate-600 hover:border-purple-300 hover:bg-purple-50 hover:text-purple-700 disabled:opacity-40 disabled:cursor-not-allowed"
-                  }`}
-                  title="提示词润色"
-                >
-                  {promptPolishLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-                </button>
-              )}
             </div>
-            {promptPolishError && <div className="text-[10px] text-amber-400">{promptPolishError}</div>}
           </div>
         )}
       </div>

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from "react";
+import React, { useState, useRef, useCallback, useEffect } from "react";
 import {
   Upload,
   Image as ImageIcon,
@@ -58,17 +58,11 @@ import {
 } from "lucide-react";
 import { useAuth } from "../auth/AuthProvider";
 import { useNavigate } from "../router";
-import PreferenceSuggestionCard from "../components/agent-canvas/PreferenceSuggestionCard";
 import DramaMarkdownBlock from "../components/workbench/DramaMarkdownBlock";
-import ShotAnnotatedScriptBlock from "../components/workbench/ShotAnnotatedScriptBlock";
-import ScriptExtractionCard from "../components/workbench/ScriptExtractionCard";
-import AssetGenConfirmCard from "../components/workbench/AssetGenConfirmCard";
 import VideoPlayer from "../components/workbench/VideoPlayer";
 import ToolIconBtn from "../components/workbench/ToolIconBtn";
-import PromptPolishPickerModal from "../components/workbench/PromptPolishPickerModal";
 import SidebarBtn from "../components/workbench/SidebarBtn";
 import InlineDropdown from "../components/workbench/InlineDropdown";
-import AgentResultCardContent from "../components/workbench/AgentResultCardContent";
 import PersonaMentionTextarea from "../components/workbench/PersonaMentionTextarea";
 import PropertyPanel from "../components/workbench/PropertyPanel";
 import NodeComponent from "../components/workbench/NodeComponent";
@@ -85,9 +79,6 @@ import { useSidebar } from "../hooks/useSidebar";
 import { API_BASE } from "../config";
 import {
   EMPTY_LIST,
-  STORYBOARD_RUN_STEPS,
-  SHOT_WORKFLOW_RUN_STEPS,
-  AGENT_RESULT_CARD_WIDTH,
   NODE_TYPES,
   HIDDEN_IMAGE_CONFIG_MODES,
   VOLC_VIDEO_HD_TEMPLATE_ENUM_1,
@@ -113,50 +104,38 @@ import {
   MULTI_ANGLE_VARIANTS,
   MODES_WITHOUT_APP_AUTH,
 } from "../lib/workbenchHelpers.js";
-import {
-  HITL_FEEDBACK_UI_ENABLED,
-} from "../lib/agentHelpers.js";
 import WorkbenchHeader from "../components/workbench/WorkbenchHeader.jsx";
 import WorkbenchCanvas from "../components/workbench/WorkbenchCanvas.jsx";
 import WorkbenchRunBar from "../components/workbench/WorkbenchRunBar.jsx";
 import WorkbenchImagePreview from "../components/workbench/WorkbenchImagePreview.jsx";
 import WorkbenchStoryboardAssetCard from "../components/workbench/WorkbenchStoryboardAssetCard.jsx";
 import WorkbenchSidebar from "../components/workbench/WorkbenchSidebar.jsx";
-import WorkbenchAgentComposer from "../components/workbench/WorkbenchAgentComposer.jsx";
 import { useCanvasNodeOps } from "../hooks/useCanvasNodeOps.js";
 import { useCanvasExecutor } from "../hooks/useCanvasExecutor.js";
-import { useAgentMission } from "../hooks/useAgentMission.js";
 import WorkbenchStoryboardShotCard from "../components/workbench/WorkbenchStoryboardShotCard.jsx";
-import { useAgentChat, HITL_FEEDBACK_REASON_OPTIONS } from "../hooks/useAgentChat";
 import { useWorkbenchRun } from "../hooks/useWorkbenchRun";
 import { useWorkbenchPersistence } from "../hooks/useWorkbenchPersistence";
 import { useWorkbenchShortcuts } from "../hooks/useWorkbenchShortcuts";
 import { useWorkbenchConnections } from "../hooks/useWorkbenchConnections";
-import { useWorkbenchAgentCards } from "../hooks/useWorkbenchAgentCards";
-import { useWorkbenchToastBridge } from "../hooks/useWorkbenchToastBridge";
 import { useWorkbenchAiModels } from "../hooks/useWorkbenchAiModels";
 import { useWorkbenchApiDebug } from "../hooks/useWorkbenchApiDebug";
-import { useWorkbenchStoryboardHover } from "../hooks/useWorkbenchStoryboardHover";
 import { useConnectedInputsByNodeId } from "../hooks/useConnectedInputsByNodeId";
 import { useWorkbenchConnectionLayer } from "../hooks/useWorkbenchConnectionLayer.jsx";
-import { useWorkbenchCanvasFocus } from "../hooks/useWorkbenchCanvasFocus";
 import { useWorkbenchAssetActions } from "../hooks/useWorkbenchAssetActions";
 import { useWorkbenchAnchorActions } from "../hooks/useWorkbenchAnchorActions";
 import { useWorkbenchNodeFactory } from "../hooks/useWorkbenchNodeFactory";
 import { useWorkbenchHistoryReuse } from "../hooks/useWorkbenchHistoryReuse";
 import { useNodeElementRegistry } from "../hooks/useNodeElementRegistry";
 
-const PreferencesPanel = React.lazy(() => import("../components/agent-canvas/PreferencesPanel"));
 const WorkbenchAssetLibrary = React.lazy(() => import("../components/workbench/WorkbenchAssetLibrary.jsx"));
 const WorkbenchHistoryPanel = React.lazy(() => import("../components/workbench/WorkbenchHistoryPanel.jsx"));
-const WorkbenchRegressionDialog = React.lazy(() => import("../components/workbench/WorkbenchRegressionDialog.jsx"));
 
 
 // ==========================================
 // Config & Constants
 // ==========================================
 const GRID_SIZE = 20;
-const AGENT_COMPOSER_FILE_ACCEPT = "image/*,.csv,.tsv,.txt,.md,.markdown,.docx,.doc,text/plain,text/csv,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword";
+const generateWorkbenchId = () => Math.random().toString(36).slice(2, 11);
 const WORKBENCH_LIGHT_VARS = {
     "--bf-bg": "#f7f7f2",
     "--bf-panel": "rgba(255,255,255,0.88)",
@@ -204,7 +183,7 @@ const Workbench = () => {
   const {
     nodes, setNodes,
     connections, setConnections,
-    viewport, setViewport, viewportRef,
+    viewport, setViewport,
     selectedNodeIds, setSelectedNodeIds,
     selectedConnectionIds, setSelectedConnectionIds,
     activeNodeId, setActiveNodeId,
@@ -236,7 +215,9 @@ const Workbench = () => {
     handleCanvasDragEnter, handleCanvasDragOver, handleCanvasDragLeave, handleCanvasDrop,
     appendTemplateGraph,
     updateNodeData,
-    applyPatch: storeApplyPatch,
+    connPathMapRef,
+    isDraggingNodeIdsRef,
+    panViewportLayerRef, panGridFineRef, panGridCoarseRef,
   } = useCanvas({
     onClearAgentCardSelectionRef: clearAgentCardSelectionRef,
     onBoxSelectCompleteRef: boxSelectCompleteRef,
@@ -260,7 +241,7 @@ const Workbench = () => {
     assetLibraryDrafts, assetLibraryWorks,
     assetLibraryAssets, assetLibraryPersonas, personaMentionOptions,
     assetLibraryVersionsByWorkId,
-    activeCanvasDraft, upsertCanvasDraftSnapshot,
+    activeCanvasDraft,
     assetLibraryDetailWork, assetLibraryDetailPersona,
     assetLibraryDetailSnapshot, assetLibraryDetailDigest, assetLibraryDetailAssets,
     beginEditAssetWorkTitle, cancelEditAssetWorkTitle, commitEditAssetWorkTitle,
@@ -268,66 +249,7 @@ const Workbench = () => {
     handleAssetLibraryPersonaReferenceUpload, removeAssetLibraryItem,
   } = useAssetLibrary(canvasId);
 
-  const onRunToastForAgentRef = useRef(null);
-  const {
-    agentInput, setAgentInput,
-    agentInputFocused, setAgentInputFocused,
-    agentPromptPolishLoading, setAgentPromptPolishLoading,
-    agentPromptPolishError, setAgentPromptPolishError,
-    promptPolishDialog,
-    activeComposerActionId, setActiveComposerActionId,
-    showCanvasExamples, setShowCanvasExamples,
-    agentComposerFiles, setAgentComposerFiles,
-    agentDevMode, setAgentDevMode,
-    agentHistoryCollapsed,
-    showPreferencesPanel, setShowPreferencesPanel,
-    preferencesPanelPrefill, setPreferencesPanelPrefill,
-    preferenceNotice, setPreferenceNotice,
-    savingSuggestionId, setSavingSuggestionId,
-    savingFeedbackTargetId, setSavingFeedbackTargetId,
-    feedbackDialog, setFeedbackDialog,
-    feedbackReasonChoice, setFeedbackReasonChoice,
-    feedbackReasonNote, setFeedbackReasonNote,
-    agentResultCards, setAgentResultCards,
-    selectedAgentCardIds, setSelectedAgentCardIds,
-    activeAgentCardId, setActiveAgentCardId,
-    agentInputRef,
-    agentUploadInputRef,
-    agentComposerRef,
-    agentCardDragRef,
-    agentConversationBottomRef,
-    agentSessions,
-    activeAgentSession,
-    agentTurns,
-    activePendingTask,
-    isCanvasPromptPending,
-    isAgentMissionRunning,
-    hasActiveAgentConversation,
-    hasAgentResultCards,
-    minimizedAgentCards,
-    rightPanelContainerStyle,
-    openPromptPolishPicker,
-    closePromptPolishPicker,
-    usePromptPolishVariant,
-    handleRightPanelResizeStart,
-    toggleAgentHistoryPanel,
-    updateActiveAgentSession,
-    appendAgentTurn,
-    updateAgentTurn,
-    createAgentSession,
-    setActiveAgentSession,
-    clearActiveAgentConversation,
-    setPendingTaskForActiveSession,
-    clearPendingTaskForActiveSession,
-    refreshMemoryPreferences,
-    updateSuggestionStatus,
-    focusAgentResultCard,
-    toggleAgentResultCardCollapsed,
-    minimizeAgentResultCard,
-    handleAgentCardWheelCapture,
-    appendAssistantTurn,
-  } = useAgentChat({ apiFetch, onRunToastRef: onRunToastForAgentRef });
-
+  const agentDevMode = false;
   const {
     isRunning, setIsRunning,
     runAbortControllerRef, nodeAbortControllersRef,
@@ -406,19 +328,28 @@ const Workbench = () => {
   });
 
   const [activeArtifact, setActiveArtifact] = useState(null);
-  const {
-    hoveredStoryboardAssetCard,
-    setHoveredStoryboardAssetCard,
-    hoveredStoryboardShotCard,
-    setHoveredStoryboardShotCard,
-    storyboardAssetHoverCloseTimerRef,
-    storyboardShotHoverCloseTimerRef,
-    selectedStoryboardTarget,
-    scheduleCloseStoryboardAssetHoverCard,
-    scheduleCloseStoryboardShotHoverCard,
-    openStoryboardShotHoverCard,
-    openStoryboardAssetHoverCard,
-  } = useWorkbenchStoryboardHover({ activeArtifact });
+  const [hoveredStoryboardAssetCard, setHoveredStoryboardAssetCard] = useState(null);
+  const [hoveredStoryboardShotCard, setHoveredStoryboardShotCard] = useState(null);
+  const storyboardAssetHoverCloseTimerRef = useRef(null);
+  const storyboardShotHoverCloseTimerRef = useRef(null);
+  const scheduleCloseStoryboardAssetHoverCard = useCallback(() => {
+    if (storyboardAssetHoverCloseTimerRef.current) {
+      window.clearTimeout(storyboardAssetHoverCloseTimerRef.current);
+    }
+    storyboardAssetHoverCloseTimerRef.current = window.setTimeout(() => {
+      setHoveredStoryboardAssetCard((current) => (current?.sticky ? current : null));
+      storyboardAssetHoverCloseTimerRef.current = null;
+    }, 120);
+  }, []);
+  const scheduleCloseStoryboardShotHoverCard = useCallback(() => {
+    if (storyboardShotHoverCloseTimerRef.current) {
+      window.clearTimeout(storyboardShotHoverCloseTimerRef.current);
+    }
+    storyboardShotHoverCloseTimerRef.current = window.setTimeout(() => {
+      setHoveredStoryboardShotCard((current) => (current?.sticky ? current : null));
+      storyboardShotHoverCloseTimerRef.current = null;
+    }, 300);
+  }, []);
   // ── Phase 5: canvas node operations hook (compact ops + storyboard gen) ────
   const {
     updateStoryboardAssetStatus,
@@ -470,70 +401,26 @@ const Workbench = () => {
     setGlobalError,
   });
 
-  // ── Phase 7: agent mission hook ────────────────────────────────────────────
-  const {
-    devSuggestionLog, hitlFeedbackRows, devRegressionLog,
-    sendAgentMissionFromText, sendAgentMission,
-    confirmScriptExtraction, buildAssetCanvas,
-    skipToShotWorkflow, buildDirectVideoCanvas,
-    polishAgentPromptInput, handleAgentComposerUpload,
-    removeAgentComposerFile, handleAgentQuickAction,
-    insertCanvasPromptExample, handleCanvasExamplePick,
-    openPreferencesPanelWithSuggestion, handlePreferenceSavedFromPanel,
-    handleSuggestionConfirm, handleSuggestionIgnore,
-    handleSuggestionEdit, handleSuggestionMarkRegression,
-    closeRegressionFeedbackDialog, confirmRegressionFeedbackDialog,
-    handleTurnMarkRegression,
-    retryAgentTurn, deleteNode, runStoryboardInputFromFiles,
-  } = useAgentMission({
-    agentTurns, activeAgentSession, updateActiveAgentSession,
-    appendAgentTurn, updateAgentTurn, appendAssistantTurn,
-    setPendingTaskForActiveSession, clearPendingTaskForActiveSession,
-    agentInput, setAgentInput,
-    agentInputFocused, setAgentInputFocused,
-    agentComposerFiles, setAgentComposerFiles,
-    agentInputRef, agentUploadInputRef,
-    setActiveComposerActionId, activeComposerActionId,
-    showCanvasExamples, setShowCanvasExamples,
-    setAgentPromptPolishLoading, setAgentPromptPolishError,
-    openPromptPolishPicker,
-    feedbackDialog, setFeedbackDialog,
-    feedbackReasonChoice, setFeedbackReasonChoice,
-    feedbackReasonNote, setFeedbackReasonNote,
-    setSavingFeedbackTargetId,
-    refreshMemoryPreferences,
-    updateSuggestionStatus, setSavingSuggestionId,
-    setPreferenceNotice,
-    activeArtifact,
-    apiFetch,
-    aiChatSessionIdRef, aiChatHistoryRecordIdRef, agentDevMode,
-    setRunToast,
-    upsertCanvasDraftSnapshot,
-    setShowPreferencesPanel, setPreferencesPanelPrefill,
-    pushApiDebugDetail, updateApiDebugStatus,
-    updateNodeData, viewportRef,
-  });
+  const deleteNode = useCallback((id) => {
+    if (!id) return;
+    pushHistory();
+    setNodes((prev) => prev.filter((node) => node.id !== id));
+    setConnections((prev) => prev.filter((conn) => conn.from !== id && conn.to !== id));
+    setSelectedNodeIds((prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }, [pushHistory, setConnections, setNodes, setSelectedNodeIds]);
 
-  const { handleAgentCardMouseDown } = useWorkbenchAgentCards({
-    agentResultCards,
-    selectedAgentCardIds,
-    setSelectedAgentCardIds,
-    setActiveAgentCardId,
-    setAgentResultCards,
-    agentCardDragRef,
-    viewportRef,
-    setSelectedNodeIds,
-    setSelectedConnectionIds,
-    clearAgentCardSelectionRef,
-    boxSelectCompleteRef,
-  });
-
-  useWorkbenchToastBridge({
-    pasteToastRef,
-    onRunToastForAgentRef,
-    showRunToast,
-    setRunToast,
-  });
+  useEffect(() => {
+    pasteToastRef.current = (toast) => {
+      showRunToast(toast);
+    };
+    return () => {
+      pasteToastRef.current = null;
+    };
+  }, [pasteToastRef, showRunToast]);
 
   const connectedInputsByNodeId = useConnectedInputsByNodeId(nodes, connections);
 
@@ -558,31 +445,11 @@ const Workbench = () => {
     updateApiDebugStatus,
   });
 
-  // _applyPatch — 委托给 canvasStore.applyPatch（Immer 事务，无闭包陈旧问题）
-  // 返回值 { nodes, connections, viewport } 与原实现兼容，供 upsertCanvasDraftSnapshot 使用。
-  const _applyPatch = useCallback((patchOps) => {
-    if (!Array.isArray(patchOps) || patchOps.length === 0) return undefined;
-    return storeApplyPatch(patchOps);
-  }, [storeApplyPatch]);
-
-  const { focusCanvasNode } = useWorkbenchCanvasFocus({
-    canvasRef,
-    nodesRef,
-    selectedNodeIds,
-    setActiveNodeId,
-    setSelectedConnectionIds,
-    setSelectedNodeIds,
-    setViewport,
-    showRunToast,
-    viewportRef,
-    pushHistory,
-  });
-
   useWorkbenchShortcuts({
     activeArtifact,
     previewImage,
     nodes,
-    toggleAgentHistoryPanel,
+    toggleAgentHistoryPanel: () => {},
     setPreviewImage,
     setIsSpacePressed,
     undo,
@@ -681,9 +548,95 @@ const Workbench = () => {
     screenToCanvas,
     mousePos,
     viewport,
+    connPathMapRef,
   });
 
   const { handleNodeElementChange } = useNodeElementRegistry(nodeElementMapRef);
+
+  // Agent 画布动作处理（canvas_action SSE 事件）
+  const handleCanvasAction = useCallback((event) => {
+    const { action } = event;
+
+    if (action === "add_node") {
+      const node = event.node;
+      if (!node) return;
+      setNodes((prev) => {
+        if (prev.some((n) => n.id === node.id)) return prev; // 去重
+        return [...prev, node];
+      });
+    } else if (action === "connect") {
+      const conn = event.connection;
+      if (!conn) return;
+      setConnections((prev) => {
+        const dup = prev.some(
+          (c) => c.from === conn.from && c.to === conn.to &&
+                 (c.toHandle || "") === (conn.toHandle || "")
+        );
+        if (dup) return prev;
+        return [...prev, conn];
+      });
+    } else if (action === "select_nodes") {
+      const ids = event.ids;
+      if (!Array.isArray(ids)) return;
+      setSelectedNodeIds(new Set(ids));
+      setSelectedConnectionIds(new Set());
+      if (ids.length > 0) setActiveNodeId(ids[ids.length - 1]);
+    }
+  }, [setActiveNodeId, setConnections, setNodes, setSelectedConnectionIds, setSelectedNodeIds]);
+
+  // 在 Agent 发起画布规划前调用（保存撤销点）
+  const handleCanvasPlanStart = useCallback(() => {
+    pushHistory();
+  }, [pushHistory]);
+
+  // Agent 对话框「添加到画布」快捷操作
+  const handleAddToCanvas = useCallback((url, mediaType = "image") => {
+    if (!url) return;
+    pushHistory();
+    const center = getCanvasViewportCenterPoint();
+    const nodeId = generateWorkbenchId();
+    const isVideo = mediaType === "video" || /\.(mp4|mov|webm|avi|mkv)(\?|$)/i.test(url);
+    const newNode = {
+      id: nodeId,
+      type: NODE_TYPES.INPUT,
+      x: center.x - 140,
+      y: center.y - 110,
+      data: {
+        images: [url],
+        mediaKind: isVideo ? "video" : "image",
+        title: isVideo ? "AI 生成视频" : "AI 生成图片",
+        frameless: true,
+      },
+    };
+    setNodes((prev) => [...prev, newNode]);
+    setSelectedNodeIds(new Set([nodeId]));
+    setSelectedConnectionIds(new Set());
+    setActiveNodeId(nodeId);
+    showRunToast({ message: isVideo ? "视频已添加到画布" : "图片已添加到画布", type: "info" });
+  }, [getCanvasViewportCenterPoint, pushHistory, setActiveNodeId, setNodes, setSelectedConnectionIds, setSelectedNodeIds, showRunToast]);
+
+  const handleAgentComposerSubmit = useCallback((value) => {
+    const text = String(value || "").trim();
+    if (!text) return false;
+
+    pushHistory();
+    const center = getCanvasViewportCenterPoint();
+    const nodeId = generateWorkbenchId();
+    const nextNode = {
+      id: nodeId,
+      type: NODE_TYPES.TEXT_INPUT,
+      x: center.x - 160,
+      y: center.y - 110,
+      data: { text },
+    };
+
+    setNodes((prev) => [...prev, nextNode]);
+    setSelectedNodeIds(new Set([nodeId]));
+    setSelectedConnectionIds(new Set());
+    setActiveNodeId(nodeId);
+    showRunToast({ message: "已添加到画布", type: "info" });
+    return true;
+  }, [getCanvasViewportCenterPoint, pushHistory, setActiveNodeId, setNodes, setSelectedConnectionIds, setSelectedNodeIds, showRunToast]);
 
   return (
     <div
@@ -692,43 +645,9 @@ const Workbench = () => {
     >
       {/* Header — Phase 8: extracted to WorkbenchHeader */}
       <WorkbenchHeader
-        agentHistoryCollapsed={agentHistoryCollapsed}
-        toggleAgentHistoryPanel={toggleAgentHistoryPanel}
-        rightPanelContainerStyle={rightPanelContainerStyle}
-        handleRightPanelResizeStart={handleRightPanelResizeStart}
-        agentSessions={agentSessions}
-        activeAgentSession={activeAgentSession}
-        agentTurns={agentTurns}
-        activePendingTask={activePendingTask}
-        isAgentMissionRunning={isAgentMissionRunning}
-        hasActiveAgentConversation={hasActiveAgentConversation}
-        minimizedAgentCards={minimizedAgentCards}
-        agentResultCards={agentResultCards}
-        setActiveAgentSession={setActiveAgentSession}
-        createAgentSession={createAgentSession}
-        clearActiveAgentConversation={clearActiveAgentConversation}
-        focusAgentResultCard={focusAgentResultCard}
-        minimizeAgentResultCard={minimizeAgentResultCard}
-        agentConversationBottomRef={agentConversationBottomRef}
         agentDevMode={agentDevMode}
         isAdminUser={isAdminUser}
         apiStatus={apiStatus}
-        retryAgentTurn={retryAgentTurn}
-        handleTurnMarkRegression={handleTurnMarkRegression}
-        handleSuggestionConfirm={handleSuggestionConfirm}
-        handleSuggestionIgnore={handleSuggestionIgnore}
-        handleSuggestionEdit={handleSuggestionEdit}
-        handleSuggestionMarkRegression={handleSuggestionMarkRegression}
-        confirmScriptExtraction={confirmScriptExtraction}
-        buildAssetCanvas={buildAssetCanvas}
-        skipToShotWorkflow={skipToShotWorkflow}
-        buildDirectVideoCanvas={buildDirectVideoCanvas}
-        sendAgentMissionFromText={sendAgentMissionFromText}
-        createText2ImgTemplate={createText2ImgTemplate}
-        safeInvoke={safeInvoke}
-        savingSuggestionId={savingSuggestionId}
-        savingFeedbackTargetId={savingFeedbackTargetId}
-        focusCanvasNode={focusCanvasNode}
       />
 
       {/* Toast */}
@@ -931,9 +850,11 @@ const Workbench = () => {
             handleCanvasMouseDown, handleMouseMove, handleMouseUp, handleWheel,
             handleCanvasDragEnter, handleCanvasDragOver, handleCanvasDragLeave, handleCanvasDrop,
             getCursor, handleNodeMouseDown,
+            isDraggingNodeIdsRef,
+            panViewportLayerRef, panGridFineRef, panGridCoarseRef,
           }}
           nodeRuntime={{
-            updateNodeData, apiFetch, openPromptPolishPicker,
+            updateNodeData, apiFetch,
             imageModelOptions, videoModelOptions, resolveModelParamsForId, personaMentionOptions,
             connectedInputsByNodeId, deleteNode, pushHistory, startConnection,
             handleConnectionTargetHover, handleConnectionTargetLeave,
@@ -942,15 +863,7 @@ const Workbench = () => {
             runCompactRmbg, runCompactRemoveWatermark, runCompactThreeView, runCompactVideoUpscale,
             runVideoRmbg, runVideoLineart, runVideoSplit, createPromptQuickChain,
             cancelNodeGeneration, pendingUploadNodeId, setPendingUploadNodeId,
-            handleNodeElementChange, openStoryboardAssetHoverCard, scheduleCloseStoryboardAssetHoverCard,
-            openStoryboardShotHoverCard, runStoryboardInputFromFiles, setRunToast,
-          }}
-          agentRuntime={{
-            hasAgentResultCards, agentResultCards, agentTurns,
-            selectedAgentCardIds, activeAgentCardId,
-            setSelectedAgentCardIds, setActiveAgentCardId,
-            handleAgentCardMouseDown, toggleAgentResultCardCollapsed,
-            minimizeAgentResultCard, handleAgentCardWheelCapture, retryAgentTurn,
+            handleNodeElementChange, setRunToast,
           }}
           runBarProps={{
             onSave: saveCurrentCanvasAsWork,
@@ -960,20 +873,11 @@ const Workbench = () => {
             zoomCanvas,
           }}
           composerProps={{
-            agentComposerRef, agentInputRef, agentUploadInputRef,
-            agentInput, setAgentInput, agentInputFocused, setAgentInputFocused,
-            agentPromptPolishLoading, agentPromptPolishError, setAgentPromptPolishError,
-            agentComposerFiles, activeComposerActionId,
-            showCanvasExamples, setShowCanvasExamples,
-            isAgentMissionRunning, isCanvasPromptPending,
-            preferenceNotice, setPreferenceNotice,
-            agentDevMode, setAgentDevMode, activePendingTask,
-            selectedStoryboardTarget, hitlFeedbackRows, devSuggestionLog, devRegressionLog,
-            personaMentionOptions, isAdminUser, setActiveArtifact,
-            sendAgentMission, polishAgentPromptInput,
-            handleAgentComposerUpload, removeAgentComposerFile, handleAgentQuickAction,
-            insertCanvasPromptExample, handleCanvasExamplePick,
-            handleSuggestionEdit, openPreferencesPanelWithSuggestion,
+            availableImageModels: imageModelOptions,
+            onAddToCanvas: handleAddToCanvas,
+            onCanvasAction: handleCanvasAction,
+            onCanvasPlanStart: handleCanvasPlanStart,
+            getViewportCenter: getCanvasViewportCenterPoint,
           }}
         />
 
@@ -987,23 +891,12 @@ const Workbench = () => {
 	          })()}
 	          updateData={updateNodeData}
 	          onClose={() => setActiveNodeId(null)}
-          apiFetch={apiFetch}
-          onOpenPromptPolishPicker={openPromptPolishPicker}
           imageModelOptions={imageModelOptions}
           videoModelOptions={videoModelOptions}
           resolveModelParamsForId={resolveModelParamsForId}
           personaMentionOptions={personaMentionOptions}
         />
       </div>
-
-      <PromptPolishPickerModal
-        open={Boolean(promptPolishDialog)}
-        title={promptPolishDialog?.title || "AI 润色"}
-        sourcePrompt={promptPolishDialog?.sourcePrompt || ""}
-        variants={promptPolishDialog?.variants || EMPTY_LIST}
-        onClose={closePromptPolishPicker}
-        onUse={usePromptPolishVariant}
-      />
 
       {/* History Panel — Phase 3: extracted to WorkbenchHistoryPanel */}
       {showHistoryPanel ? (
@@ -1025,51 +918,6 @@ const Workbench = () => {
           />
         </React.Suspense>
       ) : null}
-
-      {showPreferencesPanel && (
-        <React.Suspense
-          fallback={
-            <div className="fixed right-0 top-0 z-[120] h-full w-[min(94vw,560px)] border-l border-slate-200 bg-white text-slate-700 p-4">
-              <div className="inline-flex items-center gap-2 text-xs">
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                正在加载偏好面板...
-              </div>
-            </div>
-          }
-        >
-          <PreferencesPanel
-            open={showPreferencesPanel}
-            onClose={() => {
-              setShowPreferencesPanel(false);
-              setPreferencesPanelPrefill(null);
-            }}
-            apiFetch={apiFetch}
-            onQuickExample={insertCanvasPromptExample}
-            onPreferenceSaved={handlePreferenceSavedFromPanel}
-            prefill={preferencesPanelPrefill}
-          />
-        </React.Suspense>
-      )}
-
-      {/* RegressionDialog — Phase 3: extracted to WorkbenchRegressionDialog */}
-      {HITL_FEEDBACK_UI_ENABLED && feedbackDialog ? (
-        <React.Suspense fallback={null}>
-          <WorkbenchRegressionDialog
-            show
-            dialog={feedbackDialog}
-            reasonChoice={feedbackReasonChoice}
-            setReasonChoice={setFeedbackReasonChoice}
-            reasonNote={feedbackReasonNote}
-            setReasonNote={setFeedbackReasonNote}
-            saving={!!savingFeedbackTargetId}
-            onClose={closeRegressionFeedbackDialog}
-            onConfirm={confirmRegressionFeedbackDialog}
-            reasonOptions={HITL_FEEDBACK_REASON_OPTIONS}
-          />
-        </React.Suspense>
-      ) : null}
-
-
 
       {/* StoryboardAssetCard — Phase 3: extracted to WorkbenchStoryboardAssetCard */}
       <WorkbenchStoryboardAssetCard

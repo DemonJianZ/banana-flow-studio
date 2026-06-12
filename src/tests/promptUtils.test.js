@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   buildCanvasNodePrompt,
   extractCanvasSupplementalPrompt,
-} from "../components/agent-canvas/promptUtils.js";
+} from "../lib/canvasPromptUtils.js";
 
 test("extractCanvasSupplementalPrompt reads inline supplemental prompt", () => {
   assert.equal(

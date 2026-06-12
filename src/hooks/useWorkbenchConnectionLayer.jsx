@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import {
   VIDEO_GEN_INPUT_HANDLE_LAST_FRAME,
   VIDEO_GEN_INPUT_HANDLE_MAIN,
@@ -122,14 +122,109 @@ export function useWorkbenchConnectionLayer({
   connectingSource,
   hoveredConnectTarget,
   screenToCanvas,
-  mousePos,
+  mousePos, // 保留入参兼容性，不再读取（临时连线已改为命令式 DOM 驱动）
   viewport,
+  connPathMapRef, // 由 useCanvas 传入；本 hook 负责注册各连线的 path DOM 元素
 }) {
   const pathCacheRef = useRef(new Map());
 
+  // ── 临时连线 DOM refs（命令式刷新，绕过 React reconciler） ──────────────────
+  const tempPathRef = useRef(null);
+  const tempCircleRef = useRef(null);
+
+  // 始终持有最新的 hoveredConnectTarget，避免 useEffect 闭包读到过期值
+  const hoveredConnectTargetRef = useRef(hoveredConnectTarget);
+  useEffect(() => { hoveredConnectTargetRef.current = hoveredConnectTarget; }, [hoveredConnectTarget]);
+
+  // 始终持有最新的 nodes，避免 mousemove 闭包读到过期值
+  const nodesLocalRef = useRef(nodes);
+  useEffect(() => { nodesLocalRef.current = nodes; }, [nodes]);
+
+  // 命令式 mousemove：connectingSource 激活时注册，消失时清理
+  useEffect(() => {
+    const pathEl = tempPathRef.current;
+    const circleEl = tempCircleRef.current;
+    if (!connectingSource || !pathEl) return undefined;
+
+    // 源节点锚点在拖拽开始时计算一次即可（拖线期间不会移动源节点）
+    const sourceNode = nodesLocalRef.current.find((n) => n.id === connectingSource.nodeId);
+    if (!sourceNode) return undefined;
+    const sourceAnchor = getNodeAnchorPosition(sourceNode, nodeElementMapRef.current.get(sourceNode.id), "output");
+
+    // rAF 节流：每帧最多刷新一次，减少 getBoundingClientRect + bezier 的计算频率
+    let rafId = 0;
+    let latestClientX = 0;
+    let latestClientY = 0;
+
+    const flush = () => {
+      rafId = 0;
+      const currentNodes = nodesLocalRef.current;
+      const hoverTarget = hoveredConnectTargetRef.current;
+
+      let end;
+      if (hoverTarget?.nodeId) {
+        const targetNode = currentNodes.find((n) => n.id === hoverTarget.nodeId);
+        end = targetNode
+          ? getNodeAnchorPosition(targetNode, nodeElementMapRef.current.get(targetNode.id), "input", hoverTarget.toHandle)
+          : screenToCanvas(latestClientX, latestClientY);
+      } else {
+        end = screenToCanvas(latestClientX, latestClientY);
+      }
+
+      // 障碍物只取当前可见节点，排除端点节点
+      const obstacles = currentNodes
+        .filter((n) => n.type !== "group_container" && n.id !== sourceNode.id)
+        .map((n) => getNodeBounds(n, nodeElementMapRef.current.get(n.id), CONNECTION_OBSTACLE_PADDING));
+
+      const { path } = buildAvoidingBezierPath({ start: sourceAnchor, end, obstacles });
+      pathEl.setAttribute("d", path);
+      pathEl.setAttribute("stroke-width", String(2 / viewport.zoom));
+      pathEl.style.display = "block";
+
+      if (hoverTarget?.nodeId && circleEl) {
+        const targetNode = currentNodes.find((n) => n.id === hoverTarget.nodeId);
+        if (targetNode) {
+          const anchor = getNodeAnchorPosition(
+            targetNode,
+            nodeElementMapRef.current.get(targetNode.id),
+            "input",
+            hoverTarget.toHandle,
+          );
+          circleEl.setAttribute("cx", String(anchor.x));
+          circleEl.setAttribute("cy", String(anchor.y));
+          circleEl.setAttribute("r", String(8 / viewport.zoom));
+          circleEl.setAttribute("stroke-width", String(1.6 / viewport.zoom));
+          circleEl.style.display = "block";
+        }
+      } else if (circleEl) {
+        circleEl.style.display = "none";
+      }
+    };
+
+    const onMouseMove = (e) => {
+      latestClientX = e.clientX;
+      latestClientY = e.clientY;
+      if (rafId) return;
+      rafId = window.requestAnimationFrame(flush);
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      if (rafId) window.cancelAnimationFrame(rafId);
+      if (pathEl) pathEl.style.display = "none";
+      if (circleEl) circleEl.style.display = "none";
+    };
+  // viewport.zoom 变化时重新注册，确保 strokeWidth 计算正确
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectingSource, nodeElementMapRef, screenToCanvas, viewport.zoom]);
+
   const renderConnections = useCallback(
-    ({ visibleCanvasBounds = null, visibleNodes = nodes } = {}) => {
-      const nodesById = new Map(nodes.map((node) => [node.id, node]));
+    ({ visibleCanvasBounds = null, visibleNodes = nodesLocalRef.current } = {}) => {
+      // nodesLocalRef.current 始终持有最新节点列表，但不作为 deps 触发重建。
+      // 节点 status/data 更新不再导致所有连线重渲；位置变更已由命令式 setAttribute 处理。
+      const currentNodes = nodesLocalRef.current;
+      const nodesById = new Map(currentNodes.map((node) => [node.id, node]));
       const visibleNodeIds = new Set((visibleNodes || []).map((node) => node.id));
       const obstacleBounds = (visibleNodes || [])
         .filter((node) => node.type !== "group_container")
@@ -191,6 +286,13 @@ export function useWorkbenchConnectionLayer({
               </defs>
             ) : null}
             <path
+              ref={connPathMapRef
+                ? (el) => {
+                    const entry = connPathMapRef.current.get(connection.id) || {};
+                    entry.hit = el || undefined;
+                    if (el) connPathMapRef.current.set(connection.id, entry);
+                  }
+                : undefined}
               d={path}
               stroke="transparent"
               strokeWidth="16"
@@ -205,6 +307,15 @@ export function useWorkbenchConnectionLayer({
               }}
             />
             <path
+              ref={connPathMapRef
+                ? (el) => {
+                    const entry = connPathMapRef.current.get(connection.id) || {};
+                    entry.visible = el || undefined;
+                    if (el) connPathMapRef.current.set(connection.id, entry);
+                    // 两个 path 都已卸载时清理 Map 条目，避免内存泄漏
+                    else if (!entry.hit && !entry.visible) connPathMapRef.current.delete(connection.id);
+                  }
+                : undefined}
               d={path}
               stroke={isRunning ? `url(#${gradientId})` : isInteractive ? "var(--wbn-edge-active)" : "var(--wbn-edge-idle)"}
               strokeWidth={isInteractive || isRunning ? "3" : "2"}
@@ -247,40 +358,31 @@ export function useWorkbenchConnectionLayer({
         );
       });
     },
-    [connections, deleteConnectionById, handleConnectionClick, hoveredConnectionId, isRunning, nodeElementMapRef, nodes, selectedConnectionIds, setHoveredConnectionId],
+    // nodes 已改为读 nodesLocalRef.current（ref 不触发重建），从 deps 中移除。
+    // 连线重算只在 connections / 选中状态 / 运行状态变化时触发，与节点数据更新解耦。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [connections, deleteConnectionById, handleConnectionClick, hoveredConnectionId, isRunning, nodeElementMapRef, selectedConnectionIds, setHoveredConnectionId],
   );
 
-  const renderTempConnection = useCallback(({ visibleNodes = nodes } = {}) => {
-    if (!connectingSource) return null;
-    const sourceNode = nodes.find((node) => node.id === connectingSource.nodeId);
-    if (!sourceNode) return null;
-    const sourceAnchor = getNodeAnchorPosition(sourceNode, nodeElementMapRef.current.get(sourceNode.id), "output");
-    const start = { x: sourceAnchor.x, y: sourceAnchor.y };
-    const hoverTargetNode = hoveredConnectTarget?.nodeId ? nodes.find((node) => node.id === hoveredConnectTarget.nodeId) : null;
-    const hoverTargetAnchor = hoverTargetNode
-      ? getNodeAnchorPosition(hoverTargetNode, nodeElementMapRef.current.get(hoverTargetNode.id), "input", hoveredConnectTarget?.toHandle)
-      : null;
-    const end = hoverTargetAnchor || screenToCanvas(mousePos.x, mousePos.y);
-    const obstacleBounds = (visibleNodes || [])
-      .filter((node) => node.type !== "group_container" && node.id !== sourceNode.id && node.id !== hoverTargetNode?.id)
-      .map((node) => getNodeBounds(node, nodeElementMapRef.current.get(node.id), CONNECTION_OBSTACLE_PADDING));
-    const { path } = buildAvoidingBezierPath({ start, end, obstacles: obstacleBounds });
-    return (
-      <>
-        <path d={path} stroke="#fbbf24" strokeWidth={2 / viewport.zoom} strokeDasharray="5,5" fill="none" />
-        {hoverTargetAnchor ? (
-          <circle
-            cx={hoverTargetAnchor.x}
-            cy={hoverTargetAnchor.y}
-            r={8 / viewport.zoom}
-            fill="rgba(34,211,238,0.14)"
-            stroke="#22d3ee"
-            strokeWidth={1.6 / viewport.zoom}
-          />
-        ) : null}
-      </>
-    );
-  }, [connectingSource, hoveredConnectTarget, mousePos.x, mousePos.y, nodeElementMapRef, nodes, screenToCanvas, viewport.zoom]);
+  // renderTempConnection：只负责渲染静态占位 DOM 节点，路径值由上方 useEffect 命令式写入。
+  // 不再依赖 mousePos / connectingSource / hoveredConnectTarget，deps 为空，函数引用永久稳定。
+  const renderTempConnection = useCallback(() => (
+    <>
+      <path
+        ref={tempPathRef}
+        style={{ display: "none" }}
+        stroke="#fbbf24"
+        strokeDasharray="5,5"
+        fill="none"
+      />
+      <circle
+        ref={tempCircleRef}
+        style={{ display: "none" }}
+        fill="rgba(34,211,238,0.14)"
+        stroke="#22d3ee"
+      />
+    </>
+  ), []);
 
   return { renderConnections, renderTempConnection };
 }

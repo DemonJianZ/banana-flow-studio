@@ -1,472 +1,356 @@
+"""
+agent/tools/executor.py — Tool dispatcher and implementations.
+
+生图/生视频优先走 /api/ai_chat_image_via_curl（AiChat 会员平台），
+需要 member_authorization；没有时降级到 Gemini 或 ComfyUI。
+"""
 from __future__ import annotations
 
+import asyncio
+import base64
+import os
 import time
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional
+import uuid
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from .errors import AgentToolExecutionError, AgentToolNotFoundError, AgentToolValidationError
-from .registry import AgentToolRegistry
+try:
+    from ...core.logging import sys_logger
+    from ...core.config import COMFYUI_URL
+except ImportError:
+    from core.logging import sys_logger
+    from core.config import COMFYUI_URL
+
+from ..stream import push_progress
+from .image_params import get_model_by_id
+
+if TYPE_CHECKING:
+    from ..graph.state import AgentState
+
+# ── AiChat 枚举常量（和画布工作台保持一致）──────────────────────────────────────
+_MODULE_ENUM = "3"
+_PART_ENUM_TEXT2IMG  = "203"
+_PART_ENUM_IMG2VIDEO = "204"
+
+# 轮询参数
+_POLL_INTERVAL_INIT = 2.0    # 初始间隔(s)
+_POLL_INTERVAL_MAX  = 5.0    # 最大间隔(s)
+_POLL_BACKOFF       = 1.25   # 每次增长倍数
+_POLL_TIMEOUT       = 180    # 总超时(s)
 
 
-REDACTED_KEYS = ("authorization", "token", "api_key", "cookie", "password", "secret")
-DEFAULT_TRACE_LIST_LIMIT = 50
-DEFAULT_TRACE_OBJECT_DEPTH = 4
-DEFAULT_TRACE_COLLECTION_ITEMS = 20
+def _internal_base() -> str:
+    """后端自身的 base URL，供内部 HTTP 调用。"""
+    port = os.getenv("PORT", "8082")
+    return f"http://127.0.0.1:{port}"
 
 
-def _is_redacted_key(key: str) -> bool:
-    lowered = str(key or "").strip().lower()
-    return any(marker in lowered for marker in REDACTED_KEYS)
+# ── Dispatcher ─────────────────────────────────────────────────────────────────
+
+async def execute_tool(tool_name: str, args: Dict[str, Any], state: "AgentState") -> Dict[str, Any]:
+    try:
+        if tool_name == "generate_image":
+            return await _generate_image(args, state)
+        if tool_name == "remove_background":
+            return await _remove_background(args, state)
+        if tool_name == "generate_video":
+            return await _generate_video(args, state)
+        if tool_name == "create_storyboard":
+            return await _create_storyboard(args, state)
+        return {"ok": False, "error": f"未知工具: {tool_name}"}
+    except Exception as e:
+        sys_logger.exception(f"[tool_executor] tool={tool_name} unhandled error: {e}")
+        return {"ok": False, "error": str(e)}
 
 
-def _truncate_string(text: str, limit: int = 240) -> str:
-    value = str(text or "")
-    if value.startswith("data:"):
-        head = value[:48]
-        return f"{head}...<truncated:{len(value)}>"
-    if len(value) > limit:
-        return f"{value[:limit]}...<truncated:{len(value)}>"
-    return value
+# ── generate_image ─────────────────────────────────────────────────────────────
+
+async def _generate_image(args: Dict[str, Any], state: "AgentState") -> Dict[str, Any]:
+    """
+    按用户选择的 model_id 路由到对应的生图服务：
+      aichat_pro  → AiChat 精品模型（需 member_authorization）
+      aichat_std  → AiChat 标准模型（需 member_authorization）
+      doubao      → 豆包·Seedream（Ark 直调）
+      comfyui     → ComfyUI 本地极速
+    """
+    prompt = str(args.get("prompt") or "").strip()
+    if not prompt:
+        return {"ok": False, "error": "prompt 不能为空"}
+
+    model_id = str(args.get("model_id") or "aichat_std").strip()
+    style    = str(args.get("style") or "商业白底")
+    ratio    = str(args.get("ratio") or "1:1")
+    size     = str(args.get("size") or "1024x1024")
+    full_prompt = _enrich_prompt(prompt, style)
+
+    member_auth = str(state.get("member_authorization") or "").strip()
+    model_def = get_model_by_id(model_id)
+
+    # ── 本地固定路由（image_params.py 里的备用模型名）─────────────────────────
+    if model_id == "doubao":
+        await push_progress(f"使用「豆包·Seedream」生成中…")
+        return await asyncio.to_thread(_call_doubao_image, full_prompt, ratio, size)
+
+    if model_id == "comfyui":
+        if not COMFYUI_URL:
+            return {"ok": False, "error": "本地模型未启动，请先运行 ComfyUI。"}
+        await push_progress(f"使用「本地极速」生成中…")
+        return await asyncio.to_thread(_call_comfyui_text2img, full_prompt, ratio)
+
+    # ── AiChat 平台（精品 / 标准 / 真实数字 ID）─────────────────────────────────
+    # 凡是不匹配上面本地路由的 model_id，都视为 AiChat 平台模型，
+    # 透传 ai_chat_model_id（前端传来的真实 ID 如 "4"、"13" 等均在此处理）
+    if not member_auth:
+        return {"ok": False, "error": "此模型需要会员授权，请先登录。"}
+
+    # 精品模型：优先用环境变量 AI_CHAT_MODEL_ID_NANO_BANANA_PRO，其次用传入 ID
+    if model_id == "aichat_pro":
+        real_id = str(os.getenv("AI_CHAT_MODEL_ID_NANO_BANANA_PRO") or "").strip()
+    else:
+        # aichat_std 或任何真实数字 ID（如 "4"、"13"）
+        real_id = "" if model_id == "aichat_std" else model_id
+
+    label = model_def.get("label") or f"模型 {model_id}"
+    await push_progress(f"使用「{label}」生成中…")
+    return await _aichat_submit_and_poll(
+        part_enum=_PART_ENUM_TEXT2IMG,
+        message=full_prompt,
+        authorization=member_auth,
+        extra_form={"ai_chat_model_id": real_id} if real_id else {},
+    )
 
 
-def _sanitize_trace_value(value: Any, *, depth: int = 0, max_depth: int = DEFAULT_TRACE_OBJECT_DEPTH) -> Any:
-    if depth >= max_depth:
-        return "<max-depth>"
-    if isinstance(value, dict):
-        out: Dict[str, Any] = {}
-        for index, (key, item) in enumerate(value.items()):
-            if index >= DEFAULT_TRACE_COLLECTION_ITEMS:
-                out["<truncated_keys>"] = len(value) - DEFAULT_TRACE_COLLECTION_ITEMS
+def _enrich_prompt(prompt: str, style: str) -> str:
+    style_map = {
+        "商业白底": "product photography, pure white background, professional studio lighting, sharp focus, e-commerce style",
+        "生活场景": "lifestyle photography, natural lighting, warm atmosphere, scene composition",
+        "艺术风格": "artistic illustration, creative composition, vibrant colors",
+        "产品特写": "macro photography, product close-up, detail shot, high resolution",
+    }
+    suffix = style_map.get(style, "")
+    if suffix and suffix.lower() not in prompt.lower():
+        return f"{prompt}, {suffix}"
+    return prompt
+
+
+# ── generate_video ─────────────────────────────────────────────────────────────
+
+async def _generate_video(args: Dict[str, Any], state: "AgentState") -> Dict[str, Any]:
+    """
+    通过 AiChat 平台图生视频 (part_enum=204)。
+    需要 member_authorization 和一张输入图片。
+    """
+    member_auth = str(state.get("member_authorization") or "").strip()
+    if not member_auth:
+        return {
+            "ok": False,
+            "error": "视频生成需要会员授权（member_authorization），请先登录会员平台。",
+        }
+
+    # 取输入图片：优先 args.image_url，其次上传的附件
+    image_url = str(args.get("image_url") or "").strip()
+    if not image_url:
+        for doc in (state.get("uploaded_documents") or []):
+            if doc.get("file_type") == "image" and doc.get("data_url"):
+                image_url = doc["data_url"]
                 break
-            if item is None:
-                continue
-            key_text = str(key)
-            if _is_redacted_key(key_text):
-                out[key_text] = "<redacted>"
-            else:
-                out[key_text] = _sanitize_trace_value(item, depth=depth + 1, max_depth=max_depth)
-        return out
-    if isinstance(value, list):
-        out = [_sanitize_trace_value(item, depth=depth + 1, max_depth=max_depth) for item in value[:DEFAULT_TRACE_COLLECTION_ITEMS] if item is not None]
-        if len(value) > DEFAULT_TRACE_COLLECTION_ITEMS:
-            out.append(f"<truncated_items:{len(value) - DEFAULT_TRACE_COLLECTION_ITEMS}>")
-        return out
-    if isinstance(value, tuple):
-        items = list(value)
-        out = [_sanitize_trace_value(item, depth=depth + 1, max_depth=max_depth) for item in items[:DEFAULT_TRACE_COLLECTION_ITEMS] if item is not None]
-        if len(items) > DEFAULT_TRACE_COLLECTION_ITEMS:
-            out.append(f"<truncated_items:{len(items) - DEFAULT_TRACE_COLLECTION_ITEMS}>")
-        return out
-    if isinstance(value, str):
-        return _truncate_string(value)
-    return value
+
+    if not image_url:
+        return {"ok": False, "error": "生成视频需要提供一张图片，请先上传图片。"}
+
+    prompt  = str(args.get("prompt") or "画面轻微晃动，商品保持静止。").strip()
+    duration = int(args.get("duration") or 5)
+    ratio    = str(args.get("ratio") or "9:16")
+
+    await push_progress("提交视频生成任务…")
+    result = await _aichat_submit_and_poll(
+        part_enum=_PART_ENUM_IMG2VIDEO,
+        message=prompt,
+        authorization=member_auth,
+        images=[image_url],
+        extra_form={
+            # 时长和比例参数 — 服务器会用默认值处理未传的 param_id
+        },
+    )
+    return result
 
 
-def _remove_none_values(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): _remove_none_values(item) for key, item in value.items() if item is not None}
-    if isinstance(value, list):
-        return [_remove_none_values(item) for item in value if item is not None]
-    if isinstance(value, tuple):
-        return [_remove_none_values(item) for item in value if item is not None]
-    return value
+# ── AiChat 通用：提交 + 轮询 ────────────────────────────────────────────────────
 
+async def _aichat_submit_and_poll(
+    *,
+    part_enum: str,
+    message: str,
+    authorization: str,
+    images: Optional[list] = None,
+    extra_form: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    向 /api/ai_chat_image_via_curl 提交任务，然后轮询直到完成。
+    通过 push_progress 向 SSE 流发送进度事件。
+    """
+    import httpx
 
-def _load_observability_tracer():
+    base = _internal_base()
+    submit_url = f"{base}/api/ai_chat_image_via_curl"
+
+    payload: Dict[str, Any] = {
+        "module_enum": _MODULE_ENUM,
+        "part_enum":   part_enum,
+        "message":     message,
+        "authorization": authorization,
+    }
+    if images:
+        payload["images"] = images
+    if extra_form:
+        payload.update(extra_form)
+
+    # ── 提交 ──────────────────────────────────────────────────────────────────
     try:
-        from ...observability import get_tracer
-    except Exception:  # pragma: no cover
-        try:
-            from observability import get_tracer  # type: ignore
-        except Exception:
-            return None
-    try:
-        return get_tracer()
-    except Exception:
-        return None
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(submit_url, json=payload)
+            resp.raise_for_status()
+            submit_data = resp.json()
+    except Exception as e:
+        return {"ok": False, "error": f"任务提交失败: {e}"}
 
+    task_id = submit_data.get("task_id")
+    if not task_id:
+        return {"ok": False, "error": f"任务提交失败（未返回 task_id）: {submit_data}"}
 
-@dataclass
-class AgentToolContext:
-    req_id: str = "tool"
-    session_id: Optional[str] = None
-    session_summary_present: Optional[bool] = None
-    tenant_id: Optional[str] = None
-    user_id: Optional[str] = None
-    trajectory_sink: list[Dict[str, Any]] = field(default_factory=list)
-    trace_sink: list[Dict[str, Any]] = field(default_factory=list)
-    plan_lookup: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None
-    extra: Dict[str, Any] = field(default_factory=dict)
+    sys_logger.info(f"[aichat_poll] task_id={task_id} part_enum={part_enum}")
 
+    # ── 轮询 ──────────────────────────────────────────────────────────────────
+    poll_url      = f"{base}/api/ai_chat_image_via_curl/{task_id}"
+    deadline      = time.time() + _POLL_TIMEOUT
+    interval      = _POLL_INTERVAL_INIT
+    elapsed_label = 0
 
-@dataclass
-class AgentToolResult:
-    ok: bool
-    tool_name: str
-    canonical_tool_name: str
-    output: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-    error_type: Optional[str] = None
-    latency_ms: int = 0
-    retry_count: int = 0
-    tool_version: str = ""
-    tool_hash: str = ""
-    category: str = ""
-    cost_level: str = ""
-    timeout_seconds: Optional[float] = None
-    exception: Optional[BaseException] = None
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        while time.time() < deadline:
+            await asyncio.sleep(interval)
+            elapsed_label += int(interval)
+            interval = min(interval * _POLL_BACKOFF, _POLL_INTERVAL_MAX)
 
-
-class AgentToolExecutor:
-    def __init__(self, registry: AgentToolRegistry) -> None:
-        self.registry = registry
-        self._last_call_meta: Dict[str, Any] = {}
-
-    def get_last_call_meta(self) -> Dict[str, Any]:
-        return dict(self._last_call_meta)
-
-    def execute(
-        self,
-        tool_name: str,
-        args: Optional[Dict[str, Any]] = None,
-        *,
-        context: Optional[AgentToolContext] = None,
-    ) -> Dict[str, Any]:
-        result = self.safe_execute(tool_name, args, context=context)
-        if not result.ok:
-            exc = result.exception
-            if isinstance(exc, (AgentToolExecutionError, AgentToolValidationError, AgentToolNotFoundError)):
-                raise exc
-            if exc is not None:
-                raise AgentToolExecutionError(str(result.error or exc)) from exc
-            raise AgentToolExecutionError(str(result.error or f"{tool_name} failed"))
-        return dict(result.output or {})
-
-    def safe_execute(
-        self,
-        tool_name: str,
-        args: Optional[Dict[str, Any]] = None,
-        *,
-        context: Optional[AgentToolContext] = None,
-    ) -> AgentToolResult:
-        call_context = context or AgentToolContext()
-        started = time.perf_counter()
-        payload = _remove_none_values(dict(args or {}))
-        attempts = 0
-        last_error: Optional[BaseException] = None
-        canonical_name = str(tool_name or "").strip()
-        tool_version = ""
-        tool_hash = ""
-        category = ""
-        cost_level = ""
-        timeout_seconds: Optional[float] = None
-        max_attempts = 1
-
-        try:
-            entry = self.registry.get(tool_name)
-            spec = entry.spec
-            canonical_name = spec.name
-            tool_version = spec.tool_version
-            tool_hash = spec.tool_hash
-            category = str(spec.category or "").strip()
-            cost_level = str(spec.cost_level or "").strip()
-            timeout_seconds = spec.timeout_seconds
-            allow_disabled = bool((call_context.extra or {}).get("allow_disabled_tools"))
-            if not spec.enabled and not allow_disabled:
-                raise AgentToolExecutionError(f"tool disabled: {canonical_name}")
-            payload = spec.validate_input(payload)
-            retry_cfg = dict(spec.retry or {})
-            max_attempts = max(1, int(retry_cfg.get("max_attempts") or 1))
-        except Exception as exc:
-            latency_ms = max(0, int((time.perf_counter() - started) * 1000))
-            error_text = str(exc)
-            error_type = type(exc).__name__
-            self._last_call_meta = {
-                "tool_name": canonical_name,
-                "tool_version": tool_version,
-                "tool_hash": tool_hash,
-                "category": category,
-                "cost_level": cost_level,
-                "timeout_seconds": timeout_seconds,
-                "req_id": call_context.req_id,
-                "latency_ms": latency_ms,
-                "retry_count": 0,
-                "agent_tool_registry": True,
-                "error": error_text,
-            }
-            self._append_trace(
-                call_context,
-                tool_name=tool_name,
-                canonical_tool_name=canonical_name,
-                ok=False,
-                args=payload if isinstance(payload, dict) else {},
-                output=None,
-                error={"type": error_type, "message": error_text},
-                latency_ms=latency_ms,
-                retry_count=0,
-                tool_version=tool_version,
-                tool_hash=tool_hash,
-                category=category,
-                cost_level=cost_level,
-                timeout_seconds=timeout_seconds,
-            )
-            self._emit_observability_tool_call(
-                call_context,
-                tool_name=str(tool_name or "").strip(),
-                canonical_tool_name=canonical_name,
-                input_payload=payload if isinstance(payload, dict) else {},
-                output_payload=None,
-                error=error_text,
-                latency_ms=latency_ms,
-                retry_count=0,
-                tool_version=tool_version,
-                tool_hash=tool_hash,
-                category=category,
-                cost_level=cost_level,
-                timeout_seconds=timeout_seconds,
-            )
-            return AgentToolResult(
-                ok=False,
-                tool_name=str(tool_name or "").strip(),
-                canonical_tool_name=canonical_name,
-                error=error_text,
-                error_type=error_type,
-                latency_ms=latency_ms,
-                retry_count=0,
-                tool_version=tool_version,
-                tool_hash=tool_hash,
-                category=category,
-                cost_level=cost_level,
-                timeout_seconds=timeout_seconds,
-                exception=exc,
-            )
-
-        while attempts < max_attempts:
-            attempts += 1
             try:
-                result = entry.handler(dict(payload), call_context)
-                if not isinstance(result, dict):
-                    raise AgentToolExecutionError(f"{canonical_name} returned non-object result")
-                output = dict(result)
-                output.setdefault("tool_version", spec.tool_version)
-                output.setdefault("tool_hash", spec.tool_hash)
-                output = spec.validate_output(output)
-                output.setdefault("tool_name", spec.name)
-                latency_ms = max(0, int((time.perf_counter() - started) * 1000))
-                retry_count = max(0, attempts - 1)
-                self._last_call_meta = {
-                    "tool_name": spec.name,
-                    "tool_version": spec.tool_version,
-                    "tool_hash": spec.tool_hash,
-                    "category": category,
-                    "cost_level": cost_level,
-                    "timeout_seconds": timeout_seconds,
-                    "req_id": call_context.req_id,
-                    "latency_ms": latency_ms,
-                    "retry_count": retry_count,
-                    "agent_tool_registry": True,
-                }
-                self._append_trace(
-                    call_context,
-                    tool_name=tool_name,
-                    canonical_tool_name=canonical_name,
-                    ok=True,
-                    args=payload,
-                    output=output,
-                    error=None,
-                    latency_ms=latency_ms,
-                    retry_count=retry_count,
-                    tool_version=tool_version,
-                    tool_hash=tool_hash,
-                    category=category,
-                    cost_level=cost_level,
-                    timeout_seconds=timeout_seconds,
-                )
-                self._emit_observability_tool_call(
-                    call_context,
-                    tool_name=str(tool_name or "").strip(),
-                    canonical_tool_name=canonical_name,
-                    input_payload=payload,
-                    output_payload=output,
-                    error=None,
-                    latency_ms=latency_ms,
-                    retry_count=retry_count,
-                    tool_version=tool_version,
-                    tool_hash=tool_hash,
-                    category=category,
-                    cost_level=cost_level,
-                    timeout_seconds=timeout_seconds,
-                )
-                return AgentToolResult(
-                    ok=True,
-                    tool_name=str(tool_name or "").strip(),
-                    canonical_tool_name=canonical_name,
-                    output=output,
-                    latency_ms=latency_ms,
-                    retry_count=retry_count,
-                    tool_version=tool_version,
-                    tool_hash=tool_hash,
-                    category=category,
-                    cost_level=cost_level,
-                    timeout_seconds=timeout_seconds,
-                )
-            except Exception as exc:
-                last_error = exc
-                if attempts >= max_attempts:
-                    break
+                poll_resp = await client.get(poll_url)
+                poll_resp.raise_for_status()
+                poll_data = poll_resp.json()
+            except Exception as e:
+                sys_logger.warning(f"[aichat_poll] task={task_id} poll error: {e}")
+                continue
 
-        latency_ms = max(0, int((time.perf_counter() - started) * 1000))
-        retry_count = max(0, attempts - 1)
-        error_text = str(last_error) if last_error is not None else f"{canonical_name} failed"
-        error_type = type(last_error).__name__ if last_error is not None else "AgentToolExecutionError"
-        self._last_call_meta = {
-            "tool_name": canonical_name,
-            "tool_version": tool_version,
-            "tool_hash": tool_hash,
-            "category": category,
-            "cost_level": cost_level,
-            "timeout_seconds": timeout_seconds,
-            "req_id": call_context.req_id,
-            "latency_ms": latency_ms,
-            "retry_count": retry_count,
-            "agent_tool_registry": True,
-            "error": error_text,
+            status = str(poll_data.get("status") or "").upper()
+
+            if status == "SUCCESS":
+                result = poll_data.get("result") or {}
+                url = (
+                    result.get("image_url")
+                    or result.get("video_url")
+                    or result.get("url")
+                    or ""
+                )
+                if not url:
+                    return {"ok": False, "error": "任务成功但未返回媒体 URL"}
+                media_type = "video" if result.get("video_url") else "image"
+                return {"ok": True, "url": url, "media_type": media_type, "source": "aichat", "task_id": task_id}
+
+            if status in ("FAILED", "TIMEOUT", "CANCELLED"):
+                err = poll_data.get("error") or f"任务状态: {status}"
+                return {"ok": False, "error": err}
+
+            # 还在运行，推送进度
+            progress_msg = str(poll_data.get("progress_message") or "处理中…")
+            await push_progress(f"{progress_msg}（已等待 {elapsed_label}s）")
+
+    return {"ok": False, "error": f"轮询超时（{_POLL_TIMEOUT}s），task_id={task_id}"}
+
+
+# ── remove_background ──────────────────────────────────────────────────────────
+
+async def _remove_background(args: Dict[str, Any], state: "AgentState") -> Dict[str, Any]:
+    image_url = str(args.get("image_url") or "").strip()
+    if not image_url:
+        for doc in (state.get("uploaded_documents") or []):
+            if doc.get("file_type") == "image" and doc.get("data_url"):
+                image_url = doc["data_url"]
+                break
+
+    if not image_url:
+        return {"ok": False, "error": "未找到要处理的图片，请先上传一张图片。"}
+
+    return await asyncio.to_thread(_call_comfyui_rmbg, image_url)
+
+
+def _call_comfyui_rmbg(image_url: str) -> Dict[str, Any]:
+    try:
+        from services.comfyui import run_rmbg_workflow
+
+        if image_url.startswith("data:"):
+            data_url = image_url
+        else:
+            import httpx
+            resp = httpx.get(image_url, timeout=30)
+            resp.raise_for_status()
+            mime = resp.headers.get("content-type", "image/png").split(";")[0]
+            b64 = base64.b64encode(resp.content).decode()
+            data_url = f"data:{mime};base64,{b64}"
+
+        req_id = uuid.uuid4().hex[:8]
+        output_bytes: bytes = run_rmbg_workflow(req_id=req_id, image_data_url=data_url)
+
+        if not output_bytes:
+            return {"ok": False, "error": "ComfyUI RMBG 未返回结果"}
+
+        b64 = base64.b64encode(output_bytes).decode()
+        result_data_url = f"data:image/png;base64,{b64}"
+        return {"ok": True, "url": result_data_url, "data_url": result_data_url, "source": "comfyui_rmbg"}
+    except Exception as e:
+        return {"ok": False, "error": f"RMBG: {e}"}
+
+
+# ── 豆包·Seedream ──────────────────────────────────────────────────────────────
+
+def _call_doubao_image(prompt: str, ratio: str, size: str) -> Dict[str, Any]:
+    """Synchronous Doubao Seedream image generation via Ark SDK."""
+    try:
+        from services.ark import call_doubao_image_gen
+
+        img_bytes = call_doubao_image_gen(
+            prompt=prompt,
+            size=size,
+        )
+        if not img_bytes:
+            return {"ok": False, "error": "豆包未返回图片"}
+
+        b64 = base64.b64encode(img_bytes).decode()
+        data_url = f"data:image/jpeg;base64,{b64}"
+        return {"ok": True, "url": data_url, "data_url": data_url, "source": "doubao", "prompt": prompt}
+    except Exception as e:
+        return {"ok": False, "error": f"豆包: {e}"}
+
+
+# ── ComfyUI text2img (fallback) ────────────────────────────────────────────────
+
+def _call_comfyui_text2img(prompt: str, ratio: str) -> Dict[str, Any]:
+    try:
+        from services.comfyui import run_image_z_image_turbo_workflow
+
+        wh_map = {
+            "1:1": (1024, 1024), "16:9": (1344, 768), "9:16": (768, 1344),
+            "4:3": (1152, 896),  "3:4": (896, 1152),
         }
-        self._append_trace(
-            call_context,
-            tool_name=tool_name,
-            canonical_tool_name=canonical_name,
-            ok=False,
-            args=payload,
-            output=None,
-            error={"type": error_type, "message": error_text},
-            latency_ms=latency_ms,
-            retry_count=retry_count,
-            tool_version=tool_version,
-            tool_hash=tool_hash,
-            category=category,
-            cost_level=cost_level,
-            timeout_seconds=timeout_seconds,
-        )
-        self._emit_observability_tool_call(
-            call_context,
-            tool_name=str(tool_name or "").strip(),
-            canonical_tool_name=canonical_name,
-            input_payload=payload,
-            output_payload=None,
-            error=error_text,
-            latency_ms=latency_ms,
-            retry_count=retry_count,
-            tool_version=tool_version,
-            tool_hash=tool_hash,
-            category=category,
-            cost_level=cost_level,
-            timeout_seconds=timeout_seconds,
-        )
-        return AgentToolResult(
-            ok=False,
-            tool_name=str(tool_name or "").strip(),
-            canonical_tool_name=canonical_name,
-            error=error_text,
-            error_type=error_type,
-            latency_ms=latency_ms,
-            retry_count=retry_count,
-            tool_version=tool_version,
-            tool_hash=tool_hash,
-            category=category,
-            cost_level=cost_level,
-            timeout_seconds=timeout_seconds,
-            exception=last_error,
-        )
+        width, height = wh_map.get(ratio, (1024, 1024))
+        result = run_image_z_image_turbo_workflow(prompt=prompt, width=width, height=height)
+        if not result or not result.get("image_url"):
+            return {"ok": False, "error": "ComfyUI 未返回图片"}
 
-    def _emit_observability_tool_call(
-        self,
-        context: AgentToolContext,
-        *,
-        tool_name: str,
-        canonical_tool_name: str,
-        input_payload: Optional[Dict[str, Any]],
-        output_payload: Optional[Dict[str, Any]],
-        error: Optional[str],
-        latency_ms: int,
-        retry_count: int,
-        tool_version: str,
-        tool_hash: str,
-        category: str,
-        cost_level: str,
-        timeout_seconds: Optional[float],
-    ) -> None:
-        extra = dict(context.extra or {})
-        run_id = str(extra.get("run_id") or "").strip()
-        if not run_id:
-            return
-        tracer = extra.get("tracer") or _load_observability_tracer()
-        if tracer is None or not hasattr(tracer, "tool_call"):
-            return
-        metadata = {
-            "req_id": context.req_id,
-            "session_id": context.session_id,
-            "tenant_id": context.tenant_id,
-            "user_id": context.user_id,
-            "canonical_tool_name": canonical_tool_name,
-            "tool_version": tool_version,
-            "tool_hash": tool_hash,
-            "category": category,
-            "cost_level": cost_level,
-            "timeout_seconds": timeout_seconds,
-            "latency_ms": latency_ms,
-            "retry_count": retry_count,
-        }
-        try:
-            tracer.tool_call(
-                tool_name,
-                run_id=run_id,
-                input_data=input_payload or {},
-                output_data=output_payload,
-                error=error,
-                metadata=metadata,
-            )
-        except Exception:
-            return
+        return {"ok": True, "url": result["image_url"], "data_url": result.get("data_url"),
+                "width": width, "height": height, "source": "comfyui"}
+    except Exception as e:
+        return {"ok": False, "error": f"ComfyUI: {e}"}
 
-    def _append_trace(
-        self,
-        context: AgentToolContext,
-        *,
-        tool_name: str,
-        canonical_tool_name: str,
-        ok: bool,
-        args: Dict[str, Any],
-        output: Optional[Dict[str, Any]],
-        error: Optional[Dict[str, Any]],
-        latency_ms: int,
-        retry_count: int,
-        tool_version: str,
-        tool_hash: str,
-        category: str,
-        cost_level: str,
-        timeout_seconds: Optional[float],
-    ) -> None:
-        max_depth = int((context.extra or {}).get("trace_object_depth") or DEFAULT_TRACE_OBJECT_DEPTH)
-        context.trace_sink.append(
-            {
-                "type": "AGENT_TOOL_CALL",
-                "req_id": context.req_id,
-                "tool_name": str(tool_name or "").strip(),
-                "canonical_tool_name": canonical_tool_name,
-                "tool_version": tool_version,
-                "tool_hash": tool_hash,
-                "category": category,
-                "cost_level": cost_level,
-                "timeout_seconds": timeout_seconds,
-                "ok": bool(ok),
-                "latency_ms": int(latency_ms),
-                "retry_count": int(retry_count),
-                "args": _sanitize_trace_value(args, max_depth=max_depth),
-                "output": _sanitize_trace_value(output or {}, max_depth=max_depth) if ok else None,
-                "error": _sanitize_trace_value(error or {}, max_depth=max_depth) if not ok else None,
-            }
-        )
-        trace_limit = max(1, int((context.extra or {}).get("trace_list_limit") or DEFAULT_TRACE_LIST_LIMIT))
-        if len(context.trace_sink) > trace_limit:
-            del context.trace_sink[:-trace_limit]
+
+# ── create_storyboard (Phase 3) ────────────────────────────────────────────────
+
+async def _create_storyboard(args: Dict[str, Any], state: "AgentState") -> Dict[str, Any]:
+    return {"ok": False, "error": "分镜生成功能将在 Phase 3 接入 Agent，目前请在 GeminiChat 页面使用。"}

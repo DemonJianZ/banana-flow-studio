@@ -8,8 +8,35 @@ import {
   isVideoFileLike,
   isMediaFileLike,
   readFilesAsDataUrls,
+  VIDEO_GEN_INPUT_HANDLE_LAST_FRAME,
+  normalizeConnectionTargetHandle,
 } from "../constants/workbench.jsx";
+import { getEstimatedNodeSize } from "../lib/workbenchGeometry.js";
 import { useCanvasStore } from "../stores/canvasStore.js";
+
+// ── 节点拖拽命令式渲染辅助函数 ─────────────────────────────────────────────────
+// 与 useWorkbenchConnectionLayer 中的同名函数保持逻辑一致，供 rAF 循环直接调用，
+// 避免跨 Hook 调用，也避免在 rAF 里动态 import。
+
+/** 计算节点端口的画布坐标（output=右侧中心，input=左侧中心，兼容 last-frame handle） */
+const computeNodeAnchor = (node, nodeEl, direction, handle) => {
+  const size = getEstimatedNodeSize(node, nodeEl);
+  const isLastFrame =
+    normalizeConnectionTargetHandle(handle) === VIDEO_GEN_INPUT_HANDLE_LAST_FRAME;
+  const anchorY = isLastFrame
+    ? Math.min(size.height - 24, Math.max(36, size.height / 2 + 40))
+    : size.height / 2;
+  return {
+    x: direction === "output" ? node.x + size.width : node.x,
+    y: node.y + anchorY,
+  };
+};
+
+/** 生成两点之间的三次 Bézier SVG path 字符串（无绕障，用于拖拽实时刷新） */
+const computeBezierD = (start, end) => {
+  const cx = Math.max(80, Math.abs(end.x - start.x) / 2);
+  return `M ${start.x} ${start.y} C ${start.x + cx} ${start.y}, ${end.x - cx} ${end.y}, ${end.x} ${end.y}`;
+};
 
 // ==========================================
 // Config & Constants
@@ -176,11 +203,51 @@ export function useCanvas({
   const canvasHoverClientRef = useRef(null);
   const nodesRef = useRef(nodes);
   const connectionsRef = useRef(connections);
+  // 节点拖拽命令式渲染所需的两个共享 ref：
+  // connPathMapRef  — 由 useWorkbenchConnectionLayer 填充（每条连线的 DOM path 元素）
+  // isDraggingNodeIdsRef — 拖拽期间持有参与拖拽的节点 ID 集合，NodeComponent 据此跳过 left/top
+  const connPathMapRef = useRef(new Map());
+  const isDraggingNodeIdsRef = useRef(new Set());
+  // pan 命令式渲染所需的三个 DOM refs（由 WorkbenchCanvas 挂到对应元素）
+  const panViewportLayerRef = useRef(null);
+  const panGridFineRef = useRef(null);
+  const panGridCoarseRef = useRef(null);
+  // zoom 命令式化：rAF 节流 + debounce 收口，整个缩放手势只触发一次 setViewport
+  const zoomRafIdRef = useRef(0);
+  const zoomCommitTimerRef = useRef(0);
+  const zoomPendingViewportRef = useRef(null); // 手势过程中累积的 viewport，尚未写入 state
+  // canvasBoundsRef: 缓存 canvasRef 的 DOMRect，由 ResizeObserver 维护，
+  // 供 screenToCanvas 高频调用时免于每次触发 forced layout。
+  const canvasBoundsRef = useRef({ left: 0, top: 0 });
+
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return undefined;
+    const update = () => {
+      const r = el.getBoundingClientRect();
+      canvasBoundsRef.current = { left: r.left, top: r.top };
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    // 父容器滚动时 canvas 的屏幕坐标会变，同步更新缓存
+    window.addEventListener("scroll", update, { passive: true });
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("scroll", update);
+    };
+  // canvasRef.current 在挂载后稳定，effect 只需运行一次
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // selectedNodeIdsRef：供 handleNodeMouseDown (useCallback []) 读取最新选中集合
+  const selectedNodeIdsRef = useRef(selectedNodeIds);
 
   // Sync refs
   useEffect(() => { nodesRef.current = nodes; }, [nodes]);
   useEffect(() => { connectionsRef.current = connections; }, [connections]);
   useEffect(() => { viewportRef.current = viewport; }, [viewport]);
+  useEffect(() => { selectedNodeIdsRef.current = selectedNodeIds; }, [selectedNodeIds]);
   // History
   // pushHistory / undo / redo / canUndo / canRedo 均由 useCanvasStore 提供（Phase 2 迁移）
 
@@ -257,22 +324,27 @@ export function useCanvas({
   }, [setSelectedConnectionIds, setSelectedNodeIds]);
 
   const screenToCanvas = useCallback((sx, sy) => {
-    const r = canvasRef.current?.getBoundingClientRect();
+    const { left, top } = canvasBoundsRef.current;
     return {
-      x: (sx - (r ? r.left : 0) - viewport.x) / viewport.zoom,
-      y: (sy - (r ? r.top : 0) - viewport.y) / viewport.zoom,
+      x: (sx - left - viewport.x) / viewport.zoom,
+      y: (sy - top - viewport.y) / viewport.zoom,
     };
   }, [viewport]);
 
   const zoomCanvas = (d, c = { x: window.innerWidth / 2, y: window.innerHeight / 2 }) => {
-    const z = Math.min(Math.max(viewport.zoom + d, MIN_ZOOM), MAX_ZOOM);
-    const w = screenToCanvas(c.x, c.y);
-    const r = canvasRef.current?.getBoundingClientRect();
-    setViewport({
-      x: c.x - (r ? r.left : 0) - w.x * z,
-      y: c.y - (r ? r.top : 0) - w.y * z,
-      zoom: z,
-    });
+    // 若滚轮手势正在进行（pending 未提交），以最新累积值为基准，避免跳跃
+    const base = zoomPendingViewportRef.current ?? viewport;
+    const z = Math.min(Math.max(base.zoom + d, MIN_ZOOM), MAX_ZOOM);
+    const { left, top } = canvasBoundsRef.current;
+    const wx = (c.x - left - base.x) / base.zoom;
+    const wy = (c.y - top  - base.y) / base.zoom;
+    // 工具栏点击直接提交，同时清掉可能残留的滚轮 pending
+    if (zoomCommitTimerRef.current) {
+      clearTimeout(zoomCommitTimerRef.current);
+      zoomCommitTimerRef.current = 0;
+    }
+    zoomPendingViewportRef.current = null;
+    setViewport({ x: c.x - left - wx * z, y: c.y - top - wy * z, zoom: z });
   };
 
   const arrangeCanvasNodes = useCallback(() => {
@@ -472,20 +544,117 @@ export function useCanvas({
   }, [pushHistory, onPasteToastRef, setNodes, setSelectedConnectionIds, setSelectedNodeIds, setViewport]);
 
   const handleWheel = (e) => {
-    if (isEditableElement(e.target)) {
-      return;
-    }
-    if (e.target instanceof Element && e.target.closest('[data-agent-card-root="true"]')) {
-      return;
-    }
+    if (isEditableElement(e.target)) return;
+    if (e.target instanceof Element && e.target.closest('[data-agent-card-root="true"]')) return;
     if (e.ctrlKey || e.metaKey) e.preventDefault();
-    zoomCanvas(-e.deltaY * 0.001, { x: e.clientX, y: e.clientY });
+
+    // 从"待提交的累积值"或当前 React state 取基准 viewport，避免手势中读到过时的 state
+    const base = zoomPendingViewportRef.current ?? { x: viewport.x, y: viewport.y, zoom: viewport.zoom };
+
+    const newZoom = Math.min(Math.max(base.zoom + (-e.deltaY * 0.001), MIN_ZOOM), MAX_ZOOM);
+    const { left, top } = canvasBoundsRef.current;
+    const cx = e.clientX;
+    const cy = e.clientY;
+    // 鼠标在画布坐标系中的位置（zoom 到此点保持不动）
+    const wx = (cx - left - base.x) / base.zoom;
+    const wy = (cy - top  - base.y) / base.zoom;
+
+    const newVp = {
+      x: cx - left - wx * newZoom,
+      y: cy - top  - wy * newZoom,
+      zoom: newZoom,
+    };
+    zoomPendingViewportRef.current = newVp;
+
+    // ── rAF：每帧最多刷新一次 DOM ──────────────────────────────────────────
+    if (!zoomRafIdRef.current) {
+      zoomRafIdRef.current = window.requestAnimationFrame(() => {
+        zoomRafIdRef.current = 0;
+        const vp = zoomPendingViewportRef.current;
+        if (!vp) return;
+        const pos   = `${vp.x}px ${vp.y}px`;
+        const fineS = `${GRID_SIZE * vp.zoom}px ${GRID_SIZE * vp.zoom}px`;
+        const coarS = `${GRID_SIZE * 4 * vp.zoom}px ${GRID_SIZE * 4 * vp.zoom}px`;
+        if (panViewportLayerRef.current)
+          panViewportLayerRef.current.style.transform = `translate(${vp.x}px,${vp.y}px) scale(${vp.zoom})`;
+        if (panGridFineRef.current) {
+          panGridFineRef.current.style.backgroundPosition = pos;
+          panGridFineRef.current.style.backgroundSize = fineS;
+        }
+        if (panGridCoarseRef.current) {
+          panGridCoarseRef.current.style.backgroundPosition = pos;
+          panGridCoarseRef.current.style.backgroundSize = coarS;
+        }
+      });
+    }
+
+    // ── debounce 收口：手势停止 150ms 后一次性写入 React state ────────────
+    if (zoomCommitTimerRef.current) clearTimeout(zoomCommitTimerRef.current);
+    zoomCommitTimerRef.current = setTimeout(() => {
+      zoomCommitTimerRef.current = 0;
+      const vp = zoomPendingViewportRef.current;
+      if (!vp) return;
+      zoomPendingViewportRef.current = null;
+      setViewport(vp);
+    }, 150);
   };
 
   const handleCanvasMouseDown = (e) => {
     if (e.button === 1 || (e.button === 0 && (isSpacePressed || e.altKey || e.metaKey))) {
       setInteractionMode("panning");
-      setDragStart({ x: e.clientX - viewport.x, y: e.clientY - viewport.y });
+      // pan 期间用 rAF 直接写三个 DOM 元素，完全绕过 setViewport / React re-render
+      const startClientX = e.clientX;
+      const startClientY = e.clientY;
+      const startVpX = viewport.x;
+      const startVpY = viewport.y;
+      const zoom = viewport.zoom;
+      let lastPanX = startVpX;
+      let lastPanY = startVpY;
+      let panRafId = 0;
+      let latestPanEvent = null;
+
+      const flushPanFrame = () => {
+        panRafId = 0;
+        const ev = latestPanEvent;
+        if (!ev) return;
+        const x = startVpX + (ev.clientX - startClientX);
+        const y = startVpY + (ev.clientY - startClientY);
+        lastPanX = x;
+        lastPanY = y;
+        const pos = `${x}px ${y}px`;
+        if (panViewportLayerRef.current)
+          panViewportLayerRef.current.style.transform = `translate(${x}px,${y}px) scale(${zoom})`;
+        if (panGridFineRef.current) {
+          panGridFineRef.current.style.backgroundPosition = pos;
+        }
+        if (panGridCoarseRef.current) {
+          panGridCoarseRef.current.style.backgroundPosition = pos;
+        }
+      };
+
+      const onPanMouseMove = (event) => {
+        latestPanEvent = event;
+        if (panRafId) return;
+        panRafId = window.requestAnimationFrame(flushPanFrame);
+      };
+
+      const cleanupPan = () => {
+        if (panRafId) {
+          window.cancelAnimationFrame(panRafId);
+          panRafId = 0;
+        }
+        flushPanFrame();
+        latestPanEvent = null;
+        window.removeEventListener("mousemove", onPanMouseMove);
+        window.removeEventListener("mouseup", cleanupPan, true);
+        window.removeEventListener("blur", cleanupPan);
+        setViewport((prev) => ({ ...prev, x: lastPanX, y: lastPanY }));
+        setInteractionMode("idle");
+      };
+
+      window.addEventListener("mousemove", onPanMouseMove);
+      window.addEventListener("mouseup", cleanupPan, true);
+      window.addEventListener("blur", cleanupPan);
       return;
     }
     if (e.button === 0 && !isSpacePressed && !e.altKey && !e.metaKey) {
@@ -502,12 +671,14 @@ export function useCanvas({
     }
   };
 
-  const handleNodeMouseDown = (e, nid) => {
+  // useCallback([])：所有可变值通过 ref 读取，函数引用永久稳定，是 NodeComponent React.memo 的前提
+  const handleNodeMouseDown = useCallback((e, nid) => {
     e.stopPropagation();
 
     const shouldBlockDrag = isNodeDragBlockedElement(e.target);
 
-    const s = new Set(selectedNodeIds);
+    // 从 ref 读取最新选中集合，避免 stale closure
+    const s = new Set(selectedNodeIdsRef.current);
     if (e.shiftKey || e.ctrlKey) s.has(nid) ? s.delete(nid) : s.add(nid);
     else if (!s.has(nid)) { s.clear(); s.add(nid); }
 
@@ -523,11 +694,16 @@ export function useCanvas({
     setInteractionMode("dragging_node");
     setDragStart({ x: e.clientX, y: e.clientY });
 
+    // p: 从 ref 读取最新节点列表，构建初始坐标快照
     const p = {};
-    nodes.forEach(n => {
+    nodesRef.current.forEach(n => {
       if (s.has(n.id) || n.id === nid) p[n.id] = { x: n.x, y: n.y };
     });
     setInitialNodePos(p);
+
+    // 标记拖拽节点集合：NodeComponent 会在 re-render 时跳过这些节点的 left/top 写入，
+    // 把位置控制权完全交给下面的 CSS transform，防止 React 意外覆盖。
+    isDraggingNodeIdsRef.current = new Set(Object.keys(p));
 
     if (nodeDragCleanupRef.current) {
       nodeDragCleanupRef.current();
@@ -535,16 +711,60 @@ export function useCanvas({
 
     const startX = e.clientX;
     const startY = e.clientY;
+    // 拖拽开始时从 ref 快照 zoom，确保 delta 计算在整个拖拽过程中使用一致的缩放比例
+    const dragStartZoom = viewportRef.current.zoom;
+    // 记录最后一帧实际应用的 delta，供 cleanupDrag 收口时提交最终坐标
+    let lastAppliedDx = 0;
+    let lastAppliedDy = 0;
 
     const flushNodeDragFrame = () => {
       nodeDragFrameRef.current = 0;
-      const event = nodeDragLatestEventRef.current;
-      if (!event) return;
-      const dx = (event.clientX - startX) / viewport.zoom;
-      const dy = (event.clientY - startY) / viewport.zoom;
-      setNodes((prev) =>
-        prev.map((n) => (p[n.id] ? { ...n, x: p[n.id].x + dx, y: p[n.id].y + dy } : n))
-      );
+      const ev = nodeDragLatestEventRef.current;
+      if (!ev) return;
+
+      const dx = (ev.clientX - startX) / dragStartZoom;
+      const dy = (ev.clientY - startY) / dragStartZoom;
+      lastAppliedDx = dx;
+      lastAppliedDy = dy;
+
+      // ── 1. 移动所有拖拽节点（CSS transform，走 compositor，零 layout） ───────
+      for (const nodeId of Object.keys(p)) {
+        const el = nodeElementMapRef.current.get(nodeId);
+        if (el) el.style.transform = `translate(${dx}px, ${dy}px)`;
+      }
+
+      // ── 2. 命令式刷新"至少一端在拖拽集合中"的连线路径 ──────────────────────
+      // 拖拽期间传空障碍物列表（跳过绕障路由），松手后 React 重算恢复精确路径。
+      const draggingIds = isDraggingNodeIdsRef.current;
+      const currentConns = connectionsRef.current;
+      const currentNodes = nodesRef.current;
+      const connPathMap   = connPathMapRef.current;
+
+      for (const conn of currentConns) {
+        if (!draggingIds.has(conn.from) && !draggingIds.has(conn.to)) continue;
+
+        const fromNode = currentNodes.find(n => n.id === conn.from);
+        const toNode   = currentNodes.find(n => n.id === conn.to);
+        if (!fromNode || !toNode) continue;
+
+        // 拖拽中的节点加上当前 delta，静止节点用 nodesRef 里的真实坐标
+        const fromAdj = p[fromNode.id]
+          ? { ...fromNode, x: p[fromNode.id].x + dx, y: p[fromNode.id].y + dy }
+          : fromNode;
+        const toAdj = p[toNode.id]
+          ? { ...toNode, x: p[toNode.id].x + dx, y: p[toNode.id].y + dy }
+          : toNode;
+
+        const fromAnchor = computeNodeAnchor(fromAdj, nodeElementMapRef.current.get(fromNode.id), "output");
+        const toAnchor   = computeNodeAnchor(toAdj,   nodeElementMapRef.current.get(toNode.id),   "input", conn.toHandle);
+        const d = computeBezierD(fromAnchor, toAnchor);
+
+        const els = connPathMap.get(conn.id);
+        if (els) {
+          if (els.hit)     els.hit.setAttribute("d", d);
+          if (els.visible) els.visible.setAttribute("d", d);
+        }
+      }
     };
 
     const onWindowMouseMove = (event) => {
@@ -558,12 +778,29 @@ export function useCanvas({
         window.cancelAnimationFrame(nodeDragFrameRef.current);
         nodeDragFrameRef.current = 0;
       }
+      // 先刷新最后一帧（更新 lastAppliedDx/Dy 到最终位置）
       flushNodeDragFrame();
       nodeDragLatestEventRef.current = null;
       window.removeEventListener("mousemove", onWindowMouseMove);
       window.removeEventListener("mouseup", cleanupDrag, true);
       window.removeEventListener("blur", cleanupDrag);
       nodeDragCleanupRef.current = null;
+
+      // 收口顺序很重要，防止 React re-render 时 left/top 与 transform 产生冲突：
+      // 1. 清掉所有拖拽节点的 CSS transform
+      for (const nodeId of Object.keys(p)) {
+        const el = nodeElementMapRef.current.get(nodeId);
+        if (el) el.style.transform = "";
+      }
+      // 2. 清空 isDraggingNodeIdsRef（此后 NodeComponent re-render 会恢复 left/top）
+      isDraggingNodeIdsRef.current = new Set();
+      // 3. 将最终坐标写入 Zustand，触发 React re-render（节点回到 left/top 定位）
+      const dx = lastAppliedDx;
+      const dy = lastAppliedDy;
+      setNodes((prev) =>
+        prev.map((n) => (p[n.id] ? { ...n, x: p[n.id].x + dx, y: p[n.id].y + dy } : n))
+      );
+
       setInteractionMode((prev) => {
         if (prev === "dragging_node") pushHistory();
         return "idle";
@@ -576,21 +813,21 @@ export function useCanvas({
     window.addEventListener("mousemove", onWindowMouseMove);
     window.addEventListener("mouseup", cleanupDrag, true);
     window.addEventListener("blur", cleanupDrag);
-  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // 所有可变值均通过 ref 读取，deps 为空，引用永久稳定
 
   const handleMouseMove = useCallback(
     (e) => {
-      setMousePos({ x: e.clientX, y: e.clientY });
       if (canvasRef.current?.contains(e.target)) {
         canvasHoverClientRef.current = { x: e.clientX, y: e.clientY };
       }
-      if (interactionMode === "panning") setViewport({ ...viewport, x: e.clientX - dragStart.x, y: e.clientY - dragStart.y });
-      else if (interactionMode === "selecting") {
+      // pan 已由 handleCanvasMouseDown 内的命令式 rAF 循环接管，此处只处理选区框
+      if (interactionMode === "selecting") {
         const c = screenToCanvas(e.clientX, e.clientY);
         setSelectionBox((p) => ({ ...p, curX: c.x, curY: c.y }));
       }
     },
-    [interactionMode, dragStart, viewport, screenToCanvas, setViewport]
+    [interactionMode, screenToCanvas]
   );
 
   const handleMouseUp = useCallback(() => {
@@ -618,20 +855,17 @@ export function useCanvas({
   }, [interactionMode, selectionBox, selectedNodeIds, nodes, onBoxSelectCompleteRef, pushHistory, setSelectedNodeIds, setConnectingSource]);
 
   useEffect(() => {
-    if (!["panning", "selecting"].includes(interactionMode)) return undefined;
+    // pan 已由 handleCanvasMouseDown 内的闭包自持 window 事件，此处只处理 selecting
+    if (interactionMode !== "selecting") return undefined;
 
-    const handleWindowMouseMove = (event) => {
-      handleMouseMove(event);
-    };
-    const handleWindowMouseUp = () => {
-      handleMouseUp();
-    };
+    const handleWindowMouseMove = (event) => { handleMouseMove(event); };
+    const handleWindowMouseUp   = ()      => { handleMouseUp(); };
 
     window.addEventListener("mousemove", handleWindowMouseMove);
-    window.addEventListener("mouseup", handleWindowMouseUp);
+    window.addEventListener("mouseup",   handleWindowMouseUp);
     return () => {
       window.removeEventListener("mousemove", handleWindowMouseMove);
-      window.removeEventListener("mouseup", handleWindowMouseUp);
+      window.removeEventListener("mouseup",   handleWindowMouseUp);
     };
   }, [interactionMode, handleMouseMove, handleMouseUp]);
 
@@ -894,6 +1128,8 @@ export function useCanvas({
     canvasRef, canvasDragDepthRef, canvasHoverClientRef,
     nodeDragCleanupRef, connectionDragSelectionRef, dragSelectionStyleRef,
     connectionHoverTargetRef,
+    connPathMapRef, isDraggingNodeIdsRef,
+    panViewportLayerRef, panGridFineRef, panGridCoarseRef,
     // computed
     canUndo, canRedo,
     // handlers

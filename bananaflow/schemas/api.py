@@ -158,44 +158,6 @@ class ControlnetPoseVideoResponse(BaseModel):
     video: str
 
 
-class AgentChitchatRequest(BaseModel):
-    message: str = Field(default="")
-
-class AgentChitchatResponse(BaseModel):
-    text: str = Field(default="")
-    model: str = Field(default="")
-
-
-class AgentDramaRequest(BaseModel):
-    prompt: str = Field(default="")
-    task_mode: str = Field(default="")
-    episode_count: Optional[int] = None
-    existing_script: Optional[str] = None
-
-
-class AgentDramaResponse(BaseModel):
-    text: str = Field(default="")
-    summary: str = Field(default="")
-    model: str = Field(default="")
-    mode: str = Field(default="")
-
-
-class PromptPolishRequest(BaseModel):
-    prompt: str = Field(default="")
-    mode: str = Field(default="text2img")
-
-
-class PromptPolishVariant(BaseModel):
-    label: str = Field(default="")
-    text: str = Field(default="")
-
-
-class PromptPolishResponse(BaseModel):
-    text: str = Field(default="")
-    model: str = Field(default="")
-    variants: List[PromptPolishVariant] = Field(default_factory=list)
-
-
 class AIChatImageTaskSubmitResponse(BaseModel):
     ok: bool = True
     task_id: str

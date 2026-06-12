@@ -1,11 +1,16 @@
 import os
+from pathlib import Path
 
-# ---- env ----
+# deepseek_config 在自身 import 时已加载根目录 .env，此处保留以防其他入口点直接导入 config
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    _repo_root = Path(__file__).resolve().parent.parent.parent
+    load_dotenv(dotenv_path=_repo_root / ".env", override=False)
+    load_dotenv(dotenv_path=_repo_root / "bananaflow" / ".env", override=False)
 except ImportError:
     pass
+
+from .deepseek_config import DEEPSEEK_AGENT_MODEL
 
 API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 ARK_API_KEY = os.getenv("ARK_API_KEY") or "YOUR_ARK_API_KEY_HERE"
@@ -15,9 +20,9 @@ LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
 
 MODEL_GEMINI = os.getenv("MODEL_GEMINI", "gemini-3-pro-image-preview")
 MODEL_DOUBAO = os.getenv("MODEL_DOUBAO", "doubao-seedream-4.5")
-MODEL_AGENT = os.getenv("MODEL_AGENT", "gemini-2.5-flash-lite")
-MODEL_PROMPT_POLISH = os.getenv("MODEL_PROMPT_POLISH", "gemini-2.5-flash-lite")
-MODEL_AGENT_CHAT = os.getenv("MODEL_AGENT_CHAT", "gemini-2.5-flash-lite")
+MODEL_AGENT = os.getenv("MODEL_AGENT", DEEPSEEK_AGENT_MODEL)
+MODEL_PROMPT_POLISH = os.getenv("MODEL_PROMPT_POLISH", DEEPSEEK_AGENT_MODEL)
+MODEL_AGENT_CHAT = os.getenv("MODEL_AGENT_CHAT", DEEPSEEK_AGENT_MODEL)
 AGENT_MODEL_HTTP_PROXY = os.getenv("AGENT_MODEL_HTTP_PROXY", "")
 AGENT_MODEL_HTTPS_PROXY = os.getenv("AGENT_MODEL_HTTPS_PROXY", "")
 AGENT_CHAT_HTTP_PROXY = os.getenv("AGENT_CHAT_HTTP_PROXY", "")

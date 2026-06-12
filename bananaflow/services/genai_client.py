@@ -11,10 +11,12 @@ except Exception:  # pragma: no cover - allow ollama-only runtime
 try:
     from ..core.config import API_KEY, PROJECT_ID, LOCATION, MODEL_AGENT, MODEL_GEMINI
     from ..core.logging import sys_logger
+    from .deepseek_client import DeepSeekTextClient, is_deepseek_model
     from .ollama_client import OllamaTextClient, is_ollama_model
 except Exception:  # pragma: no cover - compatible with direct python bananaflow/main.py runs
     from core.config import API_KEY, PROJECT_ID, LOCATION, MODEL_AGENT, MODEL_GEMINI
     from core.logging import sys_logger
+    from services.deepseek_client import DeepSeekTextClient, is_deepseek_model
     from services.ollama_client import OllamaTextClient, is_ollama_model
 
 _client = None
@@ -70,12 +72,32 @@ def _ollama_requested() -> bool:
     return any(is_ollama_model(os.getenv(key)) for key in env_keys)
 
 
+def _deepseek_requested() -> bool:
+    env_keys = (
+        "MODEL_AGENT",
+        "MODEL_PROMPT_POLISH",
+        "MODEL_AGENT_CHAT",
+    )
+    return is_deepseek_model(MODEL_AGENT) or any(is_deepseek_model(os.getenv(key)) for key in env_keys)
+
+
 class _UnifiedModelsAdapter:
-    def __init__(self, google_client=None, ollama_client: Optional[OllamaTextClient] = None) -> None:
+    def __init__(
+        self,
+        google_client=None,
+        ollama_client: Optional[OllamaTextClient] = None,
+        deepseek_client: Optional[DeepSeekTextClient] = None,
+    ) -> None:
         self.google_client = google_client
         self.ollama_client = ollama_client
+        self.deepseek_client = deepseek_client
 
     def generate_content(self, model, contents, config):
+        if is_deepseek_model(model):
+            if self.deepseek_client is None:
+                raise RuntimeError("DeepSeek client not initialized")
+            return self.deepseek_client.generate_content(model=model, contents=contents, config=config)
+
         if is_ollama_model(model):
             if self.ollama_client is None:
                 raise RuntimeError("Ollama client not initialized")
@@ -87,13 +109,23 @@ class _UnifiedModelsAdapter:
 
 
 class UnifiedGenAIClient:
-    def __init__(self, google_client=None, ollama_client: Optional[OllamaTextClient] = None) -> None:
-        self.models = _UnifiedModelsAdapter(google_client=google_client, ollama_client=ollama_client)
+    def __init__(
+        self,
+        google_client=None,
+        ollama_client: Optional[OllamaTextClient] = None,
+        deepseek_client: Optional[DeepSeekTextClient] = None,
+    ) -> None:
+        self.models = _UnifiedModelsAdapter(
+            google_client=google_client,
+            ollama_client=ollama_client,
+            deepseek_client=deepseek_client,
+        )
 
 
 def _build_client():
     google_client = None
     ollama_client = None
+    deepseek_client = None
 
     try:
         google_client = _build_google_client()
@@ -110,13 +142,29 @@ def _build_client():
         except Exception as e:
             sys_logger.warning(f"Ollama client init skipped: {e}")
 
-    if google_client is None and ollama_client is None:
+    if _deepseek_requested():
+        try:
+            candidate = DeepSeekTextClient()
+            if candidate.is_available():
+                deepseek_client = candidate
+            else:
+                sys_logger.warning("DeepSeek requested but DEEPSEEK_API_KEY/httpx is not configured")
+        except Exception as e:
+            sys_logger.warning(f"DeepSeek client init skipped: {e}")
+
+    if google_client is None and ollama_client is None and deepseek_client is None:
         raise RuntimeError("No LLM client is available")
 
-    return UnifiedGenAIClient(google_client=google_client, ollama_client=ollama_client)
+    return UnifiedGenAIClient(google_client=google_client, ollama_client=ollama_client, deepseek_client=deepseek_client)
 
 
 def generate_content_with_proxy(model, contents, config, http_proxy=None, https_proxy=None):
+    if is_deepseek_model(model):
+        client = get_client()
+        if client is None:
+            raise RuntimeError("AI client not initialized")
+        return client.models.generate_content(model=model, contents=contents, config=config)
+
     if is_ollama_model(model):
         client = get_client()
         if client is None:
@@ -159,11 +207,16 @@ def call_genai_retry(contents, config, req_id: str, retries=2, model=None):
     last_err = None
     for i in range(retries):
         try:
+            if is_deepseek_model(target_model):
+                return client.models.generate_content(model=target_model, contents=contents, config=config)
             return client.models.generate_content(model=target_model, contents=contents, config=config)
         except Exception as e:
             last_err = e
             sys_logger.warning(f"[{req_id}] LLM Retry {i + 1}/{retries} failed: {e}")
-            time.sleep(1 * (i + 1))
+            # 指数退避 + 随机抖动，避免多实例雷群效应
+            import random
+            sleep_sec = min(60.0, (2 ** i) + random.uniform(0, 1))
+            time.sleep(sleep_sec)
     raise RuntimeError(f"LLM Service Failed: {last_err}")
 
 
@@ -180,6 +233,11 @@ def call_genai_retry_with_proxy(
     last_err = None
     for i in range(retries):
         try:
+            if is_deepseek_model(target_model):
+                client = get_client()
+                if client is None:
+                    raise RuntimeError("AI client not initialized")
+                return client.models.generate_content(model=target_model, contents=contents, config=config)
             if is_ollama_model(target_model):
                 client = get_client()
                 if client is None:
@@ -191,5 +249,7 @@ def call_genai_retry_with_proxy(
         except Exception as e:
             last_err = e
             sys_logger.warning(f"[{req_id}] LLM Proxy Retry {i + 1}/{retries} failed: {e}")
-            time.sleep(1 * (i + 1))
+            import random
+            sleep_sec = min(60.0, (2 ** i) + random.uniform(0, 1))
+            time.sleep(sleep_sec)
     raise RuntimeError(f"LLM Service Failed: {last_err}")

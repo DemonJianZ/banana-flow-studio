@@ -9,7 +9,6 @@ import {
   ASPECT_RATIOS,
   VIDEO_HD_TEMPLATE_OPTIONS,
   isSameArtifactSelection,
-  normalizePromptPolishVariants,
   listAIChatParamValues,
   isSeedanceOmniReferenceModel,
   VIDEO_GEN_INPUT_HANDLE_MAIN,
@@ -29,7 +28,6 @@ import {
   normalizeVideoSplitSecond,
   normalizeVideoSplitSegments,
 } from "../../constants/workbench.jsx";
-import { polishCanvasPrompt } from "../../api/agentCanvas";
 import { downloadMedia } from "../../lib/downloadMedia";
 import { isVideoContent } from "../../lib/mediaType.js";
 import { buildRoleProfileStructuredOutput } from "../../lib/roleProfileStructurer.js";
@@ -52,8 +50,6 @@ import RoleInputNodeRenderer from "./node-renderers/RoleInputNodeRenderer.jsx";
 import RoleStructurerNodeRenderer from "./node-renderers/RoleStructurerNodeRenderer.jsx";
 import SimpleMediaInputControlsRenderer from "./node-renderers/SimpleMediaInputControlsRenderer.jsx";
 import SimpleMediaInputNodeRenderer from "./node-renderers/SimpleMediaInputNodeRenderer.jsx";
-import StoryboardInputNodeRenderer from "./node-renderers/StoryboardInputNodeRenderer.jsx";
-import StoryboardPlanNodeRenderer from "./node-renderers/StoryboardPlanNodeRenderer.jsx";
 import TextInputNodeRenderer from "./node-renderers/TextInputNodeRenderer.jsx";
 
 // ---- Private helpers (NodeComponent-only) ----
@@ -69,8 +65,6 @@ registerDefaultNodeRenderers({
   [NODE_TYPES.ROLE_INPUT]: RoleInputNodeRenderer,
   [NODE_TYPES.ROLE_STRUCTURER]: RoleStructurerNodeRenderer,
   [NODE_TYPES.LOCAL_ASSET_IMAGE]: LocalAssetImageNodeRenderer,
-  [NODE_TYPES.STORYBOARD_INPUT]: StoryboardInputNodeRenderer,
-  [NODE_TYPES.STORYBOARD_PLAN]: StoryboardPlanNodeRenderer,
   [NODE_TYPES.TEXT_INPUT]: TextInputNodeRenderer,
   [NODE_TYPES.OUTPUT]: OutputNodeRenderer,
 });
@@ -98,7 +92,6 @@ const NodeComponent = ({
   onMouseDown,
   updateData,
   apiFetch,
-  onOpenPromptPolishPicker,
   imageModelOptions = EMPTY_LIST,
   videoModelOptions = EMPTY_LIST,
   resolveModelParamsForId,
@@ -129,12 +122,9 @@ const NodeComponent = ({
   shouldAutoOpenUploadPicker = false,
   onAutoOpenUploadPickerHandled,
   onNodeElementChange,
-  onStoryboardMentionHover,
-  onStoryboardMentionLeave,
-  onShotChipClick,
-  onStoryboardScriptFiles,
   setRunToast,
   connectedInputNodes = EMPTY_LIST,
+  isDraggingNodeIdsRef,
 }) => {
   const [showCopied, setShowCopied] = useState(false);
   const [compactActiveIndex, setCompactActiveIndex] = useState(0);
@@ -156,8 +146,6 @@ const NodeComponent = ({
   const [videoSplitDrafts, setVideoSplitDrafts] = useState(() => buildVideoSplitDrafts(normalizeVideoSplitSegments([])));
   const [videoSplitOutputResolution, setVideoSplitOutputResolution] = useState(DEFAULT_VIDEO_SPLIT_OUTPUT_RESOLUTION);
   const [videoSplitIncludeAudio, setVideoSplitIncludeAudio] = useState(false);
-  const [promptPolishLoading, setPromptPolishLoading] = useState(false);
-  const [promptPolishError, setPromptPolishError] = useState("");
   const [inlineImageParamOptions, setInlineImageParamOptions] = useState(() => ({
     size: EMPTY_LIST,
     ratio: EMPTY_LIST,
@@ -165,10 +153,8 @@ const NodeComponent = ({
   const [inlineImageParamLoading, setInlineImageParamLoading] = useState(false);
   const [inlineImageParamError, setInlineImageParamError] = useState("");
   const [isUploadDropActive, setIsUploadDropActive] = useState(false);
-  const [storyboardDropActive, setStoryboardDropActive] = useState(false);
   const nodeRootRef = useRef(null);
   const simpleMediaUploadInputRef = useRef(null);
-  const storyboardScriptInputRef = useRef(null);
   const videoLastFrameInputRef = useRef(null);
 
   useEffect(() => {
@@ -183,33 +169,6 @@ const NodeComponent = ({
   const simpleMediaDropTitle = inputMediaKind === "image" ? "拖拽图片到此，或点击上传" : inputMediaKind === "video" ? "拖拽视频到此，或点击上传" : inputMediaKind === "audio" ? "拖拽音频到此，或点击上传" : "拖拽媒体到此，或点击上传";
   const simpleMediaSupportHint = inputMediaKind === "image" ? "支持 JPG / PNG / WebP / GIF" : inputMediaKind === "video" ? "支持 MP4 / MOV / WebM" : inputMediaKind === "audio" ? "支持 MP3 / WAV / AAC / OGG" : "支持常见图片与视频格式";
   const readSimpleMediaUploadFiles = readFilesAsDataUrls;
-
-  const submitStoryboardScriptFiles = useCallback(
-    (files) => {
-      const list = Array.from(files || []).filter(Boolean);
-      if (!list.length || node.data.status === "running") return;
-      onStoryboardScriptFiles?.(node.id, list);
-    },
-    [node.data.status, node.id, onStoryboardScriptFiles],
-  );
-
-  const handleStoryboardScriptInputChange = useCallback(
-    (event) => {
-      submitStoryboardScriptFiles(event.target.files);
-      event.target.value = "";
-    },
-    [submitStoryboardScriptFiles],
-  );
-
-  const handleStoryboardScriptDrop = useCallback(
-    (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      setStoryboardDropActive(false);
-      submitStoryboardScriptFiles(event.dataTransfer?.files);
-    },
-    [submitStoryboardScriptFiles],
-  );
 
   const handleFileUpload = (e) => {
     const files = Array.from(e.target.files || []).filter((file) => {
@@ -267,37 +226,6 @@ const NodeComponent = ({
     navigator.clipboard.writeText(info);
     setShowCopied(true);
     setTimeout(() => setShowCopied(false), 2000);
-  };
-
-  const handlePolishTextInputPrompt = async () => {
-    const sourcePrompt = String(node.data.text || "").trim();
-    if (!sourcePrompt) {
-      setPromptPolishError("请先输入提示词");
-      return;
-    }
-    if (!apiFetch) {
-      setPromptPolishError("缺少 API 连接");
-      return;
-    }
-    setPromptPolishLoading(true);
-    setPromptPolishError("");
-    try {
-      const result = await polishCanvasPrompt({ prompt: sourcePrompt, mode: "text2img" }, apiFetch);
-      const variants = normalizePromptPolishVariants(result);
-      if (!variants.length) {
-        throw new Error("润色结果为空");
-      }
-      onOpenPromptPolishPicker?.({
-        title: "提示词润色",
-        sourcePrompt,
-        variants,
-        onUse: (text) => updateData(node.id, { text }),
-      });
-    } catch (error) {
-      setPromptPolishError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setPromptPolishLoading(false);
-    }
   };
 
   const isProcessor = node.type === NODE_TYPES.PROCESSOR;
@@ -970,6 +898,9 @@ const NodeComponent = ({
     : "";
   const showFloatingDeleteButton = Boolean(onDelete);
   const showFloatingRetryButton = !isCompactInput && !isTextInputNode && !isStoryboardInputNode && !isRoleInputNode && !isRoleStructurerNode && !isSimpleMediaInputNode && !isInlineImageGenNode && !isOutput && node.data.status === "error";
+  // isDraggingNodeIdsRef 是一个 ref（不触发 re-render），在渲染时直接读取当前值。
+  // 拖拽期间为 true → getNodeShellStyle 跳过 left/top，由 CSS transform 独占位置。
+  const isDragging = isDraggingNodeIdsRef?.current?.has(node.id) ?? false;
   const nodeShellStyle = getNodeShellStyle({
     node,
     isVideoGen,
@@ -977,6 +908,7 @@ const NodeComponent = ({
     isStoryboardPlanNode,
     isStoryboardInputNode,
     isLocalAssetImageNode,
+    isDragging,
   });
   const handleStoryboardWheelCapture = isStoryboardPlanNode
     ? (event) => {
@@ -1007,7 +939,11 @@ const NodeComponent = ({
       <div
         ref={nodeRootRef}
         className="absolute"
-        style={{ left: node.x, top: node.y, width: gw, height: gh, zIndex: 0, userSelect: "none" }}
+        style={{
+          left: node.x, top: node.y,
+          willChange: isDragging ? "transform" : undefined,
+          width: gw, height: gh, zIndex: 0, userSelect: "none",
+        }}
         onMouseDown={onMouseDown}
       >
         <div
@@ -1039,7 +975,7 @@ const NodeComponent = ({
       onMouseDown={onMouseDown}
       onWheelCapture={handleStoryboardWheelCapture}
     >
-      {!isCompactInput && !isRoleInputNode && !isLocalAssetImageNode ? <NodeHeader node={node} title={title} /> : null}
+      {!isCompactInput && !isRoleInputNode && !isLocalAssetImageNode && !node.data?.frameless ? <NodeHeader node={node} title={title} /> : null}
 
       <NodeFloatingActions
         showRetry={showFloatingRetryButton}
@@ -1053,7 +989,6 @@ const NodeComponent = ({
           node={node}
           updateData={updateData}
           apiFetch={apiFetch}
-          onOpenPromptPolishPicker={onOpenPromptPolishPicker}
           imageModelOptions={imageModelOptions}
           videoModelOptions={videoModelOptions}
           resolveModelParamsForId={resolveModelParamsForId}
@@ -1247,42 +1182,14 @@ const NodeComponent = ({
           />
         )}
 
-        {isStoryboardInputNode && NodeRenderer && (
-          <NodeRenderer
-            node={node}
-            inputRef={storyboardScriptInputRef}
-            dropActive={storyboardDropActive}
-            setDropActive={setStoryboardDropActive}
-            onInputChange={handleStoryboardScriptInputChange}
-            onDrop={handleStoryboardScriptDrop}
-          />
-        )}
-
         {/* Text input */}
         {isTextInputNode && NodeRenderer && (
           <NodeRenderer
             node={node}
             updateData={updateData}
-            apiFetch={apiFetch}
             personas={mergedMentionOptions}
-            promptPolishLoading={promptPolishLoading}
-            promptPolishError={promptPolishError}
-            setPromptPolishError={setPromptPolishError}
-            onPolish={handlePolishTextInputPrompt}
           />
         )}
-
-        {isStoryboardPlanNode && NodeRenderer ? (
-          <NodeRenderer
-            node={node}
-            updateData={updateData}
-            activeArtifact={activeArtifact}
-            onSelectArtifact={onSelectArtifact}
-            onStoryboardMentionHover={onStoryboardMentionHover}
-            onStoryboardMentionLeave={onStoryboardMentionLeave}
-            onShotChipClick={onShotChipClick}
-          />
-        ) : null}
 
         {isLocalAssetImageNode && NodeRenderer ? <NodeRenderer node={node} /> : null}
       </div>

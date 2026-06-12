@@ -5,8 +5,6 @@ import PropertyPanel from "./PropertyPanel";
 export default function VideoGenInlinePanel({
   node,
   updateData,
-  apiFetch,
-  onOpenPromptPolishPicker,
   imageModelOptions,
   videoModelOptions,
   resolveModelParamsForId,
@@ -88,8 +86,6 @@ export default function VideoGenInlinePanel({
         node={node}
         updateData={updateData}
         onClose={() => {}}
-        apiFetch={apiFetch}
-        onOpenPromptPolishPicker={onOpenPromptPolishPicker}
         imageModelOptions={imageModelOptions}
         videoModelOptions={videoModelOptions}
         resolveModelParamsForId={resolveModelParamsForId}

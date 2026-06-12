@@ -38,7 +38,7 @@ import {
   normalizeConnectionTargetHandle,
   listAIChatParamChoiceOptions,
 } from "../constants/workbench.jsx";
-import { buildCanvasNodePrompt } from "../components/agent-canvas/promptUtils.js";
+import { buildCanvasNodePrompt } from "../lib/canvasPromptUtils.js";
 import { cloneCanvasNodeLight } from "../hooks/useCanvas.js";
 import { isVideoContent } from "../lib/mediaType.js";
 import { buildRoleProfileStructuredOutput } from "../lib/roleProfileStructurer.js";

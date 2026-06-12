@@ -43,7 +43,7 @@ export default function WorkbenchSidebar({
   sidebarVideoCreateMenuCloseTimerRef,
   sidebarWorkflowMenuCloseTimerRef,
 
-  // ── Upload refs (from useAgentChat) ──────────────────────────────────────
+  // ── Upload refs ──────────────────────────────────────────────────────────
   sidebarImageUploadInputRef,
   sidebarVideoUploadInputRef,
 
@@ -267,7 +267,7 @@ export default function WorkbenchSidebar({
   return (
     <>
       {/* ── Main sidebar strip ─────────────────────────────────────────────── */}
-      <div className="absolute left-4 top-1/2 z-40 flex -translate-y-1/2 shrink-0 flex-col items-center gap-2">
+      <div className="wbn-floating absolute left-4 top-1/2 z-40 flex -translate-y-1/2 shrink-0 flex-col items-center gap-1.5 rounded-[28px] p-1.5">
 
         {/* Upload button */}
         <div
@@ -290,12 +290,11 @@ export default function WorkbenchSidebar({
             }, 140);
           }}
         >
-          <div className="mx-auto flex w-full rounded-[32px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.96)] p-1.5 shadow-[0_4px_16px_rgba(0,0,0,0.06)] backdrop-blur-xl">
+          <div className="mx-auto flex w-full rounded-[20px]">
             <button
               type="button"
               onClick={() => {}}
-              className="animate-bf-breathe flex h-11 w-full scale-[1.05] items-center justify-center rounded-[24px] border border-[#B9E975] bg-[linear-gradient(135deg,#A7E163_0%,#8FD14F_100%)] text-[#1F2937] transition-all duration-200 ease-in-out hover:scale-[1.075] hover:brightness-[1.02]"
-              style={{ boxShadow: "0 0 0 4px rgba(163,230,53,0.15), 0 8px 20px rgba(0,0,0,0.12)" }}
+              className="flex h-10 w-full items-center justify-center rounded-[18px] text-slate-600 transition-colors duration-150 hover:bg-slate-100 hover:text-slate-900"
               title="图片/视频上传"
               aria-label="图片/视频上传"
             >
@@ -304,7 +303,7 @@ export default function WorkbenchSidebar({
           </div>
           {showSidebarUploadMenu ? (
             <div
-              className="absolute left-[calc(100%+14px)] top-1/2 z-[58] w-48 -translate-y-1/2 rounded-[24px] border border-slate-200 bg-[rgba(255,255,255,0.98)] p-2 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
+              className="wbn-floating-strong absolute left-[calc(100%+14px)] top-1/2 z-[58] w-48 -translate-y-1/2 rounded-[var(--wbn-floating-radius)] p-2"
               onMouseEnter={() => {
                 if (sidebarUploadMenuCloseTimerRef.current) { window.clearTimeout(sidebarUploadMenuCloseTimerRef.current); sidebarUploadMenuCloseTimerRef.current = null; }
                 setShowSidebarUploadMenu(true);
@@ -342,9 +341,11 @@ export default function WorkbenchSidebar({
           ) : null}
         </div>
 
+        <div className="h-px w-8 bg-black/[0.06]" />
+
         {/* Sidebar item list */}
         <div
-          className="flex h-auto flex-col items-center rounded-[32px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.9)] px-2 py-2.5 shadow-[0_4px_16px_rgba(0,0,0,0.06)] backdrop-blur-xl select-none"
+          className="flex h-auto flex-col items-center rounded-[20px] px-2 py-2 select-none"
           style={{ WebkitOverflowScrolling: "touch", width: leftSidebarWidth }}
         >
           <div className="w-full overflow-visible">
@@ -352,9 +353,11 @@ export default function WorkbenchSidebar({
           </div>
         </div>
 
+        <div className="h-px w-8 bg-black/[0.06]" />
+
         {/* Undo / Redo */}
         <div className="shrink-0" style={{ width: leftSidebarWidth }}>
-          <div className="mx-auto flex w-full flex-col items-center gap-1.5 rounded-[32px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.9)] px-2 py-1.5 shadow-[0_4px_16px_rgba(0,0,0,0.06)] backdrop-blur-xl">
+          <div className="mx-auto flex w-full flex-col items-center gap-1.5 rounded-[20px] px-2 py-1">
             {[
               { action: undo, can: canUndo, icon: Undo, label: "撤销" },
               { action: redo, can: canRedo, icon: Redo, label: "重做" },
@@ -376,7 +379,7 @@ export default function WorkbenchSidebar({
       <div className="absolute bottom-4 left-4 z-40 shrink-0" style={{ width: leftSidebarWidth }}>
         <details className="relative group">
           <summary
-            className="list-none mx-auto flex h-11 w-11 cursor-pointer items-center justify-center rounded-full border border-[#E5E7EB] bg-[rgba(255,255,255,0.9)] text-slate-700 shadow-[0_4px_16px_rgba(0,0,0,0.06)] backdrop-blur-xl hover:bg-[#F8FAFC] hover:text-slate-900 [&::-webkit-details-marker]:hidden"
+            className="wbn-floating list-none mx-auto flex h-11 w-11 cursor-pointer items-center justify-center rounded-full text-slate-700 hover:bg-[#F8FAFC] hover:text-slate-900 [&::-webkit-details-marker]:hidden"
             title={memberLabel}
           >
             {memberAvatar ? (
@@ -385,7 +388,7 @@ export default function WorkbenchSidebar({
               <span className="text-xs font-semibold">{String(memberLabel || "G").slice(0, 1).toUpperCase()}</span>
             )}
           </summary>
-          <div className="absolute bottom-full left-0 z-[70] mb-2 w-56 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.96)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.1)] backdrop-blur-xl">
+          <div className="wbn-floating-strong absolute bottom-full left-0 z-[70] mb-2 w-56 rounded-[var(--wbn-floating-radius)] p-3">
             <div className="flex items-center gap-3">
               <div className="h-11 w-11 overflow-hidden rounded-xl border border-slate-200 bg-slate-100">
                 {memberAvatar
@@ -430,7 +433,7 @@ export default function WorkbenchSidebar({
       {/* ── Hover preview tooltip ─────────────────────────────────────────────── */}
       {hoveredSidebarPreview ? (
         <div
-          className="pointer-events-none absolute z-[55] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.96)] px-4 py-4 text-left shadow-[0_20px_44px_rgba(15,23,42,0.1)] backdrop-blur-xl"
+          className="wbn-floating-strong pointer-events-none absolute z-[55] w-72 -translate-y-1/2 rounded-[var(--wbn-floating-radius)] px-4 py-4 text-left"
           style={{ left: leftSidebarWidth + 18, top: hoveredSidebarPreview.top }}
         >
           <div className="absolute left-[-6px] top-1/2 h-3 w-3 -translate-y-1/2 rotate-45 border-l border-t border-[#E5E7EB] bg-[rgba(255,255,255,0.96)]" />
@@ -450,7 +453,7 @@ export default function WorkbenchSidebar({
       {sidebarNodeInputMenu ? (
         <div
           data-sidebar-node-input-menu="true"
-          className="absolute z-[58] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.98)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
+          className="wbn-floating-strong absolute z-[58] w-72 -translate-y-1/2 rounded-[var(--wbn-floating-radius)] p-3"
           style={{ left: leftSidebarWidth + 18, top: sidebarNodeInputMenu.top }}
           onMouseEnter={() => clearHoverMenuTimer(sidebarNodeInputMenuCloseTimerRef)}
           onMouseLeave={() => scheduleHoverMenuClose(sidebarNodeInputMenuCloseTimerRef, setSidebarNodeInputMenu)}
@@ -485,7 +488,7 @@ export default function WorkbenchSidebar({
       {sidebarWorkflowMenu ? (
         <div
           data-sidebar-workflow-menu="true"
-          className="absolute z-[58] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.98)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
+          className="wbn-floating-strong absolute z-[58] w-72 -translate-y-1/2 rounded-[var(--wbn-floating-radius)] p-3"
           style={{ left: leftSidebarWidth + 18, top: sidebarWorkflowMenu.top }}
           onMouseEnter={() => clearHoverMenuTimer(sidebarWorkflowMenuCloseTimerRef)}
           onMouseLeave={() => scheduleHoverMenuClose(sidebarWorkflowMenuCloseTimerRef, setSidebarWorkflowMenu)}
@@ -523,7 +526,7 @@ export default function WorkbenchSidebar({
       {sidebarImageCreateMenu ? (
         <div
           data-sidebar-image-create-menu="true"
-          className="absolute z-[58] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.98)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
+          className="wbn-floating-strong absolute z-[58] w-72 -translate-y-1/2 rounded-[var(--wbn-floating-radius)] p-3"
           style={{ left: leftSidebarWidth + 18, top: sidebarImageCreateMenu.top }}
           onMouseEnter={() => clearHoverMenuTimer(sidebarImageCreateMenuCloseTimerRef)}
           onMouseLeave={() => scheduleHoverMenuClose(sidebarImageCreateMenuCloseTimerRef, setSidebarImageCreateMenu)}
@@ -555,7 +558,7 @@ export default function WorkbenchSidebar({
       {sidebarVideoCreateMenu ? (
         <div
           data-sidebar-video-create-menu="true"
-          className="absolute z-[58] w-72 -translate-y-1/2 rounded-[24px] border border-[#E5E7EB] bg-[rgba(255,255,255,0.98)] p-3 shadow-[0_20px_44px_rgba(15,23,42,0.12)] backdrop-blur-xl"
+          className="wbn-floating-strong absolute z-[58] w-72 -translate-y-1/2 rounded-[var(--wbn-floating-radius)] p-3"
           style={{ left: leftSidebarWidth + 18, top: sidebarVideoCreateMenu.top }}
           onMouseEnter={() => clearHoverMenuTimer(sidebarVideoCreateMenuCloseTimerRef)}
           onMouseLeave={() => scheduleHoverMenuClose(sidebarVideoCreateMenuCloseTimerRef, setSidebarVideoCreateMenu)}

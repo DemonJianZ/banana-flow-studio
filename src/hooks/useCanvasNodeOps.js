@@ -39,7 +39,7 @@ import {
   runVideoLineartTask,
   runVideoRmbgTask,
   runVideoSplitTask,
-} from "../api/agentCanvas";
+} from "../api/canvasVideoTasks";
 import {
   NODE_TYPES,
   getReferenceNodeTitle,

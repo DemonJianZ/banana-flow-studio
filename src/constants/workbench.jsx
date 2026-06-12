@@ -13,41 +13,8 @@ import {
   Film,
   Clapperboard,
 } from "lucide-react";
-import { extractProductKeyword } from "../api/agentCanvas";
-import { buildCanvasNodePrompt } from "../components/agent-canvas/promptUtils";
-
-// ==========================================
-// Run Steps
-// ==========================================
-export const AGENT_RUN_STEPS = [
-  "推断受众",
-  "生成脚本",
-  "合规扫描",
-  "素材匹配",
-  "生成剪辑计划",
-];
-
-export const STORYBOARD_RUN_STEPS = [
-  "读取剧本",
-  "拆分场景",
-  "设计镜头",
-  "匹配资产",
-  "搭建生产工作流",
-];
-
-export const SHOT_WORKFLOW_RUN_STEPS = [
-  "读取剧本",
-  "拆分镜头",
-  "判断文生图/图生图",
-  "生成镜头提示词",
-  "搭建出图工作流",
-];
-
-export const DRAMA_RUN_STEPS = [
-  "理解需求",
-  "创作短剧",
-  "整理输出",
-];
+import { extractProductKeyword } from "../lib/productKeyword.js";
+import { buildCanvasNodePrompt } from "../lib/canvasPromptUtils.js";
 
 // ==========================================
 // Script Brief Options
@@ -67,7 +34,6 @@ export const SCRIPT_AUDIENCE_OPTIONS = [
 // ==========================================
 // Misc Constants
 // ==========================================
-export const AGENT_RESULT_CARD_WIDTH = 460;
 export const EMPTY_LIST = Object.freeze([]);
 
 // ==========================================
@@ -399,23 +365,6 @@ export const buildInitialScriptBrief = (missionText, product = "") => {
 };
 
 // ==========================================
-// Agent Result Card Utilities
-// ==========================================
-export const getAgentResultCardWidth = () => AGENT_RESULT_CARD_WIDTH;
-
-export const getAgentTurnSteps = (turn) => {
-  if (turn?.intent === "DRAMA") return DRAMA_RUN_STEPS;
-  if (turn?.intent === "STORYBOARD") return STORYBOARD_RUN_STEPS;
-  if (turn?.intent === "SHOT_WORKFLOW") return SHOT_WORKFLOW_RUN_STEPS;
-  return AGENT_RUN_STEPS;
-};
-
-export const getAgentTurnStepLabel = (turn) => {
-  const steps = getAgentTurnSteps(turn);
-  return steps[Math.min(turn?.stepIndex || 0, steps.length - 1)];
-};
-
-// ==========================================
 // Node / Canvas Constants
 // ==========================================
 export const NODE_TYPES = {
@@ -522,34 +471,6 @@ export const listAIChatParamChoiceOptions = (paramList, keywords = []) => {
       return { value, label };
     })
     .filter(Boolean);
-};
-
-// ==========================================
-// Prompt Polish Helpers
-// ==========================================
-export const normalizePromptPolishVariants = (result) => {
-  const rawVariants = Array.isArray(result?.variants) ? result.variants : [];
-  const variants = [];
-  const seen = new Set();
-
-  rawVariants.forEach((item, index) => {
-    const text = String(item?.text || "").trim();
-    if (!text || seen.has(text)) return;
-    seen.add(text);
-    variants.push({
-      label: String(item?.label || `版本${index + 1}`).trim() || `版本${index + 1}`,
-      text,
-    });
-  });
-
-  if (!variants.length) {
-    const text = String(result?.text || "").trim();
-    if (text) {
-      variants.push({ label: "版本1", text });
-    }
-  }
-
-  return variants.slice(0, 3);
 };
 
 // ==========================================

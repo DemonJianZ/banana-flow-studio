@@ -42,10 +42,14 @@ export function getNodeShellStyle({
   isStoryboardPlanNode,
   isStoryboardInputNode,
   isLocalAssetImageNode,
+  isDragging,
 }) {
   return {
+    // left/top 始终保留作为静止基准；拖拽时 rAF 在此基础上叠加 style.transform 提供位移。
+    // React 的 style diff 从不写 transform 字段，不会覆盖命令式赋值。
     left: node.x,
     top: node.y,
+    willChange: isDragging ? "transform" : undefined,
     zIndex: isVideoGen ? 120 : selected ? 20 : undefined,
     ...(isStoryboardPlanNode
       ? { width: 1280, maxWidth: 1280 }
@@ -115,6 +119,12 @@ export function getNodeShellClass({
     } ${selectedNodeShellClass}`;
   }
   if (isInlineImageGenNode || isSimpleMediaInputNode) {
+    // frameless：agent 生成图片添加到画布时不显示外框
+    if (node.data?.frameless) {
+      return `absolute wbn-node w-[280px] overflow-hidden flex flex-col transition-colors duration-200 ${
+        selected ? "ring-2 ring-cyan-300" : ""
+      } ${selectedNodeShellClass}`;
+    }
     return `absolute wbn-node w-[280px] overflow-hidden border flex flex-col transition-colors duration-200 ${
       selected ? "border-cyan-300" : ""
     } ${selectedNodeShellClass}`;
